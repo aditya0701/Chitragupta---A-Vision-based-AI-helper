@@ -68,12 +68,14 @@ class ChitraguptAgent:
     """
     The core agent that:
     1. Takes an image + prompt
-    2. Calls backend.vision() to describe the image (Stage 1)
-    3. Stores description in frame buffer for change detection
-    4. Calls backend.chat() with context + prompt (Stage 2)
-    5. Parses tool calls from the response
-    6. Executes tools and returns results
-    7. Maintains conversation memory
+    2. For backends with separate vision/reasoning models (SPLIT_VISION_REASONING):
+       calls backend.vision() first (Stage 1), then backend.chat() with the
+       resulting description (Stage 2) — two calls, only when unavoidable.
+       For single multimodal backends: passes the image straight into
+       backend.chat() alongside the prompt — one call.
+    3. Parses tool calls from the response
+    4. Executes tools and returns results
+    5. Maintains conversation memory
     """
 
     def __init__(self, backend: VisionBackend, tools: Optional[ToolRegistry] = None):
@@ -101,9 +103,15 @@ class ChitraguptAgent:
         if not is_live_frame:
             self.memory.add("user", prompt)
 
+        split_stages = image_base64 and self.backend.SPLIT_VISION_REASONING
+
         # ── Stage 1: Vision ──────────────────────────────────────────────
+        # Only backends with genuinely separate vision/reasoning models
+        # (Colab's qwen3-vl + qwen3) need this as its own call. API-mode
+        # backends get the image passed straight into the single reasoning
+        # call below instead, since one multimodal call covers both.
         scene_description = None
-        if image_base64:
+        if split_stages:
             scene_description = await self.backend.vision(
                 image_base64=image_base64,
                 prompt=(
@@ -132,10 +140,13 @@ class ChitraguptAgent:
         reason_prompt = self._build_reason_prompt(
             prompt=prompt,
             scene=scene_description,
+            has_image=bool(image_base64) and not split_stages,
         )
 
         response = await self.backend.chat(
-            image_base64=None,  # image already processed in stage 1
+            # Split-stage backends already consumed the image in Stage 1
+            # above; single-call backends get it here alongside the prompt.
+            image_base64=None if split_stages else image_base64,
             prompt=reason_prompt,
             conversation_history=self.memory.get_history()[-10:],
         )
@@ -192,7 +203,9 @@ class ChitraguptAgent:
             "scene_description": scene_description,
         }
 
-    def _build_reason_prompt(self, prompt: str, scene: Optional[str]) -> str:
+    def _build_reason_prompt(
+        self, prompt: str, scene: Optional[str], has_image: bool = False
+    ) -> str:
         """Build the prompt for the reasoning model."""
         parts = [
             "You are Chitragupt, an all-seeing assistant with access to tools.",
@@ -200,6 +213,11 @@ class ChitraguptAgent:
 
         if scene:
             parts.append(f"\n[Camera feed]\n{scene}")
+        elif has_image:
+            parts.append(
+                "\n[Camera feed attached]\nAn image is attached below — look at "
+                "it directly to answer, describing relevant details as needed."
+            )
 
         parts.append(f"\n[User]\n{prompt}")
 

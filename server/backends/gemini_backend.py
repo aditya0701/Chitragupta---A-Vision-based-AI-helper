@@ -1,17 +1,22 @@
 """Gemini backend — uses Google Gemini via Google AI Studio API Key.
 
-Two-stage pipeline:
-  Stage 1 (vision):  Gemini Flash  →  text description of the image
-  Stage 2 (reason):  Gemini Flash  →  ReAct reasoning + tool calls + final response
+Gemini is multimodal, so chat() sends the image and the reasoning prompt
+in a single request when both are present — one API call, not two. vision()
+(a standalone image-description call) still exists for callers that
+specifically want just a description (e.g. the base class's default, or a
+backend with genuinely separate vision/reasoning models would use it).
 
 Requires:
   - GEMINI_API_KEY from https://aistudio.google.com/apikey
   - pip install google-generativeai
 """
 
+import base64
+import io
 from typing import Optional
 
 import google.generativeai as genai
+from PIL import Image
 
 from . import VisionBackend, VisionResponse
 from ..config import settings
@@ -46,6 +51,10 @@ REASON_SYSTEM = (
 )
 
 
+def _decode_image(image_base64: str) -> Image.Image:
+    return Image.open(io.BytesIO(base64.b64decode(image_base64)))
+
+
 class GeminiBackend(VisionBackend):
     def __init__(self):
         # The default gRPC transport hangs/times out on some hosting
@@ -61,13 +70,13 @@ class GeminiBackend(VisionBackend):
         image_base64: str,
         prompt: str = VISION_SYSTEM,
     ) -> str:
-        """Send image to Gemini and return a text description."""
-        import base64
-        from PIL import Image
-        import io
+        """Send image to Gemini and return a text description.
 
-        image_bytes = base64.b64decode(image_base64)
-        img = Image.open(io.BytesIO(image_bytes))
+        Standalone description-only call — chat() below does NOT use this;
+        it attaches the image directly to the reasoning request instead, so
+        a normal chat-with-image only costs one API call, not two.
+        """
+        img = _decode_image(image_base64)
 
         model = genai.GenerativeModel(self.model_name)
         response = await model.generate_content_async(
@@ -84,15 +93,10 @@ class GeminiBackend(VisionBackend):
         prompt: str,
         conversation_history: Optional[list[dict]] = None,
     ) -> VisionResponse:
-        """Two-stage pipeline: vision -> reasoning.
-
-        If image_base64 is provided, first sends it to Gemini for description,
-        then feeds the description into the same model with the user prompt.
+        """Reasoning call. If image_base64 is given, it's attached directly
+        to this same request — Gemini sees the image and reasons about it
+        in one API call, rather than a separate description call first.
         """
-        context = ""
-        if image_base64:
-            context = await self.vision(image_base64)
-
         model = genai.GenerativeModel(self.model_name)
 
         # Build history from conversation memory
@@ -104,16 +108,12 @@ class GeminiBackend(VisionBackend):
 
         chat = model.start_chat(history=history) if history else model.start_chat()
 
-        if context:
-            user_message = (
-                f"[Camera sees]\n{context}\n\n"
-                f"[User asks]\n{prompt}"
-            )
-        else:
-            user_message = prompt
+        content = [REASON_SYSTEM + "\n\n" + prompt]
+        if image_base64:
+            content.append(_decode_image(image_base64))
 
         response = await chat.send_message_async(
-            [REASON_SYSTEM + "\n\n" + user_message],
+            content,
             request_options={"timeout": REQUEST_TIMEOUT_S},
         )
 

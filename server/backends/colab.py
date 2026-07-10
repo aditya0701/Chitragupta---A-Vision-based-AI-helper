@@ -39,6 +39,8 @@ REASON_MODEL = "qwen3:8b"
 
 
 class ColabBackend(VisionBackend):
+    SPLIT_VISION_REASONING = True  # genuinely two separate models
+
     def __init__(self):
         self.api_url = settings.COLAB_OLLAMA_URL.rstrip("/")
         self.vision_model = settings.COLAB_VISION_MODEL or VISION_MODEL

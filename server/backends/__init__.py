@@ -13,6 +13,13 @@ class VisionResponse:
 
 
 class VisionBackend(ABC):
+    # True only for backends that genuinely run two separate specialized
+    # models (e.g. Colab's qwen3-vl + qwen3) where a distinct vision call is
+    # unavoidable. API-mode backends use one multimodal model that can see
+    # the image and reason about it in the same request, so this stays
+    # False for them — no reason to pay for two calls when one will do.
+    SPLIT_VISION_REASONING: bool = False
+
     @abstractmethod
     async def chat(
         self,
