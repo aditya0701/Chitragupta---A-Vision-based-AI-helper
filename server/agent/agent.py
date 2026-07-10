@@ -4,8 +4,12 @@ Implements the two-stage pipeline from CLAUDE.md:
   Stage 1 (vision):  qwen3-vl:8b  →  text description
   Stage 2 (reason):  qwen3:8b     →  ReAct reasoning + tool calls + response
 
-A memory buffer tracks the last N frame descriptions for change detection,
-so the reasoning layer only runs when something meaningful has changed.
+A memory buffer tracks the last N frame descriptions for change detection.
+Note: `backend.vision()` (Stage 1) still runs on every frame passed in —
+this buffer only skips Stage 2 (reasoning) when nothing has changed. Callers
+that want to avoid the Stage 1 cost too (e.g. a live camera feed) need to
+gate frames *before* calling `process()`, since the cost has already been
+paid by the time this buffer sees the description.
 """
 
 from __future__ import annotations
@@ -82,14 +86,20 @@ class ChitraguptAgent:
         self,
         image_base64: Optional[str],
         prompt: str,
+        is_live_frame: bool = False,
     ) -> dict:
         """Process a user request with optional image.
 
         Two-stage pipeline:
           1. Vision — describe the image (if provided)
           2. Reason — think + respond using the description
+
+        `is_live_frame` marks an automated live-streaming ping rather than a
+        real user question — its prompt is not recorded in conversation
+        memory, so routine "watching" frames don't crowd out real turns.
         """
-        self.memory.add("user", prompt)
+        if not is_live_frame:
+            self.memory.add("user", prompt)
 
         # ── Stage 1: Vision ──────────────────────────────────────────────
         scene_description = None
@@ -158,7 +168,8 @@ class ChitraguptAgent:
         else:
             final_text = clean_text or full_text
 
-        self.memory.add("assistant", final_text)
+        if not is_live_frame:
+            self.memory.add("assistant", final_text)
 
         return {
             "text": final_text,

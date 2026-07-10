@@ -24,8 +24,8 @@ class Settings:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    API_PROVIDER: str = os.getenv("API_PROVIDER", "openai")
-    API_MODEL: str = os.getenv("API_MODEL", "gpt-4o")
+    API_PROVIDER: str = os.getenv("API_PROVIDER", "gemini")
+    API_MODEL: str = os.getenv("API_MODEL", "gemini-2.5-flash-001")
 
     # Ollama (local)
     OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")

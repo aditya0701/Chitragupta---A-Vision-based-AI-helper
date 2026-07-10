@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: chitragupt
+    runtime: python
+    plan: free
+    buildCommand: pip install -r server/requirements.txt
+    startCommand: uvicorn server.main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: BACKEND_MODE
+        value: api
+      - key: API_PROVIDER
+        value: gemini
+      - key: API_MODEL
+        value: gemini-2.5-flash-001
+      - key: GEMINI_API_KEY
+        sync: false
