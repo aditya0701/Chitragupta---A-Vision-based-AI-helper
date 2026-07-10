@@ -46,7 +46,10 @@ REASON_SYSTEM = (
 
 class GeminiBackend(VisionBackend):
     def __init__(self):
-        genai.configure(api_key=settings.GEMINI_API_KEY)
+        # The default gRPC transport hangs/times out on some hosting
+        # platforms (Render, Vercel, Lambda) whose network egress doesn't
+        # play well with long-lived gRPC streams. REST avoids that.
+        genai.configure(api_key=settings.GEMINI_API_KEY, transport="rest")
         self.model_name = settings.API_MODEL
 
     # ── Stage 1: Vision ──────────────────────────────────────────────────────
