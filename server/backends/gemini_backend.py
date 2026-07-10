@@ -35,11 +35,13 @@ REASON_SYSTEM = (
     "Think step by step before responding. "
     "Be concise, practical, and helpful in your final response.\n\n"
     "Available tools:\n"
-    "- search(query): web search for identifying unknown objects or facts\n"
+    "- web_search(query): web search for identifying unknown objects or facts\n"
     "- calculate(expression): arithmetic and unit conversion\n"
-    "- translate(text, target_language): translate text visible in the image\n\n"
-    "To call a tool, write inside your think block:\n"
-    "<tool>search: red mushroom white spots</tool>\n"
+    "- get_time(timezone): current time in a given timezone\n\n"
+    "Only call a tool if you actually need one to answer — most questions don't. "
+    "To call a tool, put this on its own line in your final answer (not just "
+    "while thinking about whether to use one):\n"
+    "<tool>web_search: query text here</tool>\n"
     "The result will be returned to you automatically."
 )
 
