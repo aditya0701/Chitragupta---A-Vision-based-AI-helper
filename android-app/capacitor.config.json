@@ -1,0 +1,12 @@
+{
+  "appId": "com.chitragupt.app",
+  "appName": "Chitragupt",
+  "webDir": "www",
+  "server": {
+    "url": "https://REPLACE-WITH-YOUR-RENDER-URL.onrender.com",
+    "cleartext": false
+  },
+  "android": {
+    "allowMixedContent": false
+  }
+}
