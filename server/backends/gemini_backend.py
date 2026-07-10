@@ -16,6 +16,11 @@ import google.generativeai as genai
 from . import VisionBackend, VisionResponse
 from ..config import settings
 
+# Gemini calls have no default timeout in the SDK — without one, a stalled
+# network path or a slow upstream can hang the request indefinitely instead
+# of failing fast with a retryable error.
+REQUEST_TIMEOUT_S = 30
+
 VISION_SYSTEM = (
     "Describe everything visible in this image in detail. "
     "Include: objects, people, actions, text, colours, spatial layout, "
@@ -60,7 +65,10 @@ class GeminiBackend(VisionBackend):
         img = Image.open(io.BytesIO(image_bytes))
 
         model = genai.GenerativeModel(self.model_name)
-        response = await model.generate_content_async([prompt, img])
+        response = await model.generate_content_async(
+            [prompt, img],
+            request_options={"timeout": REQUEST_TIMEOUT_S},
+        )
         return response.text.strip()
 
     # ── Stage 2: Reason ──────────────────────────────────────────────────────
@@ -100,7 +108,8 @@ class GeminiBackend(VisionBackend):
             user_message = prompt
 
         response = await chat.send_message_async(
-            [REASON_SYSTEM + "\n\n" + user_message]
+            [REASON_SYSTEM + "\n\n" + user_message],
+            request_options={"timeout": REQUEST_TIMEOUT_S},
         )
 
         return VisionResponse(
@@ -114,7 +123,10 @@ class GeminiBackend(VisionBackend):
     async def health_check(self) -> bool:
         try:
             model = genai.GenerativeModel(self.model_name)
-            await model.generate_content_async("test")
+            await model.generate_content_async(
+                "test",
+                request_options={"timeout": REQUEST_TIMEOUT_S},
+            )
             return True
         except Exception:
             return False
