@@ -24,6 +24,7 @@ class Settings:
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     API_PROVIDER: str = os.getenv("API_PROVIDER", "gemini")
     API_MODEL: str = os.getenv("API_MODEL", "gemini-flash-latest")
 

@@ -21,6 +21,9 @@ def get_backend() -> VisionBackend:
         elif provider == "gemini":
             from .gemini_backend import GeminiBackend
             return GeminiBackend()
+        elif provider == "groq":
+            from .groq_backend import GroqBackend
+            return GroqBackend()
         else:
             raise ValueError(f"Unknown API provider: {provider}")
     elif mode == "local":
