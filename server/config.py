@@ -28,6 +28,11 @@ class Settings:
     API_PROVIDER: str = os.getenv("API_PROVIDER", "gemini")
     API_MODEL: str = os.getenv("API_MODEL", "gemini-flash-latest")
 
+    # Off by default while testing plain API chat — every tool mention (even
+    # unresolved/hallucinated ones) risks an extra API call and clutters
+    # output. Flip to "true" once ready to re-enable tool use.
+    TOOLS_ENABLED: bool = os.getenv("TOOLS_ENABLED", "false").lower() == "true"
+
     # Ollama (local)
     OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llava:13b")

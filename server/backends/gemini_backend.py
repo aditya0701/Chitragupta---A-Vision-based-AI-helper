@@ -33,13 +33,18 @@ VISION_SYSTEM = (
     "Be factual and specific. Do not offer advice or opinions."
 )
 
-REASON_SYSTEM = (
-    "You are Chitragupt, an all-seeing assistant with access to tools. "
+_REASON_SYSTEM_BASE = (
+    "You are Chitragupt, an all-seeing assistant{tools_clause}. "
     "You receive a description of what a camera currently sees, "
     "plus any question from the user.\n\n"
     "Think step by step before responding. "
-    "Be concise, practical, and helpful in your final response.\n\n"
-    "Available tools:\n"
+    "Be concise, practical, and helpful in your final response."
+)
+
+_TOOLS_CLAUSE = " with access to tools"
+
+_TOOLS_SECTION = (
+    "\n\nAvailable tools:\n"
     "- web_search(query): web search for identifying unknown objects or facts\n"
     "- calculate(expression): arithmetic and unit conversion\n"
     "- get_time(timezone): current time in a given timezone\n\n"
@@ -49,6 +54,10 @@ REASON_SYSTEM = (
     "<tool>web_search: query text here</tool>\n"
     "The result will be returned to you automatically."
 )
+
+REASON_SYSTEM = _REASON_SYSTEM_BASE.format(
+    tools_clause=_TOOLS_CLAUSE if settings.TOOLS_ENABLED else ""
+) + (_TOOLS_SECTION if settings.TOOLS_ENABLED else "")
 
 
 def _decode_image(image_base64: str) -> Image.Image:

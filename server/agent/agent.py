@@ -18,6 +18,7 @@ import re
 from typing import Optional
 
 from ..backends import VisionBackend, VisionResponse
+from ..config import settings
 from . import ToolRegistry, ConversationMemory, build_default_tools
 
 
@@ -157,20 +158,22 @@ class ChitraguptAgent:
         think_blocks = self._extract_think_blocks(full_text)
         clean_text = self._remove_think_blocks(full_text).strip()
 
-        # Only scan the *visible* response for tool calls, not the raw
-        # thinking trace — the model often mentions tool syntax
-        # hypothetically while reasoning about whether to use one, and
-        # scanning full_text (thinking included) treated that hypothetical
-        # mention as a real invocation, triggering a wasted second API call.
-        tool_results = await self._execute_tool_calls(clean_text)
-        # Unresolved matches (unknown tool name, malformed JSON) aren't
-        # worth a costly follow-up call — only resolved tool calls should
-        # trigger one.
-        tool_results = [
-            r for r in tool_results
-            if not r["result"].startswith("Unknown tool:")
-            and not r["result"].startswith("JSON parse error:")
-        ]
+        tool_results = []
+        if settings.TOOLS_ENABLED:
+            # Only scan the *visible* response for tool calls, not the raw
+            # thinking trace — the model often mentions tool syntax
+            # hypothetically while reasoning about whether to use one, and
+            # scanning full_text (thinking included) treated that hypothetical
+            # mention as a real invocation, triggering a wasted second API call.
+            tool_results = await self._execute_tool_calls(clean_text)
+            # Unresolved matches (unknown tool name, malformed JSON) aren't
+            # worth a costly follow-up call — only resolved tool calls should
+            # trigger one.
+            tool_results = [
+                r for r in tool_results
+                if not r["result"].startswith("Unknown tool:")
+                and not r["result"].startswith("JSON parse error:")
+            ]
 
         if tool_results:
             tool_context = "\n\n".join(
@@ -208,7 +211,9 @@ class ChitraguptAgent:
     ) -> str:
         """Build the prompt for the reasoning model."""
         parts = [
-            "You are Chitragupt, an all-seeing assistant with access to tools.",
+            "You are Chitragupt, an all-seeing assistant."
+            if not settings.TOOLS_ENABLED
+            else "You are Chitragupt, an all-seeing assistant with access to tools.",
         ]
 
         if scene:
@@ -221,10 +226,15 @@ class ChitraguptAgent:
 
         parts.append(f"\n[User]\n{prompt}")
 
+        tool_instruction = (
+            " If you need external information, call a tool inside your thinking."
+            if settings.TOOLS_ENABLED
+            else ""
+        )
         parts.append(
-            "\n\nThink step by step before responding. "
-            "If you need external information, call a tool inside your thinking. "
-            "Be concise, practical, and helpful in your final response."
+            "\n\nThink step by step before responding."
+            + tool_instruction
+            + " Be concise, practical, and helpful in your final response."
         )
 
         return "\n".join(parts)
