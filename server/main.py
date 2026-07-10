@@ -77,11 +77,19 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=400, detail="Prompt is required")
 
     agent = get_agent()
-    result = await agent.process(
-        image_base64=request.image_base64,
-        prompt=request.prompt,
-    )
-    return ChatResponse(**result)
+    try:
+        result = await agent.process(
+            image_base64=request.image_base64,
+            prompt=request.prompt,
+        )
+        return ChatResponse(**result)
+    except Exception as e:
+        logger.error(f"Agent error: {e}", exc_info=True)
+        return ChatResponse(
+            text=f"Error: {e}",
+            model="unknown",
+            provider="error",
+        )
 
 
 @app.post("/v1/chat/upload")

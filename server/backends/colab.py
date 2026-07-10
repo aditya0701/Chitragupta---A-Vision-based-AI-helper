@@ -65,7 +65,7 @@ class ColabBackend(VisionBackend):
             "options": {"temperature": 0.2, "num_predict": 512},
         }
 
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             resp = await client.post(
                 f"{self.api_url}/api/chat",
                 json=payload,
@@ -73,6 +73,8 @@ class ColabBackend(VisionBackend):
             resp.raise_for_status()
             data = resp.json()
 
+        if "message" not in data or "content" not in data["message"]:
+            raise ValueError(f"Unexpected Ollama vision response: {data}")
         return data["message"]["content"].strip()
 
     # ── Stage 2: Reason ──────────────────────────────────────────────────────
@@ -119,13 +121,16 @@ class ColabBackend(VisionBackend):
             "options": {"temperature": 0.7, "num_predict": 2048},
         }
 
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             resp = await client.post(
                 f"{self.api_url}/api/chat",
                 json=payload,
             )
             resp.raise_for_status()
             data = resp.json()
+
+        if "message" not in data or "content" not in data["message"]:
+            raise ValueError(f"Unexpected Ollama chat response: {data}")
 
         return VisionResponse(
             text=data["message"]["content"].strip(),
