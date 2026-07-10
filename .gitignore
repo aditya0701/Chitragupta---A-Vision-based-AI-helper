@@ -31,15 +31,3 @@ ngrok.yml
 
 # Logs
 *.log
-
-# Android app (Capacitor)
-android-app/node_modules/
-android-app/android/app/build/
-android-app/android/build/
-android-app/android/.gradle/
-android-app/android/local.properties
-android-app/android/app/release/
-android-app/android/app/debug/
-android-app/android/captures/
-android-app/android/*.iml
-android-app/android/.idea/
