@@ -25,7 +25,7 @@ class Settings:
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     API_PROVIDER: str = os.getenv("API_PROVIDER", "gemini")
-    API_MODEL: str = os.getenv("API_MODEL", "gemini-2.5-flash")
+    API_MODEL: str = os.getenv("API_MODEL", "gemini-flash-latest")
 
     # Ollama (local)
     OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")

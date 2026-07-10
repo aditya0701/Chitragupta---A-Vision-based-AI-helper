@@ -11,6 +11,6 @@ services:
       - key: API_PROVIDER
         value: gemini
       - key: API_MODEL
-        value: gemini-2.5-flash
+        value: gemini-flash-latest
       - key: GEMINI_API_KEY
         sync: false
