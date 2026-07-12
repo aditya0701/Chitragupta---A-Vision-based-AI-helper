@@ -30,6 +30,28 @@ header .badge {
   border-radius: 12px;
   color: #888;
 }
+.mode-switcher {
+  display: flex;
+  background: #0d0d1a;
+  border-bottom: 1px solid #1a1a2e;
+}
+.mode-btn {
+  flex: 1;
+  padding: 12px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: #888;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.mode-btn:hover { color: #ccc; }
+.mode-btn.active { color: #00d2ff; border-bottom-color: #00d2ff; }
+.mode-btn.live-active { color: #ff4444; }
+.mode-btn.live-active.active { border-bottom-color: #ff4444; }
+
 .main-container {
   display: flex;
   flex: 1;
@@ -234,9 +256,7 @@ header .badge {
   padding: 8px;
 }
 
-.upload-btn.live-active {
-  border-color: #ff4444;
-  color: #ff4444;
+.mode-btn.live-active {
   animation: pulse 1.6s infinite;
 }
 @keyframes pulse {

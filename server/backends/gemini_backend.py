@@ -101,6 +101,7 @@ class GeminiBackend(VisionBackend):
         image_base64: Optional[str],
         prompt: str,
         conversation_history: Optional[list[dict]] = None,
+        think: bool = True,
     ) -> VisionResponse:
         """Reasoning call. If image_base64 is given, it's attached directly
         to this same request — Gemini sees the image and reasons about it

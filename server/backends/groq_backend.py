@@ -1,10 +1,8 @@
 """Groq backend — fast inference on hosted open models via GroqCloud.
 
-Scoped to text-only chat for now. Groq's catalog includes vision-capable
-models (e.g. Llama 4 Scout), but image support isn't wired up here yet —
-this is deliberately text-only until we've evaluated how the reasoning
-stage performs and picked a model, per the plan of testing plain chat
-before deciding how to extend this to vision/live-streaming.
+Uses qwen/qwen3.6-27b, which handles both vision and reasoning in a single
+multimodal model — no separate vision-stage call needed (SPLIT_VISION_REASONING
+stays False, per the base class default).
 
 Requires:
   - GROQ_API_KEY from https://console.groq.com/keys
@@ -29,28 +27,58 @@ class GroqBackend(VisionBackend):
         image_base64: Optional[str],
         prompt: str,
         conversation_history: Optional[list[dict]] = None,
+        think: bool = True,
     ) -> VisionResponse:
-        if image_base64:
-            raise NotImplementedError(
-                "GroqBackend is text-only for now — image input isn't wired up yet."
-            )
-
         messages = []
         if conversation_history:
             for msg in conversation_history:
                 messages.append({"role": msg["role"], "content": msg["content"]})
-        messages.append({"role": "user", "content": prompt})
+
+        if image_base64:
+            user_content = [
+                {"type": "text", "text": prompt},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
+                },
+            ]
+            messages.append({"role": "user", "content": user_content})
+        else:
+            messages.append({"role": "user", "content": prompt})
+
+        # qwen3-32b thinks by default on Groq. The Qwen "/no_think" text
+        # convention isn't honored by Groq's serving stack, so reasoning is
+        # gated via the actual `reasoning_effort` API param instead (not yet
+        # in this SDK version's typed kwargs, so passed through extra_body).
+        reasoning_effort = "default" if think else "none"
 
         resp = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
-            max_tokens=2048,
+            # This model reasons verbosely when thinking is on — 2048 was too
+            # low and let it burn the whole budget mid-thought, cutting off
+            # before any visible answer was ever written. Can't just push
+            # this arbitrarily high though: this account's Groq tier caps
+            # requests at 8000 tokens/minute (TPM) *combined* input+output,
+            # so max_tokens has to leave headroom for the prompt itself
+            # (which grows with conversation history/task list/tool list).
+            max_tokens=4096 if think else 1024,
+            extra_body={
+                "reasoning_effort": reasoning_effort,
+                # "parsed" returns reasoning in its own message.reasoning
+                # field instead of inline <think> tags mixed into content —
+                # the model doesn't reliably close/scope inline tags, which
+                # was leaking raw chain-of-thought into the visible answer.
+                "reasoning_format": "parsed",
+            },
         )
 
+        message = resp.choices[0].message
         return VisionResponse(
-            text=resp.choices[0].message.content,
+            text=message.content or "",
             model=self.model,
             provider="groq",
+            reasoning=getattr(message, "reasoning", None) or "",
         )
 
     async def health_check(self) -> bool:

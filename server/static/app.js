@@ -191,14 +191,51 @@ document.addEventListener('DOMContentLoaded', () => {
   loadLiveSettings();
   document.getElementById('interval-slider').addEventListener('input', () => { updateSettingsLabels(); saveLiveSettings(); restartLiveTimer(); });
   document.getElementById('threshold-slider').addEventListener('input', () => { updateSettingsLabels(); saveLiveSettings(); });
+  startTimerPolling();
 });
 
-async function toggleLive() {
-  if (liveActive) {
-    stopLive();
-  } else {
+// ─── Background timers (cooking steps, wait periods) ──────────────────────
+//
+// Polls a cheap server endpoint that's pure arithmetic unless a timer has
+// actually completed — no Groq cost per poll, only once per fired timer.
+
+const TIMER_POLL_INTERVAL_S = 15;
+
+function startTimerPolling() {
+  checkTimers();
+  setInterval(checkTimers, TIMER_POLL_INTERVAL_S * 1000);
+}
+
+async function checkTimers() {
+  try {
+    const resp = await fetch('/v1/timers/check');
+    const data = await resp.json();
+    (data.completed || []).forEach((t) => {
+      addMessage('assistant', `⏰ ${t.label}: ${t.message}`, {});
+    });
+  } catch { /* ignore — next poll will retry */ }
+}
+
+// ─── Mode switching (Chat & Image vs Live Watch) ───────────────────────────
+
+let currentMode = 'chat';
+
+async function switchMode(mode) {
+  if (mode === currentMode) return;
+
+  if (mode === 'live') {
     await startLive();
+    if (!liveActive) return; // camera permission denied / unavailable — stay on chat mode
+  } else if (currentMode === 'live') {
+    stopLive();
   }
+
+  currentMode = mode;
+  document.getElementById('mode-chat-btn').classList.toggle('active', mode === 'chat');
+  document.getElementById('mode-live-btn').classList.toggle('active', mode === 'live');
+  document.getElementById('upload-img-btn').style.display = mode === 'live' ? 'none' : '';
+  document.getElementById('prompt-input').placeholder =
+    mode === 'live' ? 'Ask about what the camera sees (optional)...' : 'Ask me anything...';
 }
 
 async function startLive() {
@@ -219,7 +256,7 @@ async function startLive() {
   const video = document.getElementById('camera-video');
   video.srcObject = liveStream;
   document.getElementById('live-preview').style.display = 'flex';
-  document.getElementById('live-btn').classList.add('live-active');
+  document.getElementById('mode-live-btn').classList.add('live-active');
 
   liveActive = true;
   framesWatched = 0;
@@ -239,7 +276,7 @@ function stopLive() {
     liveStream = null;
   }
   document.getElementById('live-preview').style.display = 'none';
-  document.getElementById('live-btn').classList.remove('live-active');
+  document.getElementById('mode-live-btn').classList.remove('live-active');
   updateLiveStats();
 }
 
@@ -292,13 +329,16 @@ async function sampleLiveFrame() {
   await sendLiveFrame(video);
 }
 
+const MAX_FRAME_DIM = 1024; // cap resolution to save vision tokens; keep JPEG quality high so labels/text stay readable
+
 async function sendLiveFrame(video) {
   liveSending = true;
   const canvas = document.getElementById('capture-canvas');
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
+  const scale = Math.min(1, MAX_FRAME_DIM / Math.max(video.videoWidth, video.videoHeight));
+  canvas.width = video.videoWidth * scale;
+  canvas.height = video.videoHeight * scale;
   canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-  const imageBase64 = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
+  const imageBase64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
 
   const input = document.getElementById('prompt-input');
   const typedPrompt = input.value.trim();
@@ -317,7 +357,11 @@ async function sendLiveFrame(video) {
     });
     const data = await resp.json();
     if (!data.scene_unchanged && data.text) {
-      addMessage('assistant', data.text, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls });
+      let displayText = data.text;
+      if (data.think_blocks && data.think_blocks.length > 0) {
+        displayText += '\n\n<details><summary>💭 Thinking</summary>\n' + data.think_blocks.join('\n') + '\n</details>';
+      }
+      addMessage('assistant', displayText, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls });
     }
   } catch (err) {
     addMessage('assistant', '⚠️ Live frame error: ' + err.message, {});

@@ -86,6 +86,7 @@ class ColabBackend(VisionBackend):
         image_base64: Optional[str],
         prompt: str,
         conversation_history: Optional[list[dict]] = None,
+        think: bool = True,
     ) -> VisionResponse:
         """Two-stage pipeline: vision → reasoning.
 
@@ -110,9 +111,10 @@ class ColabBackend(VisionBackend):
         else:
             user_message = prompt
 
-        # Use /think prefix for complex prompts to enable chain-of-thought
-        if len(prompt) > 50:
-            user_message = f"/think {user_message}"
+        # qwen3 thinks by default — explicitly gate it per-prompt so simple
+        # questions skip the chain-of-thought latency.
+        directive = "/think" if think else "/no_think"
+        user_message = f"{directive} {user_message}"
 
         messages.append({"role": "user", "content": user_message})
 

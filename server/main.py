@@ -137,6 +137,14 @@ async def chat_with_upload(
     return ChatResponse(**result)
 
 
+@app.get("/v1/timers/check")
+async def check_timers():
+    """Poll for due timers. Pure math unless a timer just completed (one Groq
+    call in that case) — safe to call frequently from the client."""
+    agent = get_agent()
+    return await agent.check_timers()
+
+
 @app.post("/v1/reset")
 async def reset_conversation():
     """Reset the agent's conversation memory."""

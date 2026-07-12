@@ -10,6 +10,34 @@ class VisionResponse:
     text: str
     model: str
     provider: str
+    # Populated by backends that return reasoning in a separate structured
+    # field (e.g. Groq's reasoning_format="parsed") rather than inline
+    # <think> tags mixed into `text`. When set, the agent trusts it directly
+    # instead of regex-extracting <think> blocks from `text`.
+    reasoning: str = ""
+
+
+# Keywords that suggest a prompt needs multi-step reasoning rather than a
+# quick lookup/greeting-style answer.
+_COMPLEXITY_KEYWORDS = (
+    "why", "how", "explain", "compare", "difference", "analyze", "analyse",
+    "calculate", "reason", "debug", "design", "plan", "trade-off", "tradeoff",
+    "pros and cons", "step by step", "should i", "what if",
+)
+
+
+def should_think(prompt: str) -> bool:
+    """Heuristic: does this prompt warrant Qwen3 chain-of-thought?
+
+    Short, simple prompts (greetings, quick factual asks) skip thinking for
+    speed; longer or clearly analytical/multi-step prompts get it. Backends
+    use this to decide whether to send Qwen3's native /think or /no_think
+    directive, per the adaptive-thinking design in CLAUDE.md.
+    """
+    if len(prompt) > 80:
+        return True
+    lowered = prompt.lower()
+    return any(kw in lowered for kw in _COMPLEXITY_KEYWORDS)
 
 
 class VisionBackend(ABC):
@@ -26,6 +54,7 @@ class VisionBackend(ABC):
         image_base64: Optional[str],
         prompt: str,
         conversation_history: Optional[list[dict]] = None,
+        think: bool = True,
     ) -> VisionResponse:
         ...
 

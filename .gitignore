@@ -31,3 +31,9 @@ ngrok.yml
 
 # Logs
 *.log
+
+# Runtime state
+server/data/
+
+# Local HTTPS dev certs (mkcert)
+server/.certs/

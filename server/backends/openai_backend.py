@@ -19,6 +19,7 @@ class OpenAIBackend(VisionBackend):
         image_base64: Optional[str],
         prompt: str,
         conversation_history: Optional[list[dict]] = None,
+        think: bool = True,
     ) -> VisionResponse:
         messages = []
         if conversation_history:

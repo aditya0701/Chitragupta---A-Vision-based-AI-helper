@@ -9,8 +9,10 @@ services:
       - key: BACKEND_MODE
         value: api
       - key: API_PROVIDER
-        value: gemini
+        value: groq
       - key: API_MODEL
-        value: gemini-flash-latest
-      - key: GEMINI_API_KEY
+        value: qwen/qwen3.6-27b
+      - key: TOOLS_ENABLED
+        value: true
+      - key: GROQ_API_KEY
         sync: false

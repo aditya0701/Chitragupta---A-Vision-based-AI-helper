@@ -8,41 +8,59 @@ The system watches through a camera, understands what it sees using a vision mod
 reasons about it using a ReAct agent with chain-of-thought thinking, and responds
 via text and optional TTS.
 
+**Primary use case:** hands-free kitchen assistance over voice/text — e.g. it tells
+you to boil eggs, starts a timer itself, keeps track of everything else you're doing
+in parallel (chicken prep, veggies), and tells you when to come back to something —
+without you having to ask it or re-explain state it should already remember.
+
+---
+
+## Current implementation status
+
+This is a working FastAPI server (`server/`), not just a design doc. Core pipeline,
+tool calling, background timers, and task-list tracking are built and tested against
+the live Groq API. Not yet built: voice input, TTS output, multi-timer UI progress
+display, adaptive poll backoff. See TODO at the bottom for the real current list.
+
 ---
 
 ## Architecture
 
-The pipeline is deliberately split into two sequential model calls:
-
 ```
-Phone/camera  →  frame (JPEG, base64)
+Phone/browser  →  /v1/chat (FastAPI)
                      ↓
-              [Vision Model]           Qwen3-VL 8B via Ollama
-              Describes what it sees   ~5 sec
+              [Backend]                Pluggable: colab | api | local
+              Vision + reasoning       (see server/backends/)
                      ↓
-              [Memory Buffer]          Rolling JS state (last 5-10 frames)
-              Context + change detect
+              [Tool execution]         start_timer, update_task_list,
+              Parses ```tool {...}```  web_search, fetch_page, calculate, get_time
+              blocks from the reply
                      ↓
-              [ReAct Reasoning]        Qwen3 8B via Ollama, /think mode
-              Thinks, optionally       ~15-30 sec (thinking on)
-              calls tools, responds    ~5 sec (thinking off)
-                     ↓
-              [TTS]                    Browser Web Speech API / Kokoro / ElevenLabs
+              [Response]               Text (+ think_blocks for debug UI)
 ```
 
-### Why this split
+Two backend shapes exist, selected by `SPLIT_VISION_REASONING` on the backend class:
 
-The vision model's only job is turning pixels into words. It is fast, cheap,
-and runs on every sampled frame. All intelligence lives in the reasoning layer,
-which only runs when something is worth responding to.
+- **Split (Colab)**: a dedicated vision model (Qwen3-VL) describes the frame first,
+  then a separate reasoning model (Qwen3) thinks and responds. Two model calls.
+- **Single-call (API mode — Groq/Gemini/OpenAI/Anthropic)**: one multimodal model
+  sees the image and reasons in the same call. This is the active configuration —
+  no reason to pay for two calls when one multimodal model does both.
+
+### Why this split (when using Colab)
+The vision model's only job is turning pixels into words. All intelligence lives in
+the reasoning layer, which only runs when something is worth responding to.
 
 ### Why ReAct over pure orchestration
-
 Pure orchestration (a controller that routes between specialist models) requires
 predicting every situation in advance and breaks on edge cases. ReAct lets the
 reasoning model orchestrate itself: it reads the scene, decides mid-thought whether
 to call a tool, and routes to the right response type without a separate controller.
-The thinking chain IS the orchestration.
+The thinking chain IS the orchestration. This same reasoning is why multi-task
+tracking (see below) uses one model with shared state rather than an
+orchestrator-plus-worker-agents pattern — splitting into multiple LLM instances
+would mean paying for a coordination call on every check-in, for no benefit over one
+model reading a shared document.
 
 ---
 
@@ -50,167 +68,195 @@ The thinking chain IS the orchestration.
 
 | Layer | Tool | Notes |
 |---|---|---|
-| Vision model | Qwen3-VL 8B | Via Ollama, OpenAI-compatible API |
-| Reasoning | Qwen3 8B | /think mode for chain-of-thought |
-| Inference server | Ollama | CORS enabled: `OLLAMA_ORIGINS="*"` |
-| Infrastructure | Google Colab T4 + ngrok | Free tier, 16GB VRAM |
-| Frontend | React (browser artifact) | Calls Ollama via configurable URL |
-| TTS | Browser Web Speech API | Free, zero setup |
-| Camera | Phone browser or webcam | MediaStream API |
+| Server | FastAPI (`server/main.py`) | Single global `ChitraguptAgent` instance |
+| Active backend | Groq API (`qwen/qwen3.6-27b`) | `BACKEND_MODE=api`, `API_PROVIDER=groq` |
+| Alt. backends | Gemini, OpenAI, Anthropic, Colab+Ollama, local Ollama | See `server/backends/` |
+| Deployment | Render (free tier) | `render.yaml` — spins down after ~15 min idle |
+| Frontend | Static HTML/JS/CSS (`server/static/`) | No build step, served directly by FastAPI |
+| TTS | Not yet implemented | Planned: browser Web Speech API (free, zero setup) |
+| Camera | Phone/laptop browser | MediaStream API, works over any HTTPS connection |
+
+**Local dev:** `uvicorn server.main:app --host 0.0.0.0 --port 8000` from the repo
+root (or via `server/venv`). Requires `TOOLS_ENABLED=true` in `server/.env` — it
+defaults to `false`. Prefer running **without** `--reload` when iterating on
+`server/agent/*.py` — WatchFiles has been observed serving stale bytecode on
+Windows after edits; restart manually instead.
+
+**Connectivity:** the phone does not need to share a network with anything. Once
+deployed on Render, it's a public HTTPS URL — any internet connection (WiFi or
+mobile data) works, same as opening any website. `localhost` only works for testing
+on the same machine that's running the server (camera access requires either
+HTTPS or the literal hostname `localhost` — a bare LAN IP over HTTP will fail the
+browser's secure-context check for `getUserMedia`).
 
 ---
 
-## Infrastructure setup
+## Agentic tools & persistent state
 
-The project currently runs on Colab with ngrok tunneling.
-See `colab_setup.ipynb` for the full notebook.
+Two pieces of state live outside the conversation history, both under
+`server/data/` (gitignored, survives process restarts by design):
 
-Quick summary of the Colab flow:
+### Timers (`server/agent/timers.py`)
+Started via the `start_timer(label, duration_seconds, context)` tool. Stores
+**wall-clock `start_time` + `duration`**, not a running `asyncio.sleep` — this
+matters because Render's free tier can restart the process mid-wait; recomputing
+`elapsed = now - start_time` on every check is resilient to that in a way an
+in-memory sleeping task is not.
 
-```python
-# 1. Install Ollama
-!curl -fsSL https://ollama.com/install.sh | sh
+- Checking due-ness and progress (`% done`) is pure arithmetic — **zero LLM cost**.
+- The only Groq call happens once, when a timer is actually found to be due, to
+  generate a contextual next-step message (not just "timer done" — it gets the
+  original `context` string and current task list, so it can say something useful).
+- That completion call is routed through the *same* prompt-building and
+  tool-execution path as a normal turn (`ChitraguptAgent.check_timers()` reuses
+  `_build_reason_prompt` / `_execute_tool_calls`), so completing a timer can also
+  update the task list (mark a step done), not just narrate that it happened.
+- `check_timers()` runs from two places: the background poll (`GET
+  /v1/timers/check`, called by the frontend every 15s) for quiet stretches, *and*
+  from the end of every `process()` call (i.e. every real `/v1/chat` turn) so a
+  completion surfaces immediately if you're actively mid-conversation about
+  something else when a timer fires, rather than waiting for the next poll tick.
 
-# 2. Start with CORS
-env['OLLAMA_ORIGINS'] = '*'
-env['OLLAMA_HOST'] = '0.0.0.0'
-subprocess.Popen(['ollama', 'serve'], env=env)
+### Task list (`server/agent/tasklist.py`)
+A structured living document — title + items, each with `status`
+(`pending`/`in_progress`/`completed`/`skipped`) and an optional `note` (used for
+substitutions, e.g. "used tofu instead of paneer"). Modeled directly on Claude
+Code's own `TodoWrite` tool: the model resends the **full item list** on every
+edit rather than diffing — no separate add/remove/branch tools, the server just
+persists whatever it's given. Completed items stay in the list (marked, not
+deleted) so it doubles as a record of what happened, not just a queue of what's
+left. Item `id`s are stable across edits (matched by content) so the same logical
+item keeps its identity as its status changes turn to turn.
 
-# 3. Pull models (cached to Drive after first pull)
-!ollama pull qwen3-vl:8b
-!ollama pull qwen3:8b
+The current document is injected into **every** reasoning prompt as `[Task list]`
+context (see `_build_reason_prompt`), so the model doesn't need to be reminded of
+it and can act on it proactively — e.g. deciding *unprompted* mid-conversation
+that it's time to start boiling eggs, not just reacting when told to.
 
-# 4. Expose via ngrok
-tunnel = ngrok.connect(11434)
-# Paste tunnel URL into frontend Settings > Ollama URL
-```
-
-Model cache is stored in Google Drive at `/content/drive/MyDrive/ollama_models`
-to avoid re-downloading on every session (models are ~5GB each).
-
-To run locally when a GPU is available:
-```bash
-OLLAMA_ORIGINS="*" ollama serve
-```
-
-Minimum viable GPU: 12GB VRAM to hold both models simultaneously.
-Recommended: RTX 3090 (24GB, ~$450 used). The Colab T4 (16GB) works fine.
-
----
-
-## Models
-
-### Vision: Qwen3-VL 8B
-- Handles image input natively
-- Task: describe the scene in 100-300 words
-- VRAM: ~5.5GB at Q4
-- Pull: `ollama pull qwen3-vl:8b`
-
-### Reasoning: Qwen3 8B
-- Thinking mode enabled via `/think` prefix in user message
-- Produces `<think>...</think>` chain followed by visible response
-- Supports tool calling (function calling) natively
-- VRAM: ~4.6GB at Q4
-- Pull: `ollama pull qwen3:8b`
-
-### Upgrade paths
-- Reasoning quality: swap to `qwen3:14b` (~8.3GB) or `qwen3:30b-a3b` (MoE, ~17GB, runs at 3B speed)
-- Vision quality: swap to `qwen3-vl:32b` (~24GB, needs full 24GB GPU)
-- Speed: use `qwen3.5:9b` for reasoning (~5GB, beats older 8B on most benchmarks)
-
----
-
-## Key design decisions
-
-### Thinking is adaptive, not always on
-The reasoning model decides whether to think based on the prompt complexity.
-Simple questions skip the think chain for speed (~5 sec total).
-Complex multi-step questions use full thinking (~25 sec total).
-This is controlled by whether `/think` is prepended to the user message,
-which the frontend exposes as a toggle.
-
-### Camera is not processed every frame
-The memory buffer compares consecutive frame descriptions.
-If the scene has not meaningfully changed, the reasoning layer does not run.
-This prevents constant output and keeps GPU usage reasonable.
-
-### Phone as camera
-The phone browser opens the artifact URL, grants camera access,
-and sends frames to the Ollama backend via the ngrok URL.
-No native app required.
-
-### No separate controller
-Earlier designs had a dedicated controller LLM that routed between handlers.
-This was removed in favour of ReAct because it required predicting all routing
-cases upfront and added a full extra LLM call. The reasoning model handles
-its own routing within the thinking chain.
+### Cost-control patterns worth preserving
+- `Tool.needs_followup` (default `True`) — set `False` for tools whose result is a
+  pure confirmation (`start_timer`, `update_task_list`). Tools that surface new
+  information the model hasn't seen (`web_search`, `fetch_page`) keep it `True`.
+  This avoids a wasted second Groq call just to have the model restate its own
+  tool-call confirmation in prose.
+- Tool calls are only ever scanned from the **visible** response text, never from
+  `<think>` blocks — the model sometimes mentions tool syntax hypothetically while
+  reasoning about whether to use one, and scanning the thinking trace turned that
+  into a false invocation.
+- Multi-agent/orchestrator patterns were deliberately rejected for multi-task
+  tracking (see "Why ReAct" above) — one model + shared document state instead of
+  N worker agents + a coordinator, for the same reason the original controller-LLM
+  design was dropped.
 
 ---
 
-## File structure
+## Known constraints (learned the hard way, don't relitigate)
+
+- **Groq account TPM cap:** this account's Groq tier caps requests at **8000
+  tokens/minute combined input+output**. `max_tokens=8192` alone exceeded it before
+  even counting the prompt. Currently `4096` when thinking is on, `1024` when off
+  (`server/backends/groq_backend.py`) — enough headroom for this model's verbose
+  reasoning without tripping the cap on typical prompt sizes. If prompts grow a lot
+  (long conversation history, big task list), this may need revisiting.
+- **Groq reasoning leaks into content without `reasoning_format="parsed"`:** this
+  model doesn't reliably close `<think>` tags inline, especially if cut off by
+  `max_tokens` mid-thought — an unclosed tag means the regex-based stripping finds
+  no match and the raw reasoning trace becomes the visible "answer." Fixed by
+  requesting `reasoning_format: "parsed"` from Groq (returns reasoning in a
+  separate `message.reasoning` field) and trusting `VisionResponse.reasoning`
+  directly in `agent.py` when a backend provides it, bypassing tag-stripping
+  entirely for Groq. Local Ollama-hosted Qwen3 still uses the inline-tag path.
+- **`TOOLS_ENABLED` defaults to `false`** (`server/config.py`) — disabled a few
+  commits back while testing plain API chat. Nothing in the Tools section above
+  works until `TOOLS_ENABLED=true` is set.
+- **Render free tier spins down after ~15 min with no inbound HTTP traffic.**
+  This is about traffic *to* the Render server specifically — a server-side call
+  *out* to Groq does nothing to prevent this, and can't run at all once the process
+  is already killed. The frontend's existing poll loop (camera sampling in Live
+  mode, or the 15s timer-check poll) is what keeps it alive during active use; if
+  the phone is closed for 15+ min mid-timer, the completion message is delayed
+  until the next request wakes the dyno. Fix if needed: a free external pinger
+  (UptimeRobot, cron-job.org, or a GitHub Actions scheduled workflow) hitting
+  `/health` every ~10 min. Not yet set up.
+- **Windows `uvicorn --reload` has served stale code after edits** during this
+  project's development (WatchFiles detected the change and logged a reload, but
+  the old bytecode kept serving). If behavior doesn't match a just-made edit,
+  restart the server manually before assuming the code is wrong.
+
+---
+
+## UI modes (`server/static/`)
+
+Two tabs, switched via `switchMode()` in `app.js`:
+- **💬 Chat & Image** — manual text/image testing, tools visible in sidebar. Default.
+- **📹 Live Watch** — auto-starts the camera, samples on an interval with a
+  perceptual diff gate (skips the network call entirely if the scene hasn't
+  meaningfully changed — this is what actually protects API quota, since it runs
+  before any request leaves the browser), responds to changes automatically.
+
+Switching tabs drives the camera lifecycle directly (starts/stops `getUserMedia`);
+there's no separate manual toggle button anymore. Timer completions render as
+normal chat messages (⏰ prefix) whether they arrive via the background poll or
+folded into an active chat reply.
+
+---
+
+## File structure (actual, as built)
 
 ```
 /
-├── CLAUDE.md                    This file
-├── frontend/
-│   └── VisionChitragupta.jsx    React frontend (camera, pipeline UI, settings)
-├── notebooks/
-│   └── colab_setup.ipynb        Colab notebook (Ollama + ngrok setup)
-├── prompts/
-│   ├── vision_prompt.txt        System prompt for vision model
-│   └── reasoning_prompt.txt     System prompt for reasoning model (ReAct + tools)
-└── tools/
-    └── tool_definitions.json    Tool schemas for Qwen3 function calling
+├── CLAUDE.md
+├── render.yaml                  Render deployment config (free tier)
+└── server/
+    ├── main.py                  FastAPI app, routes (/v1/chat, /v1/timers/check, /v1/reset)
+    ├── config.py                Settings from .env (BACKEND_MODE, TOOLS_ENABLED, etc.)
+    ├── agent/
+    │   ├── agent.py             ChitraguptAgent — main loop, prompt building, tool execution
+    │   ├── __init__.py          Tool/ToolRegistry, built-in tools, ConversationMemory
+    │   ├── timers.py            Persisted background timers (wall-clock, survives restarts)
+    │   └── tasklist.py          Persisted task/recipe document (Claude Code TodoWrite-style)
+    ├── backends/
+    │   ├── __init__.py          VisionBackend ABC, VisionResponse, should_think() heuristic
+    │   ├── groq_backend.py      Active backend
+    │   ├── gemini_backend.py, openai_backend.py, anthropic_backend.py
+    │   ├── colab.py             Split vision/reasoning via Ollama on Colab
+    │   └── factory.py           get_backend() — picks backend from BACKEND_MODE/API_PROVIDER
+    ├── static/
+    │   ├── index.html, app.js, style.css   No build step
+    │   └── manifest.json, sw.js            PWA support
+    └── data/                    Gitignored — timers.json, document.json (runtime state)
 ```
 
 ---
 
 ## Prompts
 
-### Vision model prompt
-Keep it simple. The vision model's only job is accurate description.
-
-```
-Describe everything visible in this image in detail.
-Include: objects, people, actions, text, colours, spatial layout,
-and anything that might matter for helping someone understand this scene.
-Be factual and specific. Do not offer advice or opinions.
-```
-
-### Reasoning model system prompt
-
-```
-You are Chitragupta, an all-seeing assistant with access to tools.
-You receive a description of what a camera currently sees,
-plus any question from the user.
-
-Think step by step before responding.
-If you need external information, call a tool inside your thinking.
-Be concise, practical, and helpful in your final response.
-
-Available tools:
-- search(query): web search for identifying unknown objects or facts
-- calculate(expression): arithmetic and unit conversion
-- translate(text, target_language): translate text visible in the image
-
-To call a tool, write inside your think block:
-<tool>search: red mushroom white spots</tool>
-The result will be returned to you automatically.
-```
+The reasoning system prompt is built dynamically in `agent.py::_build_reason_prompt`,
+not stored as a static file. It assembles, per turn: persona line, `[Camera feed]`
+or attached-image note, `[Task list]` (if a document is active), the user's message,
+a thinking-mode instruction, and — if `TOOLS_ENABLED` — the tool list plus
+tool-specific usage guidance (start_timer is fire-and-forget; update_task_list is
+full-list-replace, keep completed items, don't recite the plan back verbatim).
 
 ---
 
 ## TODO
 
-The following components are not yet built:
+Done this session: ReAct tool parsing, tool executor, timers, task-list tracking,
+Groq reasoning-leak fix, two-mode UI. Remaining:
 
-- [ ] ReAct prompt engine with `<tool>` tag parser
-- [ ] Tool executor (search via SearXNG or Brave API, calculator, translate)
-- [ ] Memory buffer with change detection between frames
+- [ ] Voice input (currently text/typed only)
+- [ ] TTS output (text-only for now, by design — add once the text pipeline is
+      trusted; Web Speech API first, since it's free and needs no server change)
+- [ ] Adaptive poll backoff (currently a fixed 15s client poll; could back off to
+      minutes when no timer is close to firing, bounded below Render's idle
+      timeout so it doesn't reintroduce the spin-down problem)
+- [ ] Render keep-alive pinger (only needed if unattended timers >15 min matter)
+- [ ] Multi-timer progress display in the UI (`active` timers are already returned
+      by `/v1/timers/check`, just not rendered anywhere yet)
 - [ ] Streaming output (show thinking tokens as they arrive)
-- [ ] Kokoro TTS integration (local, higher quality than Web Speech API)
-- [ ] Egocentric fine-tuning pipeline (Ego4D + Egocentric-1M data)
-- [ ] Local GPU deployment (port from Colab when hardware available)
+- [ ] Egocentric fine-tuning pipeline (Ego4D + Egocentric-1M data) — long-term
+- [ ] Local GPU deployment (port from Colab/Render when hardware available)
 
 ---
 
@@ -234,7 +280,8 @@ from the datasets above.
 
 ## Non-Chinese model alternatives
 
-The default stack uses Qwen (Alibaba, Chinese). If data residency or supply chain
+The default Colab stack uses Qwen (Alibaba, Chinese); the active Groq model
+(`qwen/qwen3.6-27b`) is also Qwen-family. If data residency or supply chain
 concerns require non-Chinese models:
 
 | Layer | Alternative | Notes |
@@ -243,17 +290,4 @@ concerns require non-Chinese models:
 | Vision | Llama 4 Scout (Meta) | Image only, no video |
 | Reasoning | Gemma4 27B (Google) | Apache 2.0, strong reasoning |
 | Reasoning | Phi-4 (Microsoft) | MIT, 14B, strong reasoning for size |
-| Full stack API | Gemini 2.0 Flash | Handles real video streams natively |
-
----
-
-## Latency reference
-
-| Mode | Vision call | Reasoning call | Total |
-|---|---|---|---|
-| Thinking ON (complex) | ~5 sec | ~20-30 sec | ~25-35 sec |
-| Thinking OFF (simple) | ~5 sec | ~5 sec | ~10 sec |
-| Adaptive (default) | ~5 sec | depends | ~10-35 sec |
-
-Measured on Colab T4 with Qwen3-VL 8B + Qwen3 8B at Q4 quantization.
-Speeds roughly double on RTX 3090.
+| Full stack API | Gemini 2.0 Flash | Handles real video streams natively; already has a backend (`gemini_backend.py`) |
