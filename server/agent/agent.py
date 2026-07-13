@@ -156,12 +156,27 @@ class ChitraguptAgent:
         # prompt below, which always exceeds any length heuristic once the
         # system framing and scene context are added.
         think = should_think(prompt)
+        has_image = bool(image_base64) and not split_stages
+
+        # A turn with no image yet, where request_camera is on the table
+        # (see the matching offer_camera check in _build_reason_prompt), has
+        # nothing concrete to reason deeply about — it can only plan or ask
+        # to look. Forcing think=False here keeps these turns fast and,
+        # more importantly, keeps them well clear of the max_tokens ceiling:
+        # this was the exact shape of turn (multi-part planning question,
+        # no image, extended reasoning_effort) that previously ran out of
+        # budget mid-thought and leaked raw chain-of-thought as the answer
+        # (see truncation handling below). Full reasoning still happens once
+        # there's something visual to reason about.
+        offer_camera = settings.TOOLS_ENABLED and not is_live_frame and not has_image
+        if offer_camera:
+            think = False
 
         # Build the reasoning prompt with scene context
         reason_prompt = self._build_reason_prompt(
             prompt=prompt,
             scene=scene_description,
-            has_image=bool(image_base64) and not split_stages,
+            has_image=has_image,
             think=think,
             is_live_frame=is_live_frame,
         )
@@ -174,6 +189,29 @@ class ChitraguptAgent:
             conversation_history=self.memory.get_history()[-10:],
             think=think,
         )
+
+        if response.truncated and not response.reasoning:
+            # Generation was cut off by max_tokens before the model finished
+            # reasoning and handed off to a clean answer — with nothing for
+            # Groq's parsed-reasoning-format to separate out, the entire raw
+            # chain-of-thought lands in .text unstripped (no <think> tags to
+            # find). Retrying once with think=False forces a short, direct
+            # answer instead of showing that raw dump to the user.
+            logger.warning(
+                "Response truncated mid-reasoning with no separated "
+                "reasoning field — retrying once with think=False."
+            )
+            think = False
+            reason_prompt = self._build_reason_prompt(
+                prompt=prompt, scene=scene_description, has_image=has_image,
+                think=think, is_live_frame=is_live_frame,
+            )
+            response = await self.backend.chat(
+                image_base64=None if split_stages else image_base64,
+                prompt=reason_prompt,
+                conversation_history=self.memory.get_history()[-10:],
+                think=think,
+            )
 
         full_text = response.text
 
@@ -203,6 +241,7 @@ class ChitraguptAgent:
                 r for r in tool_results
                 if not r["result"].startswith("Unknown tool:")
                 and not r["result"].startswith("JSON parse error:")
+                and not r["result"].startswith("Invalid arguments")
             ]
 
         # request_camera can't be resolved server-side — the image lives in
@@ -359,7 +398,11 @@ class ChitraguptAgent:
                 "'completed' rather than removing them, and use 'skipped' with a note for "
                 "substitutions. If a [Task list] is shown above, read it before updating "
                 "it, and don't just recite the whole plan back in your reply — the user "
-                "can already see it.\n"
+                "can already see it. Each item MUST use the exact key 'content' for its "
+                "text — not 'task' or 'label'. Example:\n"
+                '```tool\n{"name": "update_task_list", "arguments": {"title": "Chicken '
+                'Biryani", "items": [{"content": "Marinate chicken", "status": '
+                '"in_progress"}, {"content": "Cook rice", "status": "pending"}]}}\n```\n'
                 "- log_observation: call this on every relevant frame for an in-progress "
                 "task-list item — e.g. what you currently see related to it — even on "
                 "turns where you don't say anything to the user. This is your memory "
@@ -429,17 +472,30 @@ class ChitraguptAgent:
         for match in matches:
             try:
                 call = json.loads(match.strip())
-                tool_name = call.get("name")
-                arguments = call.get("arguments", {})
-
-                tool = self.tools.get(tool_name)
-                if tool:
-                    result = tool.fn(**arguments)
-                    results.append({"tool": tool_name, "arguments": arguments, "result": result})
-                else:
-                    results.append({"tool": tool_name, "arguments": arguments, "result": f"Unknown tool: {tool_name}"})
             except json.JSONDecodeError as e:
                 results.append({"tool": "unknown", "arguments": {}, "result": f"JSON parse error: {e}"})
+                continue
+
+            tool_name = call.get("name")
+            # The model sometimes writes {"name": ..., "items": [...]}
+            # directly instead of the documented {"name": ..., "arguments":
+            # {"items": [...]}} — fall back to everything except "name" so
+            # a missing wrapper doesn't turn into a hard TypeError below.
+            arguments = call.get("arguments")
+            if arguments is None:
+                arguments = {k: v for k, v in call.items() if k != "name"}
+
+            tool = self.tools.get(tool_name)
+            if not tool:
+                results.append({"tool": tool_name, "arguments": arguments, "result": f"Unknown tool: {tool_name}"})
+                continue
+            try:
+                result = tool.fn(**arguments)
+            except TypeError as e:
+                # Missing/extra/misnamed arguments — surface it as a normal
+                # tool result instead of crashing the whole turn.
+                result = f"Invalid arguments for {tool_name}: {e}"
+            results.append({"tool": tool_name, "arguments": arguments, "result": result})
 
         # Format 2: <tool>name: arg</tool> (Qwen3 ReAct format from CLAUDE.md)
         simple_pattern = r"<tool>(.*?):\s*(.*?)</tool>"

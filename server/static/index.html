@@ -68,6 +68,7 @@
         <button class="upload-btn" id="upload-img-btn" onclick="document.getElementById('file-input').click()" title="Upload image">📷</button>
         <input type="file" id="file-input" accept="image/*" onchange="handleFileSelect(event)">
         <textarea id="prompt-input" rows="1" placeholder="Ask me anything..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage();}"></textarea>
+        <button class="mic-btn" id="mic-btn" onclick="toggleVoiceInput()" title="Speak instead of typing" style="display:none;">🎤</button>
         <button id="send-btn" onclick="sendMessage()">Send →</button>
       </div>
       <div class="image-preview" id="image-preview" style="display:none;">

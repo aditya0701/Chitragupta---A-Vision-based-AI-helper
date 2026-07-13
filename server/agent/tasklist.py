@@ -11,9 +11,12 @@ document doubles as a record of what happened.
 
 from __future__ import annotations
 import json
+import logging
 import uuid
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("chitragupt")
 
 DOCUMENT_FILE = Path(__file__).parent.parent / "data" / "document.json"
 
@@ -41,7 +44,12 @@ def set_document(title: str, items: list[dict]) -> dict:
 
     normalized = []
     for item in items:
-        content = (item.get("content") or "").strip()
+        # The model occasionally uses "task" or "label" instead of the
+        # documented "content" key (nothing structurally enforces the exact
+        # field name — tool calls here are parsed from free-form JSON in the
+        # response text, not a validated function-calling schema). Accept
+        # the common variants rather than silently dropping the item.
+        content = (item.get("content") or item.get("task") or item.get("label") or "").strip()
         if not content:
             continue
         status = item.get("status", "pending")
@@ -59,6 +67,18 @@ def set_document(title: str, items: list[dict]) -> dict:
             # about (and shouldn't have to resend) prior observations.
             "observations": (existing_item or {}).get("observations", []),
         })
+
+    if items and not normalized and existing.get("items"):
+        # Every incoming item failed to parse (e.g. a field-name mismatch
+        # the alias handling above didn't catch) — refuse to silently
+        # replace a populated document with an empty one. update_task_list
+        # is a full-replace API, so a single malformed call would otherwise
+        # wipe all prior task-list progress with no visible error.
+        logger.warning(
+            f"update_task_list: all {len(items)} incoming item(s) had no "
+            "usable content field — keeping existing document unchanged."
+        )
+        return existing
 
     document = {"title": title, "items": normalized}
     DOCUMENT_FILE.parent.mkdir(parents=True, exist_ok=True)

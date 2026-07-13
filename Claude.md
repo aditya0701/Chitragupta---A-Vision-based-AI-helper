@@ -19,7 +19,8 @@ without you having to ask it or re-explain state it should already remember.
 
 This is a working FastAPI server (`server/`), not just a design doc. Core pipeline,
 tool calling, background timers, and task-list tracking are built and tested against
-the live Groq API. Not yet built: voice input, TTS output, multi-timer UI progress
+the live Groq API. Voice input (speech-to-text) was added 2026-07-13 via the
+browser's Web Speech API. Not yet built: TTS output, multi-timer UI progress
 display, adaptive poll backoff. See TODO at the bottom for the real current list.
 
 ---
@@ -195,6 +196,74 @@ ice cream" from stale text with no image.
   the awaited completion call, so the poll route and a live tick can't both
   pick up and fire the same due timer.
 
+### Reliability fixes from real-transcript testing (added 2026-07-13, later same day)
+A live test against the Groq API surfaced two failure modes the unit-level
+checks didn't catch:
+
+- **`content`/`task` field-name drift silently emptied the task list.**
+  Tool calls are parsed from free-form JSON in the response text (see
+  "Tool-calling is prompt-based, not native function-calling" below) — there
+  is no schema enforcing the model always writes `content` for an item's
+  text. When it wrote `task` instead, `tasklist.set_document()` dropped
+  every item with no error, and because `update_task_list` is a full
+  replace, this could wipe an already-populated document down to empty.
+  Since `render_summary()` returns `""` for an empty document, this also
+  meant `[Task list]` and the live-frame silence instruction never got
+  injected into the prompt at all — explaining the "described the scene
+  again and again" symptom directly. Fixed in `tasklist.set_document()`:
+  accepts `task`/`label` as aliases for `content`, and refuses to replace a
+  populated document with an empty one (logs a warning, keeps the old
+  document) if every incoming item fails to parse.
+- **Truncated reasoning leaked raw chain-of-thought as the visible answer.**
+  A complex, imageless, multi-tool planning turn (list ingredients + build a
+  task list + decide whether to request the camera) ran long enough under
+  `reasoning_effort: "default"` to hit the `max_tokens=4096` ceiling before
+  finishing its thought. Groq's `reasoning_format: "parsed"` only populates
+  the separate `message.reasoning` field when the model *completes*
+  reasoning — cut off mid-thought, the whole raw monologue lands in
+  `message.content` instead, with no `<think>` tags for the existing
+  stripping logic to find. `VisionResponse` gained a `truncated` field
+  (`groq_backend.py`, from `finish_reason == "length"`); `agent.py` now
+  retries once with `think=False` when a response is truncated with no
+  separated reasoning, instead of showing the raw dump to the user.
+- **Related latency/robustness fix, same root cause:** any imageless turn
+  where `request_camera` is offered (see `offer_camera` in
+  `_process_locked`) now forces `think=False` unconditionally, not just on
+  truncation-retry. Reasoning hard before the model has even seen an image
+  is mostly wasted effort anyway (it can't ground specifics without
+  vision), and this was exactly the shape of turn most likely to run into
+  the truncation bug above — bounding it there fixes both the "took too
+  long" and "spewed its thinking" complaints from the same change.
+- **Malformed tool calls no longer crash the turn.** `_execute_tool_calls`
+  previously only caught `json.JSONDecodeError`; a tool call missing its
+  `"arguments"` wrapper (e.g. `{"name": "update_task_list", "items": [...],
+  "title": "..."}` instead of nesting under `"arguments"`) either silently
+  called the tool with zero args (`TypeError`, uncaught, failed the whole
+  turn) or, for optional-arg tools, quietly did nothing. Now: a missing
+  `"arguments"` key falls back to every other top-level key in the call
+  object, and a `TypeError` from `tool.fn(**arguments)` (wrong/missing
+  required args) is caught and surfaced as a normal tool result string
+  instead of crashing.
+- **Groq token usage is now logged** (`groq_backend.py`) —
+  `resp.usage.prompt_tokens`/`completion_tokens`/`total_tokens` plus
+  `finish_reason`, logged on every call. Groq doesn't publish a per-image
+  token cost for `qwen/qwen3.6-27b` in their docs; this is how to get a
+  real number for this app's actual resolution/quality settings instead of
+  guessing.
+
+### Tool-calling is prompt-based, not native function-calling
+`ToolRegistry.to_openai_tool()`/`to_openai_tools()` exist but are **dead
+code** — nothing ever passes `tools=` to the Groq API. All tool calls are
+parsed via regex from a ` ```tool {...}``` ` block the model writes into its
+own visible response text (`_execute_tool_calls`), ReAct-style. This is why
+field-name drift (above) was possible at all — there's no JSON-schema
+validation step the way there would be with native function-calling.
+Switching to native function-calling (if/when Groq's qwen3.6-27b supports it
+for this SDK version) would be a more robust structural fix than the
+alias/guard patches above, but is a bigger change and wasn't attempted this
+session — noted here so it isn't rediscovered as if it were still an option
+no one had considered.
+
 ### Cost-control patterns worth preserving
 - `Tool.needs_followup` (default `True`) — set `False` for tools whose result is a
   pure confirmation (`start_timer`, `update_task_list`). Tools that surface new
@@ -328,9 +397,25 @@ repeated camera-unavailable response, `request_camera` and the silence
 protocol have only been exercised with unit-level checks (fake backend), not
 yet against the live Groq API end-to-end.
 
+Done 2026-07-13 (third pass, after real Groq testing surfaced actual bugs):
+see "Reliability fixes from real-transcript testing" above — task-list
+field-name alias + wipe guard, truncated-reasoning retry, bounded reasoning
+on imageless turns, hardened tool-call parsing, Groq usage logging. Also
+added: browser-native voice input (Web Speech API, no server change). Still
+unverified end-to-end against live Groq traffic after these specific fixes —
+next test pass should confirm the silence protocol actually activates now
+that the task-list-emptying bug is fixed.
+
 Remaining:
 
-- [ ] Voice input (currently text/typed only)
+- [x] Voice input — done 2026-07-13 via browser Web Speech API
+      (`SpeechRecognition`/`webkitSpeechRecognition`), client-side only, no
+      server change. Mic button (`#mic-btn` in `index.html`) is hidden
+      entirely when the browser doesn't support it (no Firefox support as of
+      this writing) — feature-detected in `initVoiceInput()` in `app.js`.
+      Same secure-context requirement as the camera (HTTPS or localhost).
+      Tap to talk, releases/auto-sends on the browser's own end-of-speech
+      detection (`continuous: false`) — no second tap needed to submit.
 - [ ] TTS output (text-only for now, by design — add once the text pipeline is
       trusted; Web Speech API first, since it's free and needs no server change)
 - [ ] Adaptive poll backoff (currently a fixed 15s client poll; could back off to

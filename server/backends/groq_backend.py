@@ -9,12 +9,15 @@ Requires:
   - pip install groq
 """
 
+import logging
 from typing import Optional
 
 from groq import AsyncGroq
 
 from . import VisionBackend, VisionResponse
 from ..config import settings
+
+logger = logging.getLogger("chitragupt")
 
 
 class GroqBackend(VisionBackend):
@@ -73,12 +76,20 @@ class GroqBackend(VisionBackend):
             },
         )
 
-        message = resp.choices[0].message
+        choice = resp.choices[0]
+        message = choice.message
+        if getattr(resp, "usage", None):
+            logger.info(
+                f"Groq usage: prompt={resp.usage.prompt_tokens} "
+                f"completion={resp.usage.completion_tokens} "
+                f"total={resp.usage.total_tokens} finish_reason={choice.finish_reason}"
+            )
         return VisionResponse(
             text=message.content or "",
             model=self.model,
             provider="groq",
             reasoning=getattr(message, "reasoning", None) or "",
+            truncated=choice.finish_reason == "length",
         )
 
     async def health_check(self) -> bool:

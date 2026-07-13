@@ -15,6 +15,11 @@ class VisionResponse:
     # <think> tags mixed into `text`. When set, the agent trusts it directly
     # instead of regex-extracting <think> blocks from `text`.
     reasoning: str = ""
+    # True when the provider cut generation off at max_tokens (finish_reason
+    # == "length") rather than the model finishing on its own. Lets the
+    # agent detect the case where reasoning got truncated mid-thought before
+    # handing off to a clean answer — see agent.py's retry-once-on-truncation.
+    truncated: bool = False
 
 
 # Keywords that suggest a prompt needs multi-step reasoning rather than a

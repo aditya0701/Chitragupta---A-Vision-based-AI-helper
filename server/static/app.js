@@ -1,6 +1,65 @@
 let currentImageBase64 = null;
 let isProcessing = false;
 
+// ─── Voice input (Web Speech API — browser-native, no server change) ────────
+// Only Chrome/Edge/Safari implement SpeechRecognition (Firefox doesn't), and
+// it requires a secure context (HTTPS or localhost) same as getUserMedia —
+// the mic button stays hidden entirely rather than showing a dead control.
+const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognizer = null;
+let isRecording = false;
+
+function initVoiceInput() {
+  const micBtn = document.getElementById('mic-btn');
+  if (!SpeechRecognitionImpl) return; // leave button hidden — no support
+  micBtn.style.display = '';
+
+  recognizer = new SpeechRecognitionImpl();
+  recognizer.lang = 'en-US';
+  recognizer.continuous = false;
+  recognizer.interimResults = true;
+
+  recognizer.onresult = (event) => {
+    let transcript = '';
+    for (let i = 0; i < event.results.length; i++) {
+      transcript += event.results[i][0].transcript;
+    }
+    document.getElementById('prompt-input').value = transcript;
+  };
+
+  recognizer.onerror = () => stopVoiceInput();
+
+  // Fires when the browser decides you've stopped talking (continuous=false)
+  // — send automatically so speaking a question is the whole interaction,
+  // no follow-up tap needed.
+  recognizer.onend = () => {
+    isRecording = false;
+    micBtn.classList.remove('recording');
+    const text = document.getElementById('prompt-input').value.trim();
+    if (text) sendMessage();
+  };
+}
+
+function toggleVoiceInput() {
+  if (!recognizer || isProcessing) return;
+  const micBtn = document.getElementById('mic-btn');
+  if (isRecording) {
+    recognizer.stop();
+    return;
+  }
+  document.getElementById('prompt-input').value = '';
+  isRecording = true;
+  micBtn.classList.add('recording');
+  try {
+    recognizer.start();
+  } catch {
+    isRecording = false;
+    micBtn.classList.remove('recording');
+  }
+}
+
+initVoiceInput();
+
 async function checkHealth() {
   try {
     const resp = await fetch('/health');
