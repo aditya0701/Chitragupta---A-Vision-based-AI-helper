@@ -205,6 +205,38 @@ header .badge {
   min-height: 44px;
 }
 .upload-btn:hover { border-color: #3a7bd5; }
+.camera-toggle-btn {
+  background: #1a1a2e;
+  border: 1px solid #2a2a4a;
+  border-radius: 10px;
+  padding: 12px;
+  color: #aaa;
+  cursor: pointer;
+  font-size: 18px;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  min-width: 44px;
+  min-height: 44px;
+}
+.camera-toggle-btn:hover { border-color: #3a7bd5; }
+.camera-toggle-btn.camera-on {
+  background: #1a3a2a;
+  border-color: #2ecc71;
+  color: #6ee7a0;
+}
+.camera-enable-btn {
+  background: linear-gradient(135deg, #00d2ff, #3a7bd5);
+  border: none;
+  border-radius: 8px;
+  padding: 8px 16px;
+  color: #fff;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  margin-top: 4px;
+  transition: opacity 0.15s;
+}
+.camera-enable-btn:hover { opacity: 0.9; }
+.camera-enable-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .mic-btn {
   background: #1a1a2e;
   border: 1px solid #2a2a4a;

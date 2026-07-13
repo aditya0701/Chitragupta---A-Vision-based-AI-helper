@@ -251,6 +251,38 @@ checks didn't catch:
   real number for this app's actual resolution/quality settings instead of
   guessing.
 
+### Camera stream decoupled from Live Watch polling (added 2026-07-13, fifth pass)
+Two user-reported gaps: `request_camera` failing silently with no camera
+enabled just showed inert text ("open Live Watch first") with nothing
+clickable, and there was no way to make the camera available for on-demand
+questions without committing to Live Watch's continuous 4s polling loop —
+the two were bundled into one `startLive()` call with no way to get one
+without the other.
+
+- **`app.js`**: split the raw stream lifecycle out of Live Watch's
+  autonomous polling. `startCameraStream()`/`stopCameraStream()` now just
+  handle `getUserMedia` + wiring `<video>` — no interval, no per-frame
+  Groq calls. `startLive()` calls `startCameraStream()` first, then layers
+  polling on top (`liveActive = true`, `restartLiveTimer()`). New state
+  var `cameraStreamActive` (stream attached at all) is distinct from
+  `liveActive` (autonomous polling specifically) — `captureCurrentFrame()`
+  now checks the former, so it works whether the stream came from Live
+  Watch or the manual toggle.
+- **New manual toggle**: 🎥 button in the Chat & Image input row
+  (`#camera-toggle-btn`, `toggleCameraStream()`) — turns the camera on for
+  on-demand `request_camera` use only, never starts polling. Hidden while
+  in Live Watch mode (that tab owns the camera lifecycle directly, showing
+  both would be confusing about which one's in control). Never auto-starts
+  — camera only turns on from an explicit click, in either mode.
+- **`request_camera`-with-no-stream fallback is now actionable**:
+  `addCameraEnableMessage()` renders a real `<button>` in the chat message
+  ("🎥 Enable camera") that starts the stream and automatically retries the
+  same question on click, instead of a dead-end sentence the user had no
+  way to act on. `sendMessage()`'s response-rendering logic was extracted
+  into `renderChatResponse()` so both the normal path and this retry path
+  share it instead of duplicating the scene_unchanged/think_blocks/tool_calls
+  handling.
+
 ### Second-opinion review fixes (added 2026-07-13, fourth pass)
 An external review of the request_camera flow caught two real bugs the
 earlier passes missed (and correctly cleared two others that looked

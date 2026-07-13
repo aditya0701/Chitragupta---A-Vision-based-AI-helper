@@ -131,16 +131,46 @@ function hideTyping() {
   if (el) el.remove();
 }
 
-// Captures the current live camera frame, if the stream is actually
-// running — used to fulfill a needs_camera round trip from a text-only turn.
+// Captures the current camera frame, if a stream is attached — works
+// whether the stream came from Live Watch (continuous polling) or the
+// manual "Enable camera" toggle (stream only, no autonomous ticking).
 function captureCurrentFrame() {
   const video = document.getElementById('camera-video');
-  if (!liveActive || !video || !video.videoWidth) return null;
+  if (!cameraStreamActive || !video || !video.videoWidth) return null;
   const canvas = document.getElementById('capture-canvas');
   canvas.width = video.videoWidth;
   canvas.height = video.videoHeight;
   canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
   return canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+}
+
+// A clickable "enable camera and retry" prompt, shown when request_camera
+// fires but no stream is attached — replaces a dead-end text message with
+// something the user can actually act on (was previously just "open Live
+// Watch first," which is not a popup and easy to miss/ignore).
+function addCameraEnableMessage(onEnabled) {
+  const container = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'message assistant';
+  div.innerHTML = "I'd need the camera to check that.<br>";
+  const btn = document.createElement('button');
+  btn.className = 'camera-enable-btn';
+  btn.textContent = '🎥 Enable camera';
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = 'Starting camera...';
+    const ok = await startCameraStream();
+    if (ok) {
+      div.remove();
+      onEnabled();
+    } else {
+      btn.disabled = false;
+      btn.textContent = '🎥 Enable camera';
+    }
+  };
+  div.appendChild(btn);
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
 }
 
 async function postChat(prompt, imageBase64, isCameraFollowup) {
@@ -156,15 +186,32 @@ async function postChat(prompt, imageBase64, isCameraFollowup) {
   return resp.json();
 }
 
+function renderChatResponse(data) {
+  if (data.scene_unchanged) {
+    addMessage('assistant', '👁️ Scene unchanged — skipping reasoning. Still watching...', {
+      model: data.provider + '/' + data.model,
+    });
+    return;
+  }
+  let displayText = data.text || '...';
+  if (data.think_blocks && data.think_blocks.length > 0) {
+    displayText += '\n\n<details><summary>💭 Thinking</summary>\n' + data.think_blocks.join('\n') + '\n</details>';
+  }
+  addMessage('assistant', displayText, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls });
+}
+
+function setSending(active) {
+  isProcessing = active;
+  document.getElementById('send-btn').disabled = active;
+}
+
 async function sendMessage() {
   if (isProcessing) return;
   const input = document.getElementById('prompt-input');
   const prompt = input.value.trim();
   if (!prompt && !currentImageBase64) return;
 
-  isProcessing = true;
-  document.getElementById('send-btn').disabled = true;
-
+  setSending(true);
   addMessage('user', prompt || '(image uploaded)', {});
   input.value = '';
   showTyping();
@@ -173,44 +220,46 @@ async function sendMessage() {
     let data = await postChat(prompt || 'What do you see in this image?', currentImageBase64);
 
     // The model asked to see the current scene instead of guessing — grab
-    // a fresh frame and resend the same question once. No image available
-    // (camera not on) means we can't fulfill it; say so instead of looping.
+    // a fresh frame and resend the same question once. No stream attached
+    // (camera never enabled) means we can't fulfill it yet — offer a
+    // one-click way to turn the camera on and retry, instead of a dead-end
+    // message the user has no way to act on.
     if (data.needs_camera) {
       const frame = captureCurrentFrame();
       if (frame) {
         data = await postChat(prompt || 'What do you see in this image?', frame, true);
       } else {
         hideTyping();
-        addMessage('assistant', "I'd need the camera on to check that — open Live Watch first.", {});
         clearImage();
-        isProcessing = false;
-        document.getElementById('send-btn').disabled = false;
+        setSending(false);
+        addCameraEnableMessage(async () => {
+          setSending(true);
+          showTyping();
+          try {
+            const retryFrame = captureCurrentFrame();
+            const retryData = await postChat(prompt || 'What do you see in this image?', retryFrame, true);
+            hideTyping();
+            renderChatResponse(retryData);
+          } catch (err) {
+            hideTyping();
+            addMessage('assistant', '⚠️ Error: ' + err.message, {});
+          }
+          setSending(false);
+          input.focus();
+        });
         return;
       }
     }
 
     hideTyping();
-
-    if (data.scene_unchanged) {
-      addMessage('assistant', '👁️ Scene unchanged — skipping reasoning. Still watching...', {
-        model: data.provider + '/' + data.model,
-      });
-    } else {
-      let displayText = data.text || '...';
-      if (data.think_blocks && data.think_blocks.length > 0) {
-        displayText += '\n\n<details><summary>💭 Thinking</summary>\n' + data.think_blocks.join('\n') + '\n</details>';
-      }
-      addMessage('assistant', displayText, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls });
-    }
-
+    renderChatResponse(data);
     clearImage();
   } catch (err) {
     hideTyping();
     addMessage('assistant', '⚠️ Error: ' + err.message, {});
   }
 
-  isProcessing = false;
-  document.getElementById('send-btn').disabled = false;
+  setSending(false);
   input.focus();
 }
 
@@ -242,7 +291,8 @@ const LIVE_SETTINGS_KEY = 'chitragupt-live-settings';
 const THRESHOLD_LEVELS = { 1: 6, 2: 12, 3: 22 };
 const THRESHOLD_LABELS = { 1: 'high', 2: 'medium', 3: 'low' };
 
-let liveActive = false;
+let liveActive = false; // Live Watch's autonomous polling loop specifically
+let cameraStreamActive = false; // camera stream attached at all (Live Watch OR manual toggle)
 let liveStream = null;
 let liveTimer = null;
 let liveSending = false;
@@ -328,14 +378,23 @@ async function switchMode(mode) {
   document.getElementById('mode-chat-btn').classList.toggle('active', mode === 'chat');
   document.getElementById('mode-live-btn').classList.toggle('active', mode === 'live');
   document.getElementById('upload-img-btn').style.display = mode === 'live' ? 'none' : '';
+  // Live Watch owns the camera lifecycle directly while active — the manual
+  // toggle is only for on-demand capture in Chat mode, showing both would
+  // just invite confusion about which one is actually in control.
+  document.getElementById('camera-toggle-btn').style.display = mode === 'live' ? 'none' : '';
   document.getElementById('prompt-input').placeholder =
     mode === 'live' ? 'Ask about what the camera sees (optional)...' : 'Ask me anything...';
 }
 
-async function startLive() {
+// Raw camera stream lifecycle — just getUserMedia + wiring the <video>
+// element, no autonomous polling. Used directly by the manual "Enable
+// camera" toggle (on-demand capture only, no per-interval Groq calls), and
+// as the first step of full Live Watch mode (see startLive below).
+async function startCameraStream() {
+  if (cameraStreamActive) return true;
   if (!window.isSecureContext) {
-    addMessage('assistant', '⚠️ Live camera requires a secure connection (HTTPS). Deploy behind HTTPS or use localhost to test.', {});
-    return;
+    addMessage('assistant', '⚠️ Camera requires a secure connection (HTTPS). Deploy behind HTTPS or use localhost to test.', {});
+    return false;
   }
   try {
     liveStream = await navigator.mediaDevices.getUserMedia({
@@ -344,14 +403,53 @@ async function startLive() {
     });
   } catch (err) {
     addMessage('assistant', '⚠️ Could not access camera: ' + err.message, {});
-    return;
+    return false;
   }
-
   const video = document.getElementById('camera-video');
   video.srcObject = liveStream;
   document.getElementById('live-preview').style.display = 'flex';
-  document.getElementById('mode-live-btn').classList.add('live-active');
+  cameraStreamActive = true;
+  updateCameraToggleBtn();
+  return true;
+}
 
+function stopCameraStream() {
+  if (liveStream) {
+    liveStream.getTracks().forEach((t) => t.stop());
+    liveStream = null;
+  }
+  document.getElementById('live-preview').style.display = 'none';
+  cameraStreamActive = false;
+  updateCameraToggleBtn();
+}
+
+function updateCameraToggleBtn() {
+  const btn = document.getElementById('camera-toggle-btn');
+  if (!btn) return;
+  btn.classList.toggle('camera-on', cameraStreamActive);
+  btn.title = cameraStreamActive ? 'Turn camera off' : 'Enable camera for on-demand questions (no continuous watching)';
+}
+
+// Manual toggle — deliberately does NOT touch Live Watch's polling loop.
+// This is "camera available for request_camera to use," not "watch
+// continuously" — kept separate so the camera is never running (and
+// costing nothing extra since it's stream-only, but also never silently
+// left on) unless the user explicitly asked for either mode.
+async function toggleCameraStream() {
+  if (cameraStreamActive && !liveActive) {
+    stopCameraStream();
+  } else if (!cameraStreamActive) {
+    await startCameraStream();
+  }
+  // If Live Watch's polling is active, leave the stream alone — that tab
+  // owns it; use the Live Watch tab's own close button to stop both together.
+}
+
+async function startLive() {
+  const ok = await startCameraStream();
+  if (!ok) return;
+
+  document.getElementById('mode-live-btn').classList.add('live-active');
   liveActive = true;
   framesWatched = 0;
   framesSent = 0;
@@ -365,13 +463,9 @@ function stopLive() {
   liveActive = false;
   if (liveTimer) clearInterval(liveTimer);
   liveTimer = null;
-  if (liveStream) {
-    liveStream.getTracks().forEach((t) => t.stop());
-    liveStream = null;
-  }
-  document.getElementById('live-preview').style.display = 'none';
   document.getElementById('mode-live-btn').classList.remove('live-active');
   updateLiveStats();
+  stopCameraStream();
 }
 
 function restartLiveTimer() {
