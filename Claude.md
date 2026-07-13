@@ -251,6 +251,26 @@ checks didn't catch:
   real number for this app's actual resolution/quality settings instead of
   guessing.
 
+### Service worker cache-busting (fixed 2026-07-13, after user reported missing UI)
+`server/static/sw.js` uses a cache-first strategy for the app shell
+(`index.html`/`app.js`/`style.css`, keyed by `CACHE_NAME`) — standard PWA
+pattern, but a real trap during active development: the service worker
+only re-fetches and repopulates its cache when **its own script bytes
+change** (that's what triggers a new `install` event). `CACHE_NAME` had
+stayed `'chitragupt-shell-v1'` across every commit this whole session, so
+any browser that had visited the app even once before today kept serving
+the stale cached shell through every subsequent deploy — new features
+(voice input, camera toggle, etc.) were silently invisible despite being
+correctly shipped in the code, because the browser never re-fetched
+`index.html`/`app.js` at all. **Bumped to `'chitragupt-shell-v2'`** to force
+eviction — after this deploys, a normal page load (no need to hard-refresh
+first) picks up the new shell, since `skipWaiting()`/`clients.claim()` were
+already in place. Bumping `CACHE_NAME` needs to become routine going
+forward: any time `index.html`/`app.js`/`style.css` change and the change
+needs to actually reach an existing visitor without them manually clearing
+site data, `CACHE_NAME` must change too — this was a real gap the whole
+session, not a one-off.
+
 ### Camera stream decoupled from Live Watch polling (added 2026-07-13, fifth pass)
 Two user-reported gaps: `request_camera` failing silently with no camera
 enabled just showed inert text ("open Live Watch first") with nothing
