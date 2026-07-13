@@ -254,6 +254,13 @@ async function sendMessage() {
     hideTyping();
     renderChatResponse(data);
     clearImage();
+
+    // The model wants to keep watching for something specific, not just
+    // take one look — switch into Live Watch so it actually can. If
+    // already there (or the camera's already on), this is a no-op.
+    if (data.needs_live_search) {
+      await switchMode('live');
+    }
   } catch (err) {
     hideTyping();
     addMessage('assistant', '⚠️ Error: ' + err.message, {});

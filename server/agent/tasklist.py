@@ -91,6 +91,24 @@ def clear_document():
         DOCUMENT_FILE.unlink()
 
 
+def start_find_task(target: str) -> dict:
+    """Register a "find <target>" item as the active goal — used by the
+    request_live_search tool. Deliberately atomic and self-contained (adds
+    one item to whatever document already exists, or creates a new one)
+    rather than relying on the model separately calling update_task_list
+    with the full list — a live-search request should always succeed at
+    registering its goal, not depend on the model remembering a second step.
+    """
+    existing = get_document()
+    content = f"Find {target.strip()}"
+    if existing and existing.get("items"):
+        # Don't duplicate if this exact search is already tracked.
+        if any(i["content"] == content for i in existing["items"]):
+            return existing
+        return set_document(existing["title"], existing["items"] + [{"content": content, "status": "in_progress"}])
+    return set_document(content, [{"content": content, "status": "in_progress"}])
+
+
 MAX_OBSERVATIONS_PER_ITEM = 5
 
 

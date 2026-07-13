@@ -290,6 +290,30 @@ class ChitraguptAgent:
                 "needs_camera": True,
             }
 
+        # request_live_search: same reasoning as request_camera (the browser
+        # owns the camera, not the server), but this starts the client's
+        # continuous Live Watch loop instead of a one-shot frame. Unlike
+        # request_camera there's no Phase B resend of this exact message —
+        # the client acknowledges and switches to watching, and the actual
+        # finding happens across subsequent is_live_frame ticks — so this
+        # response is recorded to memory normally, not suppressed.
+        live_search_request = next((r for r in tool_results if r["tool"] == "request_live_search"), None)
+        if live_search_request:
+            target = live_search_request["arguments"].get("target", "it")
+            final_text = self._strip_tool_blocks(clean_text) or f"Watching for {target} now."
+            if not is_live_frame:
+                self.memory.add("assistant", final_text)
+            return {
+                "text": final_text,
+                "model": response.model,
+                "provider": response.provider,
+                "tool_calls": tool_results,
+                "think_blocks": think_blocks,
+                "scene_description": scene_description,
+                "needs_live_search": True,
+                "search_target": target,
+            }
+
         if tool_results and any(self.tools.get(r["tool"]).needs_followup for r in tool_results):
             tool_context = "\n\n".join(
                 f"Tool '{r['tool']}' returned:\n{r['result']}" for r in tool_results
@@ -394,12 +418,15 @@ class ChitraguptAgent:
 
         tool_instruction = ""
         if settings.TOOLS_ENABLED:
-            # request_camera only makes sense when this turn has no image to
-            # look at yet — a live-frame ping or an image-attached message
-            # already has one, and offering the tool there just invites the
-            # model to ask for something it already has.
+            # request_camera/request_live_search only make sense when this
+            # turn has no image to look at yet — a live-frame ping or an
+            # image-attached message already has one, and offering either
+            # tool there just invites the model to ask for something it
+            # already has (or, for request_live_search, to re-start watching
+            # that's already running).
             offer_camera = not has_image and not is_live_frame
-            tools = [t for t in self.tools.list_tools() if t.name != "request_camera" or offer_camera]
+            camera_tool_names = {"request_camera", "request_live_search"}
+            tools = [t for t in self.tools.list_tools() if t.name not in camera_tool_names or offer_camera]
             tool_list = "\n".join(
                 f"- {t.name}({', '.join(t.parameters)}): {t.description}"
                 for t in tools
@@ -430,10 +457,14 @@ class ChitraguptAgent:
                 "user automatically when it's done. Start it, then keep helping with "
                 "whatever's next.\n"
                 "- update_task_list: use whenever you're guiding a multi-step task (a "
-                "recipe, a shopping list, a project), OR when the user gives you something "
-                "to track/find/watch for (e.g. 'help me find the ice cream' is a one-item "
-                "task). Do this FIRST, before anything else, so later frames have a goal "
-                "to check against. Always send the FULL item list, even items already "
+                "recipe, a shopping list, a project)."
+                + (
+                    " For a plain 'help me find X' with no other steps involved, use "
+                    "request_live_search instead — it registers the goal for you."
+                    if offer_camera else ""
+                )
+                + " Do this FIRST, before anything else, so later frames "
+                "have a goal to check against. Always send the FULL item list, even items already "
                 "completed — anything you leave out is dropped. Mark finished items "
                 "'completed' rather than removing them, and use 'skipped' with a note for "
                 "substitutions. If a [Task list] is shown above, read it before updating "
@@ -454,8 +485,13 @@ class ChitraguptAgent:
                 "checking these logged notes, not just the current frame.\n"
                 + (
                     "- request_camera: no image is attached to this message. If answering "
-                    "needs to see the current scene, call this instead of guessing — do "
-                    "not describe or assume what's currently visible.\n"
+                    "needs a single look at the current scene, call this instead of "
+                    "guessing — do not describe or assume what's currently visible.\n"
+                    "- request_live_search: use when the user wants you to help FIND a "
+                    "specific object and one frame won't be enough (they'll need to move "
+                    "the camera around while you keep checking). This starts continuous "
+                    "watching scoped only to that target — don't use it for general "
+                    "cooking help or anything else, that's not enabled through this tool.\n"
                     if offer_camera else ""
                 )
             )

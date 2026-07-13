@@ -251,6 +251,46 @@ checks didn't catch:
   real number for this app's actual resolution/quality settings instead of
   guessing.
 
+### `request_live_search` — model-initiated continuous watching, scoped to finding one thing (added 2026-07-13, sixth pass)
+Requested explicitly scoped: "only for finding things as of now, nothing
+else — no helping live, etc, we will expand this later." Sits alongside
+`request_camera` as its continuous-watching sibling: `request_camera` pulls
+one frame, `request_live_search(target)` starts Live Watch's existing
+polling/silence/observation loop, scoped to a single goal.
+
+- **`tasklist.start_find_task(target)`** — new helper, deliberately atomic:
+  adds a `"Find {target}"` item (or reuses an existing identical one) without
+  requiring the model to separately call `update_task_list` with the full
+  list. Called directly inside `tool_request_live_search`'s `fn`, not left
+  as a "the model should remember to do this too" step — same lesson as the
+  `content`/`task` field-drift fixes from earlier passes: don't make
+  correctness depend on the model doing two things in the right order when
+  one atomic call can guarantee it.
+- **No new watching logic was needed.** The scoping to "only finds things,
+  does nothing else" comes for free from the existing live-frame silence
+  protocol — the model only ever speaks up when the *active task-list goal*
+  changes, and here the goal is always exactly "find X," so by construction
+  it can't drift into general cooking help or anything else through this
+  path. Verified end-to-end in a unit test: `request_live_search` registers
+  the goal, and a subsequent simulated live-frame tick correctly sees
+  `"Find ice cream"` injected into its prompt and returns `[SILENT]`.
+- **agent.py**: short-circuits the same way `request_camera` does (server
+  can't turn on the browser's camera), returning `needs_live_search: true` +
+  `search_target`. Unlike `request_camera` there's no Phase B resend of the
+  same message — the client just switches into watching mode and the actual
+  finding happens across subsequent `is_live_frame` ticks — so this response
+  is recorded to memory normally, no `is_camera_followup`-style suppression
+  needed.
+- **`app.js`**: `sendMessage()` calls `switchMode('live')` when
+  `data.needs_live_search` is true — reuses the exact same camera+polling
+  startup as manually clicking the Live Watch tab; no-ops harmlessly if
+  already there.
+- **Tool-offering gate**: shares `offer_camera`'s condition (`not has_image
+  and not is_live_frame`) with `request_camera` — caught and fixed a bug
+  during testing where the `update_task_list` guidance text mentioned
+  `request_live_search` by name unconditionally, even on turns where the
+  tool itself wasn't listed (confusing on live ticks) — now gated the same way.
+
 ### Service worker cache-busting (fixed 2026-07-13, after user reported missing UI)
 `server/static/sw.js` uses a cache-first strategy for the app shell
 (`index.html`/`app.js`/`style.css`, keyed by `CACHE_NAME`) — standard PWA

@@ -196,6 +196,18 @@ def tool_request_camera() -> str:
     return "CAMERA_REQUESTED"
 
 
+def tool_request_live_search(target: str) -> str:
+    """Registers the find-goal (so the live-frame silence/observation
+    machinery has something to check frames against) and returns a marker.
+    Actually starting the camera stream + polling is intercepted specially
+    in agent.py/the client, same pattern as request_camera — the server
+    can't turn on the browser's camera itself.
+    """
+    from . import tasklist
+    tasklist.start_find_task(target)
+    return "LIVE_SEARCH_REQUESTED"
+
+
 def build_default_tools() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(Tool(
@@ -291,14 +303,39 @@ def build_default_tools() -> ToolRegistry:
     registry.register(Tool(
         name="request_camera",
         description=(
-            "Ask for a fresh camera frame when answering requires seeing the "
-            "current scene and no image is attached to this message (e.g. "
-            "'where is X', 'is Y done yet'). Only usable when no image was "
-            "already provided this turn. Do not guess an answer that depends "
-            "on the current scene without calling this first."
+            "Ask for a single fresh camera frame when answering requires "
+            "seeing the current scene RIGHT NOW and no image is attached to "
+            "this message (e.g. 'is Y done yet', 'what's on the counter'). "
+            "One frame, one look — use request_live_search instead if the "
+            "user needs you to keep watching to find something. Only usable "
+            "when no image was already provided this turn. Do not guess an "
+            "answer that depends on the current scene without calling this "
+            "first."
         ),
         fn=tool_request_camera,
         parameters={},
+        needs_followup=False,
+    ))
+    registry.register(Tool(
+        name="request_live_search",
+        description=(
+            "Start continuously watching the camera to help find a specific "
+            "physical object the user is looking for (e.g. 'help me find "
+            "the ice cream', 'where did I put my keys'). Use this instead "
+            "of request_camera when a single frame won't be enough — the "
+            "user needs to move the camera around while you keep checking. "
+            "This ONLY watches for the named target; do not use it for "
+            "general cooking guidance, task tracking, or any other kind of "
+            "ongoing help — that's not enabled yet. Once started, stay "
+            "silent on frames that don't show the target (the live-frame "
+            "protocol handles this automatically) and speak up only when "
+            "you actually see it, or if the user seems to be searching the "
+            "wrong place."
+        ),
+        fn=tool_request_live_search,
+        parameters={
+            "target": {"type": "string", "description": "The specific thing to look for, e.g. 'ice cream' or 'my keys'", "required": True},
+        },
         needs_followup=False,
     ))
     return registry
