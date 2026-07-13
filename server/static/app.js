@@ -72,6 +72,27 @@ function hideTyping() {
   if (el) el.remove();
 }
 
+// Captures the current live camera frame, if the stream is actually
+// running — used to fulfill a needs_camera round trip from a text-only turn.
+function captureCurrentFrame() {
+  const video = document.getElementById('camera-video');
+  if (!liveActive || !video || !video.videoWidth) return null;
+  const canvas = document.getElementById('capture-canvas');
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
+}
+
+async function postChat(prompt, imageBase64) {
+  const resp = await fetch('/v1/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, image_base64: imageBase64 }),
+  });
+  return resp.json();
+}
+
 async function sendMessage() {
   if (isProcessing) return;
   const input = document.getElementById('prompt-input');
@@ -86,16 +107,26 @@ async function sendMessage() {
   showTyping();
 
   try {
-    const resp = await fetch('/v1/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        prompt: prompt || 'What do you see in this image?',
-        image_base64: currentImageBase64,
-      }),
-    });
+    let data = await postChat(prompt || 'What do you see in this image?', currentImageBase64);
+
+    // The model asked to see the current scene instead of guessing — grab
+    // a fresh frame and resend the same question once. No image available
+    // (camera not on) means we can't fulfill it; say so instead of looping.
+    if (data.needs_camera) {
+      const frame = captureCurrentFrame();
+      if (frame) {
+        data = await postChat(prompt || 'What do you see in this image?', frame);
+      } else {
+        hideTyping();
+        addMessage('assistant', "I'd need the camera on to check that — open Live Watch first.", {});
+        clearImage();
+        isProcessing = false;
+        document.getElementById('send-btn').disabled = false;
+        return;
+      }
+    }
+
     hideTyping();
-    const data = await resp.json();
 
     if (data.scene_unchanged) {
       addMessage('assistant', '👁️ Scene unchanged — skipping reasoning. Still watching...', {
@@ -306,8 +337,10 @@ function meanGrayscaleDelta(a, b) {
   return total / count;
 }
 
+let pendingLiveFrame = null; // latest frame captured while a request was in flight
+
 async function sampleLiveFrame() {
-  if (!liveActive || liveSending) return;
+  if (!liveActive) return;
   const video = document.getElementById('camera-video');
   if (!video.videoWidth) return;
 
@@ -326,6 +359,15 @@ async function sampleLiveFrame() {
   lastSentDiffData = sample;
   framesSent += 1;
   updateLiveStats();
+
+  if (liveSending) {
+    // Already mid-request (e.g. a slow tool call) — remember this frame
+    // instead of dropping it, so a moment that matters (marinade done, the
+    // thing you're looking for comes into view) isn't silently lost while
+    // the agent is busy. Only the latest matters; older ones are superseded.
+    pendingLiveFrame = video;
+    return;
+  }
   await sendLiveFrame(video);
 }
 
@@ -342,7 +384,7 @@ async function sendLiveFrame(video) {
 
   const input = document.getElementById('prompt-input');
   const typedPrompt = input.value.trim();
-  const prompt = typedPrompt || 'Describe what has changed in the scene, if anything of note.';
+  const prompt = typedPrompt || 'Watch tick — check the scene against the active task, if any; stay silent if nothing relevant changed.';
   if (typedPrompt) input.value = '';
 
   try {
@@ -367,5 +409,12 @@ async function sendLiveFrame(video) {
     addMessage('assistant', '⚠️ Live frame error: ' + err.message, {});
   } finally {
     liveSending = false;
+    if (pendingLiveFrame && liveActive) {
+      const frame = pendingLiveFrame;
+      pendingLiveFrame = null;
+      sendLiveFrame(frame); // flush immediately rather than waiting for the next interval tick
+    } else {
+      pendingLiveFrame = null;
+    }
   }
 }

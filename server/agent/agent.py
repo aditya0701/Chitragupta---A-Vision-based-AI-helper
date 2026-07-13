@@ -7,6 +7,7 @@ e.g. Colab.
 """
 
 from __future__ import annotations
+import asyncio
 import json
 import logging
 import re
@@ -17,6 +18,12 @@ from ..config import settings
 from . import ToolRegistry, ConversationMemory, build_default_tools, timers, tasklist
 
 logger = logging.getLogger("chitragupt")
+
+# Sentinel a live-frame turn writes as its entire visible reply to mean
+# "nothing new relevant to the active goal" — stripped before display so it
+# never leaks to the user, and never honored on a direct user turn (see
+# _process_locked).
+SILENT_MARKER = "[SILENT]"
 
 
 class FrameBuffer:
@@ -81,8 +88,23 @@ class ChitraguptAgent:
         self.tools = tools or build_default_tools()
         self.memory = ConversationMemory()
         self.frame_buffer = FrameBuffer()
+        # Serializes every turn (typed chat, live-frame ping, timer
+        # completion) so two of them can never interleave reads/writes of
+        # the shared task-list document or timer state. Not reentrant —
+        # internal callers must use the *_locked variants below, never
+        # re-acquire this from within a turn that already holds it.
+        self._lock = asyncio.Lock()
 
     async def process(
+        self,
+        image_base64: Optional[str],
+        prompt: str,
+        is_live_frame: bool = False,
+    ) -> dict:
+        async with self._lock:
+            return await self._process_locked(image_base64, prompt, is_live_frame)
+
+    async def _process_locked(
         self,
         image_base64: Optional[str],
         prompt: str,
@@ -141,6 +163,7 @@ class ChitraguptAgent:
             scene=scene_description,
             has_image=bool(image_base64) and not split_stages,
             think=think,
+            is_live_frame=is_live_frame,
         )
 
         response = await self.backend.chat(
@@ -182,6 +205,25 @@ class ChitraguptAgent:
                 and not r["result"].startswith("JSON parse error:")
             ]
 
+        # request_camera can't be resolved server-side — the image lives in
+        # the browser. Short-circuit here instead of running the normal
+        # tool-result/follow-up flow: tell the client to capture a frame and
+        # resend this same question, rather than letting the model guess.
+        camera_request = next((r for r in tool_results if r["tool"] == "request_camera"), None)
+        if camera_request:
+            final_text = self._strip_tool_blocks(clean_text) or "Let me take a look."
+            if not is_live_frame:
+                self.memory.add("assistant", final_text)
+            return {
+                "text": final_text,
+                "model": response.model,
+                "provider": response.provider,
+                "tool_calls": tool_results,
+                "think_blocks": think_blocks,
+                "scene_description": scene_description,
+                "needs_camera": True,
+            }
+
         if tool_results and any(self.tools.get(r["tool"]).needs_followup for r in tool_results):
             tool_context = "\n\n".join(
                 f"Tool '{r['tool']}' returned:\n{r['result']}" for r in tool_results
@@ -205,17 +247,32 @@ class ChitraguptAgent:
             # strip the raw tool-call syntax out of what's shown to the user.
             # If the model wrote nothing but the tool call itself, fall back
             # to the tool's own confirmation string rather than showing
-            # nothing (or, worse, the raw unstripped JSON).
-            final_text = self._strip_tool_blocks(clean_text) or "\n".join(
-                r["result"] for r in tool_results
-            )
+            # nothing (or, worse, the raw unstripped JSON) — except on a
+            # live-frame tick, where log_observation is expected to fire
+            # silently on most frames; showing its raw confirmation string
+            # would leak bookkeeping into the chat feed exactly where we're
+            # trying to suppress noise.
+            stripped = self._strip_tool_blocks(clean_text)
+            if not stripped and is_live_frame:
+                final_text = ""
+            else:
+                final_text = stripped or "\n".join(r["result"] for r in tool_results)
         else:
             final_text = clean_text or full_text
+
+        # Live-frame turns are allowed to say nothing (the model is told to
+        # write SILENT_MARKER when a frame has nothing new relevant to the
+        # active goal) — this is the EOS-style silence from the streaming
+        # narration problem. Direct user turns never hit this: they always
+        # got a real prompt from the user and must always get a real reply,
+        # so this check is deliberately gated on is_live_frame.
+        if is_live_frame and final_text.strip().upper() == SILENT_MARKER:
+            final_text = ""
 
         # Fold in any timer that finished while we were talking, so a
         # completion surfaces immediately in this reply instead of waiting
         # for the next background /v1/timers/check poll tick.
-        timer_update = await self.check_timers()
+        timer_update = await self._check_timers_locked()
         if timer_update["completed"]:
             timer_lines = "\n".join(
                 f"⏰ {t['label']}: {t['message']}" for t in timer_update["completed"]
@@ -240,6 +297,7 @@ class ChitraguptAgent:
         scene: Optional[str],
         has_image: bool = False,
         think: bool = True,
+        is_live_frame: bool = False,
     ) -> str:
         """Build the prompt for the reasoning model."""
         parts = [
@@ -259,14 +317,26 @@ class ChitraguptAgent:
         doc_summary = tasklist.render_summary(tasklist.get_document())
         if doc_summary:
             parts.append(f"\n[Task list]\n{doc_summary}")
+            parts.append(
+                "Indented lines under an item are observations already logged "
+                "against it — your memory of what's been seen so far. Check "
+                "these before answering instead of assuming only the current "
+                "frame/message is all you know."
+            )
 
         parts.append(f"\n[User]\n{prompt}")
 
         tool_instruction = ""
         if settings.TOOLS_ENABLED:
+            # request_camera only makes sense when this turn has no image to
+            # look at yet — a live-frame ping or an image-attached message
+            # already has one, and offering the tool there just invites the
+            # model to ask for something it already has.
+            offer_camera = not has_image and not is_live_frame
+            tools = [t for t in self.tools.list_tools() if t.name != "request_camera" or offer_camera]
             tool_list = "\n".join(
                 f"- {t.name}({', '.join(t.parameters)}): {t.description}"
-                for t in self.tools.list_tools()
+                for t in tools
             )
             tool_instruction = (
                 "\n\nYou have tools available. To call one, write this in your "
@@ -281,12 +351,37 @@ class ChitraguptAgent:
                 "user automatically when it's done. Start it, then keep helping with "
                 "whatever's next.\n"
                 "- update_task_list: use whenever you're guiding a multi-step task (a "
-                "recipe, a shopping list, a project). Always send the FULL item list, "
-                "even items already completed — anything you leave out is dropped. Mark "
-                "finished items 'completed' rather than removing them, and use 'skipped' "
-                "with a note for substitutions. If a [Task list] is shown above, read it "
-                "before updating it, and don't just recite the whole plan back in your "
-                "reply — the user can already see it."
+                "recipe, a shopping list, a project), OR when the user gives you something "
+                "to track/find/watch for (e.g. 'help me find the ice cream' is a one-item "
+                "task). Do this FIRST, before anything else, so later frames have a goal "
+                "to check against. Always send the FULL item list, even items already "
+                "completed — anything you leave out is dropped. Mark finished items "
+                "'completed' rather than removing them, and use 'skipped' with a note for "
+                "substitutions. If a [Task list] is shown above, read it before updating "
+                "it, and don't just recite the whole plan back in your reply — the user "
+                "can already see it.\n"
+                "- log_observation: call this on every relevant frame for an in-progress "
+                "task-list item — e.g. what you currently see related to it — even on "
+                "turns where you don't say anything to the user. This is your memory "
+                "across frames; a later question like 'where is X' should be answered by "
+                "checking these logged notes, not just the current frame.\n"
+                + (
+                    "- request_camera: no image is attached to this message. If answering "
+                    "needs to see the current scene, call this instead of guessing — do "
+                    "not describe or assume what's currently visible.\n"
+                    if offer_camera else ""
+                )
+            )
+        if is_live_frame and doc_summary:
+            parts.append(
+                f"\nThis is an automated watch tick, not a direct question. Check the "
+                f"current frame against the [Task list] item(s) above and their logged "
+                f"observations. Always call log_observation with what this frame shows "
+                f"relevant to an in-progress item. Only write a visible reply if this "
+                f"frame changes something worth telling the user about (progress, a "
+                f"problem, the thing they're looking for). If nothing here is new or "
+                f"relevant, your entire visible reply must be exactly {SILENT_MARKER} "
+                "and nothing else — do not describe the scene."
             )
         thinking_instruction = (
             "\n\nThink step by step before responding."
@@ -369,6 +464,12 @@ class ChitraguptAgent:
         tasklist.clear_document()
 
     async def check_timers(self) -> dict:
+        """Public entry point for the /v1/timers/check poll — acquires the
+        turn lock itself, since this is called independently of process()."""
+        async with self._lock:
+            return await self._check_timers_locked()
+
+    async def _check_timers_locked(self) -> dict:
         """Fire completion calls for any due timers, return completions + free progress.
 
         Called on every client poll, and opportunistically from process() too
@@ -379,8 +480,14 @@ class ChitraguptAgent:
         actually done. Routed through the same prompt-building and
         tool-execution path as a normal turn, so the completion can also
         update the task list (mark the step done) rather than just narrate it.
+
+        Assumes self._lock is already held by the caller (process() or the
+        public check_timers() wrapper) — must not be called concurrently
+        with itself, since timers.mark_firing/mark_fired do read-modify-write
+        on the same file.
         """
         for t in timers.due_unfired():
+            timers.mark_firing(t["id"])
             timer_prompt = (
                 f"[Timer completed]\nThe timer '{t['label']}' just finished after "
                 f"{t['duration_seconds']} seconds.\nContext: {t['context'] or 'N/A'}\n"

@@ -74,6 +74,7 @@ class ChatResponse(BaseModel):
     scene_unchanged: bool = False
     scene_description: Optional[str] = None
     think_blocks: list[str] = []
+    needs_camera: bool = False
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────

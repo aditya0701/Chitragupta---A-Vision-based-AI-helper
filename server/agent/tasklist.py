@@ -48,11 +48,16 @@ def set_document(title: str, items: list[dict]) -> dict:
         if status not in VALID_STATUSES:
             status = "pending"
         item_id = item.get("id") or existing_ids.get(content) or str(uuid.uuid4())[:8]
+        existing_item = next((i for i in existing.get("items", []) if i.get("id") == item_id), None)
         normalized.append({
             "id": item_id,
             "content": content,
             "status": status,
             "note": item.get("note"),
+            # Preserved across edits like id/content — the model rewrites
+            # the item list on every update_task_list call but doesn't know
+            # about (and shouldn't have to resend) prior observations.
+            "observations": (existing_item or {}).get("observations", []),
         })
 
     document = {"title": title, "items": normalized}
@@ -64,6 +69,36 @@ def set_document(title: str, items: list[dict]) -> dict:
 def clear_document():
     if DOCUMENT_FILE.exists():
         DOCUMENT_FILE.unlink()
+
+
+MAX_OBSERVATIONS_PER_ITEM = 5
+
+
+def add_observation(item_ref: str, note: str) -> str:
+    """Append a short note to whichever task-list item `item_ref` matches
+    (by id or, case-insensitively, by content). Capped per item so the
+    prompt injection in render_summary stays small regardless of session
+    length — older notes are dropped, not the whole log.
+    """
+    document = get_document()
+    if not document or not document.get("items"):
+        return "No active task list — nothing to log this observation against."
+
+    match = next(
+        (i for i in document["items"]
+         if i["id"] == item_ref or i["content"].lower() == item_ref.strip().lower()),
+        None,
+    )
+    if not match:
+        return f"No task list item matching '{item_ref}' — check the [Task list] content exactly."
+
+    obs = match.setdefault("observations", [])
+    obs.append(note.strip())
+    if len(obs) > MAX_OBSERVATIONS_PER_ITEM:
+        del obs[: len(obs) - MAX_OBSERVATIONS_PER_ITEM]
+
+    DOCUMENT_FILE.write_text(json.dumps(document, indent=2))
+    return f"Logged observation for '{match['content']}'."
 
 
 _STATUS_MARKS = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]", "skipped": "[-]"}
@@ -80,4 +115,6 @@ def render_summary(document: Optional[dict]) -> str:
         if item.get("note"):
             line += f"  ({item['note']})"
         lines.append(line)
+        for obs in item.get("observations", []):
+            lines.append(f"    - {obs}")
     return "\n".join(lines)

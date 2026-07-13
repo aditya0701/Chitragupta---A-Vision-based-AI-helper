@@ -33,8 +33,8 @@ Phone/browser  →  /v1/chat (FastAPI)
               Vision + reasoning       (see server/backends/)
                      ↓
               [Tool execution]         start_timer, update_task_list,
-              Parses ```tool {...}```  web_search, fetch_page, calculate, get_time
-              blocks from the reply
+              Parses ```tool {...}```  web_search, fetch_page, calculate, get_time,
+              blocks from the reply   log_observation, request_camera (added 2026-07-13)
                      ↓
               [Response]               Text (+ think_blocks for debug UI)
 ```
@@ -133,6 +133,68 @@ context (see `_build_reason_prompt`), so the model doesn't need to be reminded o
 it and can act on it proactively — e.g. deciding *unprompted* mid-conversation
 that it's time to start boiling eggs, not just reacting when told to.
 
+### Observation log & goal-directed vision (added 2026-07-13)
+Motivated by real Live-mode transcripts showing the VideoLLM-online-style
+repetitive-narration failure ("everything remains exactly the same" every
+tick), and a separate discovered bug where typed chat questions never had a
+current camera frame attached at all — the model was answering "where's the
+ice cream" from stale text with no image.
+
+- Each task-list item can now carry `observations: list[str]`
+  (`tasklist.add_observation(item_ref, note)` in `tasklist.py`, capped at
+  `MAX_OBSERVATIONS_PER_ITEM = 5`, oldest dropped first). Rendered nested
+  under the item in `render_summary()`. This is the substitute for
+  VideoLLM-online's KV-cached frame history: we can't reuse image tokens
+  across hosted-API calls the way a self-hosted model reuses its attention
+  cache, so instead each frame is converted to a short text fact once, the
+  pixels are discarded, and only the *text* accumulates across turns.
+- `log_observation` tool (`needs_followup=False`) — the model calls this on
+  every live-frame tick relevant to an in-progress task-list item, whether
+  or not it also decides to say something out loud. This is what lets a
+  later "where is X" question be answered from logged history instead of
+  only the current frame.
+- **Live-frame silence protocol**: `_build_reason_prompt` tells a
+  `is_live_frame=True` turn that if nothing in the current frame is new or
+  relevant to an active task-list item, its entire visible reply must be
+  exactly `SILENT_MARKER` (`"[SILENT]"`, defined at the top of `agent.py`).
+  `_process_locked` strips this to an empty string before it ever reaches
+  the client. This rule is deliberately gated on `is_live_frame` — a direct
+  user turn (typed message, or a `request_camera`-fulfilled turn) is never
+  allowed to go silent, since the user is actively waiting on an answer.
+  Old behavior (always narrate the full scene every tick) is untouched for
+  turns with no active task-list item — silence only kicks in once there's
+  something to be silent *relative to*.
+- **`request_camera` tool** — for a direct text turn with no image attached
+  (the `sendMessage()` bug above). The server can't reach into the client's
+  camera mid-call, so this is a two-phase round trip instead of a normal
+  tool: the model calls `request_camera`, `_process_locked` short-circuits
+  and returns `{needs_camera: true}` *without* running the usual
+  follow-up-call logic, the client (`captureCurrentFrame()` /
+  `postChat()` in `app.js`) grabs the current live-video frame and resends
+  the same prompt with it attached. If the camera isn't actually running
+  (Chat & Image tab, no stream), the client tells the user to open Live
+  Watch instead of retrying blindly. The tool is only offered in the prompt
+  when `has_image=False and not is_live_frame` — live ticks and
+  image-attached turns already have an image, so offering it there would
+  just invite a redundant ask.
+- **Frontend frame buffering**: `sampleLiveFrame()` used to silently drop a
+  tick if a previous request was still in flight (e.g. a slow `web_search`
+  tool call). It now stores the latest frame in `pendingLiveFrame` and
+  `sendLiveFrame`'s `finally` block flushes it immediately once the agent
+  is free, instead of waiting for the next interval tick — so a moment
+  that matters isn't lost to a slow turn elsewhere.
+- **Concurrency lock**: none of the above is safe without serialization —
+  live ticks, typed chat, and the timer poll all hit the same global
+  `ChitraguptAgent` with no prior synchronization, and since every path
+  `await`s real network calls, two turns really could interleave their
+  reads/writes of the task-list file. `ChitraguptAgent._lock` (an
+  `asyncio.Lock`, not reentrant) now wraps `process()` and `check_timers()`
+  entry points; internal call sites use the `_locked` variants
+  (`_process_locked`, `_check_timers_locked`) to avoid deadlocking on
+  re-acquisition. `timers.py` also gained `mark_firing()`, claimed *before*
+  the awaited completion call, so the poll route and a live tick can't both
+  pick up and fire the same due timer.
+
 ### Cost-control patterns worth preserving
 - `Tool.needs_followup` (default `True`) — set `False` for tools whose result is a
   pure confirmation (`start_timer`, `update_task_list`). Tools that surface new
@@ -213,8 +275,10 @@ folded into an active chat reply.
     ├── agent/
     │   ├── agent.py             ChitraguptAgent — main loop, prompt building, tool execution
     │   ├── __init__.py          Tool/ToolRegistry, built-in tools, ConversationMemory
-    │   ├── timers.py            Persisted background timers (wall-clock, survives restarts)
-    │   └── tasklist.py          Persisted task/recipe document (Claude Code TodoWrite-style)
+    │   ├── timers.py            Persisted background timers (wall-clock, survives restarts;
+    │   │                        mark_firing() claim added 2026-07-13 to prevent double-fire)
+    │   └── tasklist.py          Persisted task/recipe document (Claude Code TodoWrite-style;
+    │                            per-item observations + add_observation() added 2026-07-13)
     ├── backends/
     │   ├── __init__.py          VisionBackend ABC, VisionResponse, should_think() heuristic
     │   ├── groq_backend.py      Active backend
@@ -233,17 +297,38 @@ folded into an active chat reply.
 
 The reasoning system prompt is built dynamically in `agent.py::_build_reason_prompt`,
 not stored as a static file. It assembles, per turn: persona line, `[Camera feed]`
-or attached-image note, `[Task list]` (if a document is active), the user's message,
-a thinking-mode instruction, and — if `TOOLS_ENABLED` — the tool list plus
-tool-specific usage guidance (start_timer is fire-and-forget; update_task_list is
-full-list-replace, keep completed items, don't recite the plan back verbatim).
+or attached-image note, `[Task list]` (if a document is active, now with nested
+observations per item), the user's message, a thinking-mode instruction, and —
+if `TOOLS_ENABLED` — the tool list plus tool-specific usage guidance (start_timer
+is fire-and-forget; update_task_list is full-list-replace, keep completed items,
+don't recite the plan back verbatim).
+
+**Added 2026-07-13:** the prompt now branches on `is_live_frame` and `has_image`
+(see "Observation log & goal-directed vision" above) — `request_camera` is only
+listed as a tool when the current turn has no image, and the
+silence/`log_observation` instruction is only injected on live-frame ticks with
+an active task list. Direct user turns keep the original always-answer behavior
+unchanged.
 
 ---
 
 ## TODO
 
 Done this session: ReAct tool parsing, tool executor, timers, task-list tracking,
-Groq reasoning-leak fix, two-mode UI. Remaining:
+Groq reasoning-leak fix, two-mode UI.
+
+Done 2026-07-13 (basic version, meant to be iterated on further): concurrency
+lock across process()/check_timers(), timer double-fire fix, per-item
+observation log + `log_observation` tool, live-frame silence protocol
+(`[SILENT]` marker, scoped to `is_live_frame` only), `request_camera` tool +
+two-phase client round trip for imageless text turns, frontend live-frame
+buffering (stopped dropping frames while busy). Known follow-ups not yet
+done: no pruning of a *completed* item's observations, no retry/backoff on a
+repeated camera-unavailable response, `request_camera` and the silence
+protocol have only been exercised with unit-level checks (fake backend), not
+yet against the live Groq API end-to-end.
+
+Remaining:
 
 - [ ] Voice input (currently text/typed only)
 - [ ] TTS output (text-only for now, by design — add once the text pipeline is

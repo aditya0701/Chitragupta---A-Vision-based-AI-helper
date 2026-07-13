@@ -46,20 +46,35 @@ def start_timer(label: str, duration_seconds: int, context: str = "") -> str:
 
 
 def due_unfired() -> list[dict]:
-    """Timers whose duration has elapsed but haven't gotten a completion message yet."""
+    """Timers whose duration has elapsed but haven't gotten a completion message yet.
+
+    Excludes timers already claimed via mark_firing() — without this, two
+    concurrent callers (the poll route and a live-frame chat turn both
+    landing in the same window) could each pick up the same due timer and
+    fire two completion messages for it.
+    """
     data = _load()
     now = time.time()
     return [
         {"id": tid, **t}
         for tid, t in data.items()
-        if not t["fired"] and now - t["start_time"] >= t["duration_seconds"]
+        if not t["fired"] and not t.get("firing") and now - t["start_time"] >= t["duration_seconds"]
     ]
+
+
+def mark_firing(timer_id: str):
+    """Claim a timer before making the (slow, awaited) completion call for it."""
+    data = _load()
+    if timer_id in data:
+        data[timer_id]["firing"] = True
+        _save(data)
 
 
 def mark_fired(timer_id: str, message: str):
     data = _load()
     if timer_id in data:
         data[timer_id]["fired"] = True
+        data[timer_id]["firing"] = False
         data[timer_id]["message"] = message
         _save(data)
 

@@ -171,6 +171,22 @@ def tool_update_task_list(title: str, items: list) -> str:
     return f"Task list '{title}' updated ({summary})."
 
 
+def tool_log_observation(item: str, note: str) -> str:
+    """Silently record a short fact against a task-list item — the substitute
+    for re-describing the whole scene every turn: write the fact once, read
+    it back later instead of needing the original image again."""
+    from . import tasklist
+    return tasklist.add_observation(item, note)
+
+
+def tool_request_camera() -> str:
+    """Marker tool — never executed for its return value. Its presence in a
+    response is intercepted specially in agent.py to ask the client for a
+    fresh frame, since the server has no way to reach into the browser's
+    camera itself."""
+    return "CAMERA_REQUESTED"
+
+
 def build_default_tools() -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(Tool(
@@ -228,6 +244,35 @@ def build_default_tools() -> ToolRegistry:
             "title": {"type": "string", "description": "Name of the overall task, e.g. 'Chicken Biryani'", "required": True},
             "items": {"type": "array", "description": "Full list of [{content, status, note?}, ...]", "required": True},
         },
+        needs_followup=False,
+    ))
+    registry.register(Tool(
+        name="log_observation",
+        description=(
+            "Silently record a short factual note against a task-list item — "
+            "e.g. what you just saw relevant to it. Does not produce a reply "
+            "to the user by itself; call this on every frame that's relevant "
+            "to an active item, whether or not you also decide to say "
+            "something out loud this turn."
+        ),
+        fn=tool_log_observation,
+        parameters={
+            "item": {"type": "string", "description": "The exact task-list item content (or its id) this observation is about", "required": True},
+            "note": {"type": "string", "description": "Short factual note, e.g. 'freezer drawer open, chicken tenders visible, no ice cream'", "required": True},
+        },
+        needs_followup=False,
+    ))
+    registry.register(Tool(
+        name="request_camera",
+        description=(
+            "Ask for a fresh camera frame when answering requires seeing the "
+            "current scene and no image is attached to this message (e.g. "
+            "'where is X', 'is Y done yet'). Only usable when no image was "
+            "already provided this turn. Do not guess an answer that depends "
+            "on the current scene without calling this first."
+        ),
+        fn=tool_request_camera,
+        parameters={},
         needs_followup=False,
     ))
     return registry
