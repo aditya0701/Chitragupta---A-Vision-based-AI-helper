@@ -205,29 +205,49 @@ class ChitraguptAgent:
 
         if response.truncated:
             # Generation was cut off by max_tokens before the model finished.
-            # Originally only retried when response.reasoning was completely
-            # empty, on the theory that a populated reasoning field meant
-            # the split already happened cleanly. In practice Groq's
-            # parsed-reasoning-format can return a *partial* reasoning
-            # fragment on a mid-stream cutoff while .text still holds the
-            # leftover garbled deliberation — reasoning being non-empty
-            # doesn't mean .text is clean. Any truncation gets retried now,
-            # not just the fully-empty-reasoning case.
-            logger.warning(
-                "Response truncated by max_tokens — retrying once with think=False."
-            )
-            think = False
-            reason_prompt = self._build_reason_prompt(
-                prompt=prompt, scene=scene_description, has_image=has_image,
-                think=think, is_live_frame=is_live_frame,
-            )
-            response = await self.backend.chat(
-                image_base64=None if split_stages else image_base64,
-                prompt=reason_prompt,
-                conversation_history=self.memory.get_history()[-10:],
-                think=think,
-                tools=native_tools,
-            )
+            # Two genuinely different situations need different recoveries:
+            if response.reasoning and not response.text.strip():
+                # Reasoning finished cleanly (it's sitting in the thinking
+                # box), but the model ran out of budget before ever writing
+                # the actual answer. Don't throw that reasoning away and
+                # re-derive it from scratch — feed it back and ask
+                # specifically for the conclusion. Cheaper (short answer
+                # only, no re-reasoning) and the answer is grounded in work
+                # it already did instead of a fresh low-effort guess.
+                logger.warning(
+                    "Truncated with reasoning but no answer text — asking "
+                    "the model to conclude from its own reasoning."
+                )
+                conclude_prompt = (
+                    "You were reasoning through this and ran out of space "
+                    "before writing your answer. Here is your own reasoning "
+                    f"so far:\n\n{response.reasoning}\n\nBased on that, give "
+                    "your final answer now — concise, no further reasoning "
+                    f"needed.\n\nOriginal question: {prompt}"
+                )
+                response = await self.backend.chat(
+                    image_base64=None, prompt=conclude_prompt, think=False, tools=native_tools,
+                )
+            else:
+                # Reasoning itself got cut off or never separated cleanly —
+                # nothing usable to hand back, so start over with a lower
+                # reasoning budget rather than risk the same cutoff twice.
+                logger.warning(
+                    "Truncated with no usable separated reasoning — "
+                    "retrying once from scratch with think=False."
+                )
+                think = False
+                reason_prompt = self._build_reason_prompt(
+                    prompt=prompt, scene=scene_description, has_image=has_image,
+                    think=think, is_live_frame=is_live_frame,
+                )
+                response = await self.backend.chat(
+                    image_base64=None if split_stages else image_base64,
+                    prompt=reason_prompt,
+                    conversation_history=self.memory.get_history()[-10:],
+                    think=think,
+                    tools=native_tools,
+                )
 
         full_text = response.text
 

@@ -251,6 +251,30 @@ checks didn't catch:
   real number for this app's actual resolution/quality settings instead of
   guessing.
 
+### Truncation recovery: conclude-from-reasoning, not blind retry (refined 2026-07-13, eighth pass)
+User correction on the previous pass's diagnosis: the "1 time only thinking
+output" transcript actually had reasoning cleanly separated into the
+collapsible thinking box (proof `response.reasoning` was non-empty) — the
+failure was the model running out of `max_tokens` budget *after* finishing
+its reasoning but *before* writing the actual answer, not raw CoT leaking
+into visible text as originally described. The blanket "retry on any
+truncation" fix from the previous pass still happened to catch this
+correctly, but was wasteful — a full fresh retry throws away reasoning the
+model already did.
+
+Split into two explicit recovery paths in `_process_locked`:
+- **Reasoning present, text empty** (this actual case): don't re-derive
+  from scratch — build a short follow-up prompt that includes the model's
+  own already-generated reasoning verbatim and asks it to conclude,
+  `think=False`. Cheaper (no re-reasoning needed) and the answer is
+  grounded in work already done. Verified the original reasoning text
+  actually reaches the follow-up prompt (not just that a follow-up
+  happens).
+- **Reasoning absent/unusable** (the other truncation shape — garbled
+  partial text, nothing worth reusing): unchanged from the previous pass,
+  fresh retry with `think=False`.
+Bounded to one retry either way, same as before — no unbounded loop risk.
+
 ### Truncation-retry gap closed + request_camera nudge strengthened (fixed 2026-07-13, seventh pass, from a real end-to-end transcript)
 A live test (task list creation, image-based ingredient finding across
 several turns) mostly worked, but surfaced two real gaps:
