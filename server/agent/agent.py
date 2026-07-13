@@ -11,7 +11,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from ..backends import VisionBackend, VisionResponse, should_think
 from ..config import settings
@@ -105,6 +105,26 @@ class ChitraguptAgent:
         async with self._lock:
             return await self._process_locked(image_base64, prompt, is_live_frame, is_camera_followup)
 
+    async def _is_relevant_tick(self, image_base64: str) -> bool:
+        """Cheap pre-filter for live ticks: is this frame worth a full
+        reasoning call? Returns True immediately if there's nothing
+        active to filter against, so behavior is unchanged when no
+        task list exists yet."""
+        doc = tasklist.get_document()
+        active = [i for i in (doc or {}).get("items", []) if i["status"] == "in_progress"]
+        if not active:
+            return True
+        goals = ", ".join(i["content"] for i in active)
+        response = await self.backend.chat(
+            image_base64=image_base64,
+            prompt=(
+                f"Active goals: {goals}. Is this frame relevant to any "
+                "of them? Answer yes or no only, nothing else."
+            ),
+            think=False,
+        )
+        return response.text.strip().lower().startswith("y")
+
     async def _process_locked(
         self,
         image_base64: Optional[str],
@@ -126,6 +146,29 @@ class ChitraguptAgent:
         """
         if not is_live_frame and not is_camera_followup:
             self.memory.add("user", prompt)
+
+        if is_live_frame and image_base64:
+            relevant = await self._is_relevant_tick(image_base64)
+            if not relevant:
+                timer_update = await self._check_timers_locked()
+                final_text = ""
+                if timer_update["completed"]:
+                    final_text = "\n".join(
+                        f"⏰ {t['label']}: {t['message']}" for t in timer_update["completed"]
+                    )
+                return {
+                    "text": final_text,
+                    # ChatResponse (main.py) requires model/provider as
+                    # non-optional strings — "n/a" matches the existing
+                    # convention for a stub response with no real model
+                    # call behind it (see the live-frame rate-limit path
+                    # in main.py's /v1/chat route).
+                    "model": "n/a",
+                    "provider": "n/a",
+                    "tool_calls": [],
+                    "think_blocks": [],
+                    "scene_description": None,
+                }
 
         split_stages = image_base64 and self.backend.SPLIT_VISION_REASONING
 
@@ -401,6 +444,231 @@ class ChitraguptAgent:
             "tool_calls": tool_results or [],
             "think_blocks": think_blocks,
             "scene_description": scene_description,
+        }
+
+    async def process_stream(
+        self,
+        image_base64: Optional[str],
+        prompt: str,
+        is_camera_followup: bool = False,
+    ) -> AsyncIterator[dict]:
+        """Streaming counterpart to process(), for the Chat & Image UI only —
+        not live-frame ticks, which stay on the batched process() path since
+        they're mostly silent/one-line and there's nothing worth watching
+        stream in. Yields events as the model generates:
+          - {"type": "reasoning_delta"/"content_delta", "text": str}
+          - {"type": "tool_call_start", "name": str} — the moment a tool call
+            is committed to, before its result is known
+          - {"type": "tool_result", "tool": str, "result": str}
+          - {"type": "done", "data": {...}} — same dict shape process()
+            returns, once the turn (including any tool follow-up call) is
+            fully resolved.
+
+        Serializes through the same lock as process()/check_timers() — a
+        streamed turn still holds it for its whole duration, so a live-frame
+        tick or timer poll waits for it to finish rather than interleaving.
+        """
+        async with self._lock:
+            async for event in self._process_stream_locked(image_base64, prompt, is_camera_followup):
+                yield event
+
+    async def _stream_backend_call(
+        self, image_base64: Optional[str], prompt: str, think: bool, tools: Optional[list[dict]],
+    ) -> AsyncIterator[dict]:
+        """Delegates to backend.chat_stream() if the backend has one
+        (currently only Groq); otherwise falls back to one blocking chat()
+        call and reports it as a single "done" event — same contract either
+        way, so the caller doesn't need to know which path it got.
+        """
+        if hasattr(self.backend, "chat_stream"):
+            async for event in self.backend.chat_stream(
+                image_base64=image_base64,
+                prompt=prompt,
+                conversation_history=self.memory.get_history()[-10:],
+                think=think,
+                tools=tools,
+            ):
+                yield event
+        else:
+            response = await self.backend.chat(
+                image_base64=image_base64,
+                prompt=prompt,
+                conversation_history=self.memory.get_history()[-10:],
+                think=think,
+                tools=tools,
+            )
+            yield {"type": "done", "response": response}
+
+    async def _process_stream_locked(
+        self,
+        image_base64: Optional[str],
+        prompt: str,
+        is_camera_followup: bool,
+    ) -> AsyncIterator[dict]:
+        if not is_camera_followup:
+            self.memory.add("user", prompt)
+
+        think = should_think(prompt)
+        has_image = bool(image_base64)
+
+        reason_prompt = self._build_reason_prompt(
+            prompt=prompt, scene=None, has_image=has_image, think=think, is_live_frame=False,
+        )
+
+        native_tools = (
+            self.tools.to_openai_tools()
+            if settings.TOOLS_ENABLED and self.backend.SUPPORTS_NATIVE_TOOLS
+            else None
+        )
+
+        response: Optional[VisionResponse] = None
+        async for event in self._stream_backend_call(image_base64, reason_prompt, think, native_tools):
+            if event["type"] == "done":
+                response = event["response"]
+            else:
+                yield event
+
+        if response.truncated:
+            # Same two-case recovery as _process_locked's non-streaming path
+            # (see there for the reasoning). Both retries are one-shot
+            # non-streamed calls — truncation is rare enough that streaming
+            # the retry too isn't worth the extra complexity — but the
+            # recovered text is still surfaced as a content_delta so it
+            # appears in the live bubble instead of popping in only at "done".
+            if response.reasoning and not response.text.strip():
+                logger.warning(
+                    "Truncated with reasoning but no answer text — asking "
+                    "the model to conclude from its own reasoning (stream)."
+                )
+                conclude_prompt = (
+                    "You were reasoning through this and ran out of space "
+                    "before writing your answer. Here is your own reasoning "
+                    f"so far:\n\n{response.reasoning}\n\nBased on that, give "
+                    "your final answer now — concise, no further reasoning "
+                    f"needed.\n\nOriginal question: {prompt}"
+                )
+                response = await self.backend.chat(
+                    image_base64=None, prompt=conclude_prompt, think=False, tools=native_tools,
+                )
+            else:
+                logger.warning(
+                    "Truncated with no usable separated reasoning — "
+                    "retrying once from scratch with think=False (stream)."
+                )
+                think = False
+                reason_prompt = self._build_reason_prompt(
+                    prompt=prompt, scene=None, has_image=has_image, think=think, is_live_frame=False,
+                )
+                response = await self.backend.chat(
+                    image_base64=image_base64, prompt=reason_prompt,
+                    conversation_history=self.memory.get_history()[-10:],
+                    think=think, tools=native_tools,
+                )
+            if response.text:
+                yield {"type": "content_delta", "text": response.text}
+
+        full_text = response.text
+
+        if response.reasoning:
+            think_blocks = [response.reasoning]
+            clean_text = full_text.strip()
+        else:
+            think_blocks = self._extract_think_blocks(full_text)
+            clean_text = self._remove_think_blocks(full_text).strip()
+
+        tool_results = []
+        if settings.TOOLS_ENABLED:
+            if response.tool_calls:
+                tool_results = self._run_structured_tool_calls(response.tool_calls)
+            else:
+                tool_results = await self._execute_tool_calls(clean_text)
+            tool_results = [
+                r for r in tool_results
+                if not r["result"].startswith("Unknown tool:")
+                and not r["result"].startswith("JSON parse error:")
+                and not r["result"].startswith("Invalid arguments")
+            ]
+            for r in tool_results:
+                yield {"type": "tool_result", "tool": r["tool"], "result": r["result"]}
+
+        camera_request = next((r for r in tool_results if r["tool"] == "request_camera"), None)
+        if camera_request:
+            final_text = self._strip_tool_blocks(clean_text) or "Let me take a look."
+            yield {
+                "type": "done",
+                "data": {
+                    "text": final_text,
+                    "model": response.model,
+                    "provider": response.provider,
+                    "tool_calls": tool_results,
+                    "think_blocks": think_blocks,
+                    "scene_description": None,
+                    "needs_camera": True,
+                },
+            }
+            return
+
+        live_search_request = next((r for r in tool_results if r["tool"] == "request_live_search"), None)
+        if live_search_request:
+            target = live_search_request["arguments"].get("target", "it")
+            final_text = self._strip_tool_blocks(clean_text) or f"Watching for {target} now."
+            self.memory.add("assistant", final_text)
+            yield {
+                "type": "done",
+                "data": {
+                    "text": final_text,
+                    "model": response.model,
+                    "provider": response.provider,
+                    "tool_calls": tool_results,
+                    "think_blocks": think_blocks,
+                    "scene_description": None,
+                    "needs_live_search": True,
+                    "search_target": target,
+                },
+            }
+            return
+
+        if tool_results and any(self.tools.get(r["tool"]).needs_followup for r in tool_results):
+            tool_context = "\n\n".join(
+                f"Tool '{r['tool']}' returned:\n{r['result']}" for r in tool_results
+            )
+            final_prompt = (
+                f"I called tools to answer the user. Here are the results:\n\n"
+                f"{tool_context}\n\n"
+                f"Original question: {prompt}\n"
+                f"Scene context: N/A\n"
+                f"Please provide a final answer incorporating these results."
+            )
+            final_response = await self.backend.chat(image_base64=None, prompt=final_prompt)
+            final_text = final_response.text
+            if final_text:
+                yield {"type": "content_delta", "text": final_text}
+        elif tool_results:
+            stripped = self._strip_tool_blocks(clean_text)
+            final_text = stripped or "\n".join(r["result"] for r in tool_results)
+        else:
+            final_text = clean_text or full_text
+
+        timer_update = await self._check_timers_locked()
+        if timer_update["completed"]:
+            timer_lines = "\n".join(
+                f"⏰ {t['label']}: {t['message']}" for t in timer_update["completed"]
+            )
+            final_text = f"{final_text}\n\n{timer_lines}" if final_text else timer_lines
+            yield {"type": "content_delta", "text": f"\n\n{timer_lines}"}
+
+        self.memory.add("assistant", final_text)
+
+        yield {
+            "type": "done",
+            "data": {
+                "text": final_text,
+                "model": response.model,
+                "provider": response.provider,
+                "tool_calls": tool_results or [],
+                "think_blocks": think_blocks,
+                "scene_description": None,
+            },
         }
 
     def _build_reason_prompt(

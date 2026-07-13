@@ -3,6 +3,7 @@
 from __future__ import annotations
 import base64
 import io
+import json
 import logging
 import time
 from pathlib import Path
@@ -10,7 +11,7 @@ from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -124,6 +125,34 @@ async def chat(request: ChatRequest):
             model="unknown",
             provider="error",
         )
+
+
+@app.post("/v1/chat/stream")
+async def chat_stream(request: ChatRequest):
+    """Same turn as /v1/chat, but as Server-Sent Events so the client can
+    show reasoning tokens, tool calls, and the answer as they're generated
+    instead of only after the whole response comes back. Chat & Image UI
+    only — live-frame ticks and the timer poll keep using /v1/chat, since
+    those turns are usually silent or one line and don't benefit from it.
+    """
+    if not request.prompt.strip():
+        raise HTTPException(status_code=400, detail="Prompt is required")
+
+    agent = get_agent()
+
+    async def event_source():
+        try:
+            async for event in agent.process_stream(
+                image_base64=request.image_base64,
+                prompt=request.prompt,
+                is_camera_followup=request.is_camera_followup,
+            ):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as e:
+            logger.error(f"Agent stream error: {e}", exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(event_source(), media_type="text/event-stream")
 
 
 @app.post("/v1/chat/upload")

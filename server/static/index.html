@@ -48,7 +48,10 @@
       <div class="live-stats" id="live-stats">Not watching</div>
     </div>
     <h3>Commands</h3>
-    <button onclick="resetConversation()" style="background:#2a2a4a;border:none;border-radius:8px;padding:8px;color:#e0e0e0;cursor:pointer;font-size:13px;">↻ Reset Conversation</button>
+    <div style="display:flex;flex-direction:column;gap:8px;">
+      <button onclick="exportConversation()" style="background:#2a2a4a;border:none;border-radius:8px;padding:8px;color:#e0e0e0;cursor:pointer;font-size:13px;">💾 Save Conversation</button>
+      <button onclick="resetConversation()" style="background:#2a2a4a;border:none;border-radius:8px;padding:8px;color:#e0e0e0;cursor:pointer;font-size:13px;">↻ Reset Conversation</button>
+    </div>
   </div>
   <div class="chat-area">
     <div class="messages" id="messages">

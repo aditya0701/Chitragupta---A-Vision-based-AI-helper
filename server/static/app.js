@@ -1,6 +1,61 @@
 let currentImageBase64 = null;
 let isProcessing = false;
 
+// ─── Conversation export ────────────────────────────────────────────────────
+// Mirrors every rendered message (plain notices via addMessage, and streamed
+// turns via createLiveMessage().finalize) into a plain-data log, independent
+// of the DOM — so "Save conversation" can dump a clean transcript (including
+// think blocks and tool calls) for pasting into a bug report, without having
+// to scrape rendered HTML back out.
+let transcriptLog = [];
+
+function logTranscript(role, text, extras) {
+  transcriptLog.push({
+    role,
+    text,
+    model: extras && extras.model,
+    tool_calls: (extras && extras.tool_calls) || [],
+    think_blocks: (extras && extras.think_blocks) || [],
+    at: new Date().toISOString(),
+  });
+}
+
+function exportConversation() {
+  const lines = ['# Chitragupt conversation export', `Exported ${new Date().toISOString()}`, ''];
+  transcriptLog.forEach((entry) => {
+    lines.push(`## ${entry.role} (${entry.at})`);
+    lines.push(entry.text);
+    if (entry.model) lines.push(`\n_model: ${entry.model}_`);
+    entry.tool_calls.forEach((tc) => {
+      lines.push(`\n**Tool call:** \`${tc.tool}\`(${JSON.stringify(tc.arguments || {})}) -> ${tc.result}`);
+    });
+    entry.think_blocks.forEach((tb) => {
+      lines.push(`\n<details><summary>Thinking</summary>\n\n${tb}\n\n</details>`);
+    });
+    lines.push('');
+  });
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `chitragupt-conversation-${Date.now()}.md`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Shared resolution cap for every image sent to the backend (upload, live
+// tick, or a one-off camera capture) — keeps vision-token cost down without
+// a visible quality hit, since JPEG quality stays high (see below).
+const MAX_FRAME_DIM = 1024;
+
+function scaledDims(w, h, maxDim) {
+  const scale = Math.min(1, maxDim / Math.max(w, h));
+  return { width: w * scale, height: h * scale };
+}
+
 // ─── Voice input (Web Speech API — browser-native, no server change) ────────
 // Only Chrome/Edge/Safari implement SpeechRecognition (Firefox doesn't), and
 // it requires a secure context (HTTPS or localhost) same as getUserMedia —
@@ -84,9 +139,19 @@ function handleFileSelect(event) {
   if (!file) return;
   const reader = new FileReader();
   reader.onload = function(e) {
-    currentImageBase64 = e.target.result.split(',')[1];
-    document.getElementById('preview-img').src = e.target.result;
-    document.getElementById('image-preview').style.display = 'flex';
+    const img = new Image();
+    img.onload = function() {
+      const { width, height } = scaledDims(img.naturalWidth, img.naturalHeight, MAX_FRAME_DIM);
+      const canvas = document.getElementById('capture-canvas');
+      canvas.width = width;
+      canvas.height = height;
+      canvas.getContext('2d').drawImage(img, 0, 0, width, height);
+      const resizedDataUrl = canvas.toDataURL('image/jpeg', 0.85);
+      currentImageBase64 = resizedDataUrl.split(',')[1];
+      document.getElementById('preview-img').src = resizedDataUrl;
+      document.getElementById('image-preview').style.display = 'flex';
+    };
+    img.src = e.target.result;
   };
   reader.readAsDataURL(file);
 }
@@ -112,23 +177,9 @@ function addMessage(role, content, extras) {
     });
   }
   div.innerHTML = html;
+  logTranscript(role, content, extras);
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
-}
-
-function showTyping() {
-  const container = document.getElementById('messages');
-  const div = document.createElement('div');
-  div.className = 'typing-indicator';
-  div.id = 'typing';
-  div.innerHTML = '<span></span><span></span><span></span>';
-  container.appendChild(div);
-  container.scrollTop = container.scrollHeight;
-}
-
-function hideTyping() {
-  const el = document.getElementById('typing');
-  if (el) el.remove();
 }
 
 // Captures the current camera frame, if a stream is attached — works
@@ -137,10 +188,11 @@ function hideTyping() {
 function captureCurrentFrame() {
   const video = document.getElementById('camera-video');
   if (!cameraStreamActive || !video || !video.videoWidth) return null;
+  const { width, height } = scaledDims(video.videoWidth, video.videoHeight, MAX_FRAME_DIM);
   const canvas = document.getElementById('capture-canvas');
-  canvas.width = video.videoWidth;
-  canvas.height = video.videoHeight;
-  canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+  canvas.width = width;
+  canvas.height = height;
+  canvas.getContext('2d').drawImage(video, 0, 0, width, height);
   return canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
 }
 
@@ -173,8 +225,94 @@ function addCameraEnableMessage(onEnabled) {
   container.scrollTop = container.scrollHeight;
 }
 
-async function postChat(prompt, imageBase64, isCameraFollowup) {
-  const resp = await fetch('/v1/chat', {
+// Builds a live-updating assistant message bubble that fills in as
+// reasoning_delta/content_delta/tool_call_start/tool_result events arrive
+// from /v1/chat/stream, instead of appearing all at once at the end —
+// mirrors how tool calls show up mid-generation in chat apps like Claude
+// Code, rather than only in the final dumped response.
+function createLiveMessage() {
+  const container = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'message assistant streaming';
+
+  const thinkEl = document.createElement('details');
+  thinkEl.className = 'live-thinking';
+  thinkEl.style.display = 'none';
+  thinkEl.innerHTML = '<summary>💭 Thinking…</summary><div class="think-body"></div>';
+  const thinkBody = thinkEl.querySelector('.think-body');
+
+  const toolsEl = document.createElement('div');
+  toolsEl.className = 'live-tools';
+
+  const textEl = document.createElement('div');
+  textEl.className = 'live-text';
+
+  div.appendChild(thinkEl);
+  div.appendChild(toolsEl);
+  div.appendChild(textEl);
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+
+  const toolLines = new Map();
+
+  return {
+    el: div,
+    onReasoning(text) {
+      thinkEl.style.display = '';
+      thinkBody.textContent += text;
+      container.scrollTop = container.scrollHeight;
+    },
+    onContent(text) {
+      textEl.textContent += text;
+      container.scrollTop = container.scrollHeight;
+    },
+    onToolStart(name) {
+      const line = document.createElement('div');
+      line.className = 'tool-msg tool-pending';
+      line.textContent = '⚡ Calling ' + name + '...';
+      toolsEl.appendChild(line);
+      toolLines.set(name, line);
+      container.scrollTop = container.scrollHeight;
+    },
+    onToolResult(name) {
+      const line = toolLines.get(name);
+      if (line) {
+        line.className = 'tool-msg';
+        line.textContent = '⚡ Used tool: ' + name;
+      }
+    },
+    finalize(data) {
+      div.classList.remove('streaming');
+      thinkEl.querySelector('summary').textContent = '💭 Thinking';
+      textEl.textContent = data.text || '...';
+      if (data.model || data.provider) {
+        const tag = document.createElement('div');
+        tag.className = 'model-tag';
+        tag.textContent = (data.provider || '') + '/' + (data.model || '');
+        div.appendChild(tag);
+      }
+      logTranscript('assistant', data.text || '', {
+        model: data.model ? (data.provider || '') + '/' + data.model : null,
+        tool_calls: data.tool_calls || [],
+        think_blocks: data.think_blocks || [],
+      });
+    },
+    fail(message) {
+      div.classList.remove('streaming');
+      textEl.textContent = '⚠️ Error: ' + message;
+    },
+    remove() { div.remove(); },
+  };
+}
+
+// Posts to the streaming endpoint and parses the SSE frames (data: {...}\n\n)
+// by hand — fetch()'s ReadableStream instead of EventSource, since
+// EventSource only supports GET and this needs to POST the prompt/image.
+// Wires each event straight into the live bubble as it arrives; returns the
+// final "done" event's data once the stream ends.
+async function runStreamedTurn(prompt, imageBase64, isCameraFollowup) {
+  const live = createLiveMessage();
+  const resp = await fetch('/v1/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -183,21 +321,40 @@ async function postChat(prompt, imageBase64, isCameraFollowup) {
       is_camera_followup: !!isCameraFollowup,
     }),
   });
-  return resp.json();
-}
 
-function renderChatResponse(data) {
-  if (data.scene_unchanged) {
-    addMessage('assistant', '👁️ Scene unchanged — skipping reasoning. Still watching...', {
-      model: data.provider + '/' + data.model,
-    });
-    return;
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finalData = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buffer.indexOf('\n\n')) !== -1) {
+      const frame = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      const line = frame.split('\n').find((l) => l.startsWith('data: '));
+      if (!line) continue;
+      const event = JSON.parse(line.slice(6));
+      switch (event.type) {
+        case 'reasoning_delta': live.onReasoning(event.text); break;
+        case 'content_delta': live.onContent(event.text); break;
+        case 'tool_call_start': live.onToolStart(event.name); break;
+        case 'tool_result': live.onToolResult(event.tool); break;
+        case 'done': finalData = event.data; break;
+        case 'error': throw new Error(event.message);
+      }
+    }
   }
-  let displayText = data.text || '...';
-  if (data.think_blocks && data.think_blocks.length > 0) {
-    displayText += '\n\n<details><summary>💭 Thinking</summary>\n' + data.think_blocks.join('\n') + '\n</details>';
+
+  if (finalData) {
+    live.finalize(finalData);
+  } else {
+    live.fail('stream ended with no response');
   }
-  addMessage('assistant', displayText, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls });
+  return finalData;
 }
 
 function setSending(active) {
@@ -214,34 +371,28 @@ async function sendMessage() {
   setSending(true);
   addMessage('user', prompt || '(image uploaded)', {});
   input.value = '';
-  showTyping();
 
   try {
-    let data = await postChat(prompt || 'What do you see in this image?', currentImageBase64);
+    let data = await runStreamedTurn(prompt || 'What do you see in this image?', currentImageBase64);
 
     // The model asked to see the current scene instead of guessing — grab
     // a fresh frame and resend the same question once. No stream attached
     // (camera never enabled) means we can't fulfill it yet — offer a
     // one-click way to turn the camera on and retry, instead of a dead-end
     // message the user has no way to act on.
-    if (data.needs_camera) {
+    if (data && data.needs_camera) {
       const frame = captureCurrentFrame();
       if (frame) {
-        data = await postChat(prompt || 'What do you see in this image?', frame, true);
+        data = await runStreamedTurn(prompt || 'What do you see in this image?', frame, true);
       } else {
-        hideTyping();
         clearImage();
         setSending(false);
         addCameraEnableMessage(async () => {
           setSending(true);
-          showTyping();
           try {
             const retryFrame = captureCurrentFrame();
-            const retryData = await postChat(prompt || 'What do you see in this image?', retryFrame, true);
-            hideTyping();
-            renderChatResponse(retryData);
+            await runStreamedTurn(prompt || 'What do you see in this image?', retryFrame, true);
           } catch (err) {
-            hideTyping();
             addMessage('assistant', '⚠️ Error: ' + err.message, {});
           }
           setSending(false);
@@ -251,18 +402,15 @@ async function sendMessage() {
       }
     }
 
-    hideTyping();
-    renderChatResponse(data);
     clearImage();
 
     // The model wants to keep watching for something specific, not just
     // take one look — switch into Live Watch so it actually can. If
     // already there (or the camera's already on), this is a no-op.
-    if (data.needs_live_search) {
+    if (data && data.needs_live_search) {
       await switchMode('live');
     }
   } catch (err) {
-    hideTyping();
     addMessage('assistant', '⚠️ Error: ' + err.message, {});
   }
 
@@ -273,6 +421,7 @@ async function sendMessage() {
 async function resetConversation() {
   await fetch('/v1/reset', { method: 'POST' });
   document.getElementById('messages').innerHTML = '';
+  transcriptLog = [];
   addMessage('assistant', 'Conversation reset. How can I help you?', {});
   toggleSidebar(false);
 }
@@ -511,7 +660,14 @@ async function sampleLiveFrame() {
   framesWatched += 1;
   const sample = captureDiffSample(video);
 
-  if (lastSentDiffData) {
+  // A typed question waiting to go out always overrides the diff gate — the
+  // user is actively waiting on a reply, so an unchanged scene isn't a
+  // reason to sit on their message until the next tick happens to clear
+  // the threshold (previously this was only checked inside sendLiveFrame,
+  // which the diff-gate return below never let it reach).
+  const hasTypedPrompt = !!document.getElementById('prompt-input').value.trim();
+
+  if (!hasTypedPrompt && lastSentDiffData) {
     const threshold = THRESHOLD_LEVELS[document.getElementById('threshold-slider').value];
     const delta = meanGrayscaleDelta(sample, lastSentDiffData);
     if (delta < threshold) {
@@ -535,14 +691,12 @@ async function sampleLiveFrame() {
   await sendLiveFrame(video);
 }
 
-const MAX_FRAME_DIM = 1024; // cap resolution to save vision tokens; keep JPEG quality high so labels/text stay readable
-
 async function sendLiveFrame(video) {
   liveSending = true;
   const canvas = document.getElementById('capture-canvas');
-  const scale = Math.min(1, MAX_FRAME_DIM / Math.max(video.videoWidth, video.videoHeight));
-  canvas.width = video.videoWidth * scale;
-  canvas.height = video.videoHeight * scale;
+  const { width, height } = scaledDims(video.videoWidth, video.videoHeight, MAX_FRAME_DIM);
+  canvas.width = width;
+  canvas.height = height;
   canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
   const imageBase64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
 
@@ -567,7 +721,7 @@ async function sendLiveFrame(video) {
       if (data.think_blocks && data.think_blocks.length > 0) {
         displayText += '\n\n<details><summary>💭 Thinking</summary>\n' + data.think_blocks.join('\n') + '\n</details>';
       }
-      addMessage('assistant', displayText, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls });
+      addMessage('assistant', displayText, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls, think_blocks: data.think_blocks });
     }
   } catch (err) {
     addMessage('assistant', '⚠️ Live frame error: ' + err.message, {});
