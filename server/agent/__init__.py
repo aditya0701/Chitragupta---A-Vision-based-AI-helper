@@ -31,6 +31,15 @@ class Tool:
         self.needs_followup = needs_followup
 
     def to_openai_tool(self) -> dict:
+        # "required" is a per-parameter flag in our own Tool definitions
+        # (convenient for the prompt-text renderer in agent.py), but real
+        # JSON Schema wants it as a sibling list of names, not a property of
+        # each property — leaving it inline was harmless noise for the
+        # never-used old to_openai_tools() path, but native tool calling
+        # (added 2026-07-13) actually sends this schema to the API, so it
+        # needs to be valid.
+        properties = {k: {kk: vv for kk, vv in v.items() if kk != "required"}
+                      for k, v in self.parameters.items()}
         return {
             "type": "function",
             "function": {
@@ -38,7 +47,7 @@ class Tool:
                 "description": self.description,
                 "parameters": {
                     "type": "object",
-                    "properties": self.parameters,
+                    "properties": properties,
                     "required": [k for k, v in self.parameters.items() if v.get("required")],
                 },
             },
@@ -242,7 +251,24 @@ def build_default_tools() -> ToolRegistry:
         fn=tool_update_task_list,
         parameters={
             "title": {"type": "string", "description": "Name of the overall task, e.g. 'Chicken Biryani'", "required": True},
-            "items": {"type": "array", "description": "Full list of [{content, status, note?}, ...]", "required": True},
+            "items": {
+                "type": "array",
+                "description": "Full list of task items, sent in full every time — anything omitted is dropped.",
+                "required": True,
+                # Structural schema, not just prose — this is what actually
+                # constrains native tool calling to the right field names
+                # (was previously only described in free text, which let
+                # the model drift to writing "task" instead of "content").
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "The item's text — always use this exact key, never 'task' or 'label'"},
+                        "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "skipped"]},
+                        "note": {"type": "string", "description": "Optional, e.g. reason for a substitution"},
+                    },
+                    "required": ["content", "status"],
+                },
+            },
         },
         needs_followup=False,
     ))

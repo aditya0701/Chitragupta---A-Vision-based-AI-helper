@@ -251,18 +251,42 @@ checks didn't catch:
   real number for this app's actual resolution/quality settings instead of
   guessing.
 
-### Tool-calling is prompt-based, not native function-calling
-`ToolRegistry.to_openai_tool()`/`to_openai_tools()` exist but are **dead
-code** — nothing ever passes `tools=` to the Groq API. All tool calls are
-parsed via regex from a ` ```tool {...}``` ` block the model writes into its
-own visible response text (`_execute_tool_calls`), ReAct-style. This is why
-field-name drift (above) was possible at all — there's no JSON-schema
-validation step the way there would be with native function-calling.
-Switching to native function-calling (if/when Groq's qwen3.6-27b supports it
-for this SDK version) would be a more robust structural fix than the
-alias/guard patches above, but is a bigger change and wasn't attempted this
-session — noted here so it isn't rediscovered as if it were still an option
-no one had considered.
+### Tool-calling: native for Groq, prompt-parsed elsewhere (updated 2026-07-13)
+Originally all tool calls were parsed via regex from a ` ```tool {...}``` `
+block the model writes into its own visible response text
+(`_execute_tool_calls`), ReAct-style — `ToolRegistry.to_openai_tool()`
+existed but was dead code, nothing passed `tools=` to the API. This is what
+let field-name drift happen at all (see above): free text has no schema to
+violate.
+
+Confirmed via Groq's docs that `qwen/qwen3.6-27b` supports native
+function-calling (`tools`/`tool_choice` params, same shape as OpenAI's), so
+`GroqBackend` now uses it: `SUPPORTS_NATIVE_TOOLS = True`, `chat()` passes
+`tools=` + `tool_choice="auto"`, and parses structured `message.tool_calls`
+into `VisionResponse.tool_calls` instead of relying on the model to
+hand-write correctly-shaped JSON into text. `Tool.to_openai_tool()` was
+fixed to emit valid JSON Schema (no more `required` leaking into individual
+property definitions) and `update_task_list`'s `items` param now has a real
+nested object schema (`content`/`status`/`note`) instead of only a prose
+description — this is the actual structural fix for the field-name-drift
+bug, with the alias/wipe-guard patches in `tasklist.py` as a second line of
+defense.
+
+Every other backend (Gemini, OpenAI, Anthropic, Colab/Ollama) still uses the
+old regex-parsed path — `SUPPORTS_NATIVE_TOOLS` defaults to `False` for
+them, they accept a `tools` kwarg (for interface uniformity, since agent.py
+always passes `tools=self.tools.to_openai_tools() if TOOLS_ENABLED and
+backend.SUPPORTS_NATIVE_TOOLS else None`) but ignore it. `agent.py` branches
+on `response.tool_calls` (native, if present) vs. `_execute_tool_calls(text)`
+(regex fallback) per turn — both paths converge on the same
+`{"tool", "arguments", "result"}` shape, so everything downstream
+(`request_camera` detection, `needs_followup` handling, filtering) is
+unaffected by which path produced it. `_build_reason_prompt` skips the
+"write a ```tool block" formatting instructions when
+`self.backend.SUPPORTS_NATIVE_TOOLS` is true, keeping only the behavioral
+guidance (when to use each tool), since telling a native-tool-calling model
+to *also* hand-write JSON into text just invites a redundant/malformed
+extra block.
 
 ### Cost-control patterns worth preserving
 - `Tool.needs_followup` (default `True`) — set `False` for tools whose result is a

@@ -87,6 +87,7 @@ class ColabBackend(VisionBackend):
         prompt: str,
         conversation_history: Optional[list[dict]] = None,
         think: bool = True,
+        tools: Optional[list[dict]] = None,
     ) -> VisionResponse:
         """Two-stage pipeline: vision → reasoning.
 

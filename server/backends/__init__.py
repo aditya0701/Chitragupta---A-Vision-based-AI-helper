@@ -1,7 +1,7 @@
 """Backend abstractions for different VLM providers."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -20,6 +20,12 @@ class VisionResponse:
     # agent detect the case where reasoning got truncated mid-thought before
     # handing off to a clean answer — see agent.py's retry-once-on-truncation.
     truncated: bool = False
+    # Structured tool calls from a backend with SUPPORTS_NATIVE_TOOLS=True —
+    # [{"id": ..., "name": ..., "arguments": {...}}, ...]. Empty for backends
+    # that don't support native calling; agent.py falls back to regex-parsing
+    # a ```tool {...}``` block from `text` in that case (see agent.py's
+    # _execute_tool_calls, still the only path for non-native backends).
+    tool_calls: list = field(default_factory=list)
 
 
 # Keywords that suggest a prompt needs multi-step reasoning rather than a
@@ -53,6 +59,17 @@ class VisionBackend(ABC):
     # False for them — no reason to pay for two calls when one will do.
     SPLIT_VISION_REASONING: bool = False
 
+    # True only for backends whose chat() actually sends `tools` to the
+    # provider's native function-calling API and parses structured
+    # message.tool_calls back — added 2026-07-13 for Groq, after real
+    # testing showed the prompt-parsed convention (```tool {...}``` in the
+    # visible text) let the model drift on field names with nothing to
+    # catch it structurally. Other backends still use the older convention
+    # via agent.py's regex-based _execute_tool_calls — passing `tools=`
+    # to their chat() is safe (accepted, ignored) so agent.py can call
+    # every backend the same way regardless of which path it takes.
+    SUPPORTS_NATIVE_TOOLS: bool = False
+
     @abstractmethod
     async def chat(
         self,
@@ -60,6 +77,7 @@ class VisionBackend(ABC):
         prompt: str,
         conversation_history: Optional[list[dict]] = None,
         think: bool = True,
+        tools: Optional[list[dict]] = None,
     ) -> VisionResponse:
         ...
 

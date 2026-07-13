@@ -18,6 +18,8 @@ class OllamaBackend(VisionBackend):
         image_base64: Optional[str],
         prompt: str,
         conversation_history: Optional[list[dict]] = None,
+        think: bool = True,
+        tools: Optional[list[dict]] = None,
     ) -> VisionResponse:
         messages = []
         if conversation_history:

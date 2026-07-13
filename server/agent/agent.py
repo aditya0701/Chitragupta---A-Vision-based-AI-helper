@@ -181,6 +181,12 @@ class ChitraguptAgent:
             is_live_frame=is_live_frame,
         )
 
+        native_tools = (
+            self.tools.to_openai_tools()
+            if settings.TOOLS_ENABLED and self.backend.SUPPORTS_NATIVE_TOOLS
+            else None
+        )
+
         response = await self.backend.chat(
             # Split-stage backends already consumed the image in Stage 1
             # above; single-call backends get it here alongside the prompt.
@@ -188,6 +194,7 @@ class ChitraguptAgent:
             prompt=reason_prompt,
             conversation_history=self.memory.get_history()[-10:],
             think=think,
+            tools=native_tools,
         )
 
         if response.truncated and not response.reasoning:
@@ -211,6 +218,7 @@ class ChitraguptAgent:
                 prompt=reason_prompt,
                 conversation_history=self.memory.get_history()[-10:],
                 think=think,
+                tools=native_tools,
             )
 
         full_text = response.text
@@ -228,12 +236,19 @@ class ChitraguptAgent:
 
         tool_results = []
         if settings.TOOLS_ENABLED:
-            # Only scan the *visible* response for tool calls, not the raw
-            # thinking trace — the model often mentions tool syntax
-            # hypothetically while reasoning about whether to use one, and
-            # scanning full_text (thinking included) treated that hypothetical
-            # mention as a real invocation, triggering a wasted second API call.
-            tool_results = await self._execute_tool_calls(clean_text)
+            if response.tool_calls:
+                # Native function-calling — structured, no parsing of the
+                # visible text needed at all.
+                tool_results = self._run_structured_tool_calls(response.tool_calls)
+            else:
+                # Fallback for backends without SUPPORTS_NATIVE_TOOLS. Only
+                # scan the *visible* response for tool calls, not the raw
+                # thinking trace — the model often mentions tool syntax
+                # hypothetically while reasoning about whether to use one,
+                # and scanning full_text (thinking included) treated that
+                # hypothetical mention as a real invocation, triggering a
+                # wasted second API call.
+                tool_results = await self._execute_tool_calls(clean_text)
             # Unresolved matches (unknown tool name, malformed JSON) aren't
             # worth a costly follow-up call — only resolved tool calls should
             # trigger one.
@@ -377,12 +392,25 @@ class ChitraguptAgent:
                 f"- {t.name}({', '.join(t.parameters)}): {t.description}"
                 for t in tools
             )
+            # Native function-calling backends (Groq — see
+            # VisionBackend.SUPPORTS_NATIVE_TOOLS) get tool calls through a
+            # structured API field, not by hand-writing JSON into the
+            # visible response — telling them to do both would just invite
+            # a redundant/malformed text block alongside the real call.
+            native = self.backend.SUPPORTS_NATIVE_TOOLS
+            format_instruction = (
+                ""
+                if native
+                else (
+                    "\n\nYou have tools available. To call one, write this in your "
+                    "visible response, not inside a <think> block (only the visible "
+                    "response is checked for tool calls):\n"
+                    '```tool\n{"name": "tool_name", "arguments": {"arg1": "value"}}\n```\n'
+                )
+            )
             tool_instruction = (
-                "\n\nYou have tools available. To call one, write this in your "
-                "visible response, not inside a <think> block (only the visible "
-                "response is checked for tool calls):\n"
-                '```tool\n{"name": "tool_name", "arguments": {"arg1": "value"}}\n```\n'
-                f"Available tools:\n{tool_list}\n\n"
+                format_instruction
+                + f"Available tools:\n{tool_list}\n\n"
                 "Tool-specific guidance:\n"
                 "- start_timer: use for any step that needs waiting (boiling, baking, "
                 "marinating, steeping). It runs in the background for free — don't wait "
@@ -399,11 +427,15 @@ class ChitraguptAgent:
                 "substitutions. If a [Task list] is shown above, read it before updating "
                 "it, and don't just recite the whole plan back in your reply — the user "
                 "can already see it. Each item MUST use the exact key 'content' for its "
-                "text — not 'task' or 'label'. Example:\n"
-                '```tool\n{"name": "update_task_list", "arguments": {"title": "Chicken '
-                'Biryani", "items": [{"content": "Marinate chicken", "status": '
-                '"in_progress"}, {"content": "Cook rice", "status": "pending"}]}}\n```\n'
-                "- log_observation: call this on every relevant frame for an in-progress "
+                "text — not 'task' or 'label'."
+                + (
+                    ' Example:\n```tool\n{"name": "update_task_list", "arguments": '
+                    '{"title": "Chicken Biryani", "items": [{"content": "Marinate '
+                    'chicken", "status": "in_progress"}, {"content": "Cook rice", '
+                    '"status": "pending"}]}}\n```\n'
+                    if not native else "\n"
+                )
+                + "- log_observation: call this on every relevant frame for an in-progress "
                 "task-list item — e.g. what you currently see related to it — even on "
                 "turns where you don't say anything to the user. This is your memory "
                 "across frames; a later question like 'where is X' should be answered by "
@@ -456,8 +488,34 @@ class ChitraguptAgent:
         text = re.sub(r"<tool>.*?</tool>", "", text, flags=re.DOTALL)
         return re.sub(r"\n{3,}", "\n\n", text).strip()
 
+    def _run_structured_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
+        """Execute tool calls already parsed by a native-tool-calling backend
+        (VisionResponse.tool_calls: [{"id", "name", "arguments"}, ...]) —
+        no text-scanning involved, so there's no "wrong field name"/"missing
+        arguments wrapper" failure mode to guard against here the way
+        _execute_tool_calls has to for the regex path. Still catches
+        TypeError for the rarer case of a required argument the model
+        genuinely omitted despite the schema declaring it required.
+        """
+        results = []
+        for call in tool_calls:
+            tool_name = call["name"]
+            arguments = call["arguments"]
+            tool = self.tools.get(tool_name)
+            if not tool:
+                results.append({"tool": tool_name, "arguments": arguments, "result": f"Unknown tool: {tool_name}"})
+                continue
+            try:
+                result = tool.fn(**arguments)
+            except TypeError as e:
+                result = f"Invalid arguments for {tool_name}: {e}"
+            results.append({"tool": tool_name, "arguments": arguments, "result": result})
+        return results
+
     async def _execute_tool_calls(self, text: str) -> list[dict]:
-        """Find and execute any tool calls in the response text.
+        """Find and execute any tool calls in the response text. Fallback
+        path for backends without SUPPORTS_NATIVE_TOOLS (see
+        _run_structured_tool_calls for the native path).
 
         Supports two formats:
           - ```tool { "name": "...", "arguments": {...} } ```
@@ -553,17 +611,28 @@ class ChitraguptAgent:
             reason_prompt = self._build_reason_prompt(
                 prompt=timer_prompt, scene=None, has_image=False, think=False,
             )
+            native_tools = (
+                self.tools.to_openai_tools()
+                if settings.TOOLS_ENABLED and self.backend.SUPPORTS_NATIVE_TOOLS
+                else None
+            )
             try:
-                response = await self.backend.chat(image_base64=None, prompt=reason_prompt, think=False)
+                response = await self.backend.chat(
+                    image_base64=None, prompt=reason_prompt, think=False, tools=native_tools,
+                )
                 clean_text = self._remove_think_blocks(response.text).strip()
 
                 tool_results = []
                 if settings.TOOLS_ENABLED:
-                    tool_results = await self._execute_tool_calls(clean_text)
+                    if response.tool_calls:
+                        tool_results = self._run_structured_tool_calls(response.tool_calls)
+                    else:
+                        tool_results = await self._execute_tool_calls(clean_text)
                     tool_results = [
                         r for r in tool_results
                         if not r["result"].startswith("Unknown tool:")
                         and not r["result"].startswith("JSON parse error:")
+                        and not r["result"].startswith("Invalid arguments")
                     ]
 
                 if tool_results and any(self.tools.get(r["tool"]).needs_followup for r in tool_results):

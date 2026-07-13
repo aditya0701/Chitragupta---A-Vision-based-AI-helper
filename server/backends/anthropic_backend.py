@@ -20,6 +20,7 @@ class AnthropicBackend(VisionBackend):
         prompt: str,
         conversation_history: Optional[list[dict]] = None,
         think: bool = True,
+        tools: Optional[list[dict]] = None,
     ) -> VisionResponse:
         messages = []
         if conversation_history:
