@@ -203,16 +203,18 @@ class ChitraguptAgent:
             tools=native_tools,
         )
 
-        if response.truncated and not response.reasoning:
-            # Generation was cut off by max_tokens before the model finished
-            # reasoning and handed off to a clean answer — with nothing for
-            # Groq's parsed-reasoning-format to separate out, the entire raw
-            # chain-of-thought lands in .text unstripped (no <think> tags to
-            # find). Retrying once with think=False forces a short, direct
-            # answer instead of showing that raw dump to the user.
+        if response.truncated:
+            # Generation was cut off by max_tokens before the model finished.
+            # Originally only retried when response.reasoning was completely
+            # empty, on the theory that a populated reasoning field meant
+            # the split already happened cleanly. In practice Groq's
+            # parsed-reasoning-format can return a *partial* reasoning
+            # fragment on a mid-stream cutoff while .text still holds the
+            # leftover garbled deliberation — reasoning being non-empty
+            # doesn't mean .text is clean. Any truncation gets retried now,
+            # not just the fully-empty-reasoning case.
             logger.warning(
-                "Response truncated mid-reasoning with no separated "
-                "reasoning field — retrying once with think=False."
+                "Response truncated by max_tokens — retrying once with think=False."
             )
             think = False
             reason_prompt = self._build_reason_prompt(
@@ -486,7 +488,13 @@ class ChitraguptAgent:
                 + (
                     "- request_camera: no image is attached to this message. If answering "
                     "needs a single look at the current scene, call this instead of "
-                    "guessing — do not describe or assume what's currently visible.\n"
+                    "guessing — do not describe or assume what's currently visible. This "
+                    "includes when the user is trying to show you something but hasn't "
+                    "attached an image yet (e.g. 'can you see it now', 'here you go') — "
+                    "call request_camera to actually prompt them for one, rather than just "
+                    "explaining how to attach a photo manually. Telling them how to use "
+                    "the interface is only the right answer if they explicitly asked how "
+                    "the interface works, not as a substitute for actually looking.\n"
                     "- request_live_search: use when the user wants you to help FIND a "
                     "specific object and one frame won't be enough (they'll need to move "
                     "the camera around while you keep checking). This starts continuous "

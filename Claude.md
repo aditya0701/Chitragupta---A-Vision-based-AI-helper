@@ -251,6 +251,31 @@ checks didn't catch:
   real number for this app's actual resolution/quality settings instead of
   guessing.
 
+### Truncation-retry gap closed + request_camera nudge strengthened (fixed 2026-07-13, seventh pass, from a real end-to-end transcript)
+A live test (task list creation, image-based ingredient finding across
+several turns) mostly worked, but surfaced two real gaps:
+- **Truncation retry was too narrow.** The retry-once-on-truncation logic
+  (earlier pass) only fired when `response.reasoning` was completely empty
+  — on the theory that a populated reasoning field meant Groq's
+  `reasoning_format="parsed"` had already cleanly separated thought from
+  answer. In practice, a mid-stream cutoff can leave Groq's reasoning field
+  *partially* populated while `.text` still holds leftover garbled
+  deliberation — reasoning being non-empty doesn't mean `.text` is clean.
+  Broadened the condition to `if response.truncated:` unconditionally.
+  Verified with a test reproducing the exact reported shape (truncated,
+  non-empty partial reasoning, garbled `.text`) — old code would have
+  skipped the retry, new code catches it.
+- **`request_camera` wasn't being chosen even on textbook turns for it.**
+  Not a code bug — `tool_choice="auto"` correctly leaves the choice to the
+  model — but the model kept explaining "here's how to attach a photo"
+  instead of calling `request_camera` to actually prompt for one, even on
+  a turn like "can you see it now" with no image attached. Strengthened the
+  tool's guidance text to explicitly call out this case: explaining the
+  interface is only correct if the user asked how the interface works, not
+  as a substitute for calling the tool when they're trying to show you
+  something. Prompt-level nudge, not a guarantee — still worth watching
+  whether it actually changes behavior on the next live test.
+
 ### `request_live_search` — model-initiated continuous watching, scoped to finding one thing (added 2026-07-13, sixth pass)
 Requested explicitly scoped: "only for finding things as of now, nothing
 else — no helping live, etc, we will expand this later." Sits alongside
