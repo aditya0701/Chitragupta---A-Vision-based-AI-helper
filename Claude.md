@@ -529,10 +529,67 @@ Two tabs, switched via `switchMode()` in `app.js`:
   meaningfully changed — this is what actually protects API quota, since it runs
   before any request leaves the browser), responds to changes automatically.
 
-Switching tabs drives the camera lifecycle directly (starts/stops `getUserMedia`);
-there's no separate manual toggle button anymore. Timer completions render as
-normal chat messages (⏰ prefix) whether they arrive via the background poll or
-folded into an active chat reply.
+Switching tabs drives the camera lifecycle directly (starts/stops `getUserMedia`).
+**Correction (2026-07-13):** the line that used to be here ("no separate manual
+toggle button anymore") is no longer true — a manual 🎥 toggle
+(`#camera-toggle-btn`, `toggleCameraStream()`) was added in the "Camera stream
+decoupled from Live Watch polling" pass below, for on-demand camera access
+without committing to continuous polling. It's hidden while the Live Watch tab
+is active (that tab still owns the camera lifecycle directly) and only shown in
+Chat & Image mode. Timer completions render as normal chat messages (⏰ prefix)
+whether they arrive via the background poll or folded into an active chat reply.
+
+### Live Watch pipeline, step by step
+Ties together mechanisms documented individually throughout this file — the
+full path a frame takes, client to server and back:
+
+1. **Camera acquisition** (`startCameraStream()`) — `getUserMedia`, attaches
+   to `#camera-video`. Triggered by the Live Watch tab, the manual 🎥
+   toggle, or the server telling the client `needs_live_search: true`.
+2. **Sampling loop** (`startLive()`) — `setInterval(sampleLiveFrame, ...)`
+   at your configured interval (2-15s, default 4s).
+3. **Perceptual diff gate**, client-side, before any network call —
+   `meanGrayscaleDelta()` against the last *sent* frame; skip the tick
+   entirely if under your sensitivity threshold. Main cost control.
+4. **Capture + send** (`sendLiveFrame()`) — frame capped at
+   `MAX_FRAME_DIM=1024`px, JPEG q0.85; POST `/v1/chat` with
+   `is_live_frame: true`.
+5. **Busy-buffering** — a tick that fires mid-request isn't dropped, it's
+   held as `pendingLiveFrame` and flushed the instant the in-flight request
+   finishes.
+6. **Server entry** — `/v1/chat`'s `LIVE_FRAME_MIN_INTERVAL_S` floor, then
+   `agent.process(...)`.
+7. **Concurrency lock** — `ChitraguptAgent._lock`, serializes this tick
+   against typed chat, `request_camera` follow-ups, and the timer poll.
+8. **Prompt assembly** (`_build_reason_prompt`) — `[Camera feed attached]`,
+   `[Task list]` with nested observations if a goal is active, then (only
+   if a goal is active) the silence-protocol instruction: check the frame
+   against the goal, always call `log_observation`, reply `[SILENT]` if
+   nothing's new. `request_camera`/`request_live_search` are not offered —
+   this turn already has an image.
+9. **Reasoning call** to Groq with native tool schemas. Truncation recovery
+   (conclude-from-reasoning or fresh retry) applies here same as any turn.
+10. **Tool execution** — `log_observation` (most common on a quiet tick),
+    `update_task_list`, etc. — persist straight to `document.json`.
+11. **Silence filtering** — exact-match `[SILENT]` (or empty after
+    tool-block stripping) collapses `final_text` to `""`.
+12. **Timer fold-in** — `_check_timers_locked()` runs under the same lock
+    before returning, so a due timer surfaces immediately if it happens to
+    fire mid-tick, not just via the separate 15s poll.
+13. **Response** — empty `final_text` means the frontend's
+    `if (!data.scene_unchanged && data.text)` check renders nothing; loop
+    continues at step 2.
+
+`request_live_search` doesn't introduce a different pipeline — it's a second
+*trigger* for the exact same one. A plain text turn ("help me find my keys")
+can lead the model to call `request_live_search("keys")`, which registers
+`"Find keys"` as the goal (`tasklist.start_find_task`, before the client does
+anything) and returns `needs_live_search: true`; the client's `sendMessage()`
+then calls `switchMode('live')` — identical to a manual tab switch — and step
+1 onward proceeds with the goal already preloaded from the very first tick.
+**Known gap:** nothing currently stops the loop once the target is found —
+it keeps polling until you manually leave the tab or toggle the camera off.
+Ties to the deferred `start_watch`-style idle-cost item below.
 
 ---
 
