@@ -64,6 +64,10 @@ class ChatRequest(BaseModel):
     prompt: str
     image_base64: Optional[str] = None
     is_live_frame: bool = False
+    # True for the client's Phase B resend after a needs_camera response —
+    # same prompt text, now with an image. Tells process() not to record
+    # the user's message a second time (see ChitraguptAgent._process_locked).
+    is_camera_followup: bool = False
 
 
 class ChatResponse(BaseModel):
@@ -108,6 +112,7 @@ async def chat(request: ChatRequest):
             image_base64=request.image_base64,
             prompt=request.prompt,
             is_live_frame=request.is_live_frame,
+            is_camera_followup=request.is_camera_followup,
         )
         return ChatResponse(**result)
     except Exception as e:

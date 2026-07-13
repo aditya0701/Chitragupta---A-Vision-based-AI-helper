@@ -100,23 +100,31 @@ class ChitraguptAgent:
         image_base64: Optional[str],
         prompt: str,
         is_live_frame: bool = False,
+        is_camera_followup: bool = False,
     ) -> dict:
         async with self._lock:
-            return await self._process_locked(image_base64, prompt, is_live_frame)
+            return await self._process_locked(image_base64, prompt, is_live_frame, is_camera_followup)
 
     async def _process_locked(
         self,
         image_base64: Optional[str],
         prompt: str,
         is_live_frame: bool = False,
+        is_camera_followup: bool = False,
     ) -> dict:
         """Process a user request with optional image.
 
         `is_live_frame` marks an automated live-streaming ping rather than a
         real user question — its prompt is not recorded in conversation
         memory, so routine "watching" frames don't crowd out real turns.
+
+        `is_camera_followup` marks Phase B of a request_camera round trip —
+        the client resending the *same* prompt text now that it has an
+        image attached. The original prompt was already recorded when Phase
+        A ran (see the request_camera short-circuit below), so recording it
+        again here would duplicate the user's utterance in memory.
         """
-        if not is_live_frame:
+        if not is_live_frame and not is_camera_followup:
             self.memory.add("user", prompt)
 
         split_stages = image_base64 and self.backend.SPLIT_VISION_REASONING
@@ -155,22 +163,20 @@ class ChitraguptAgent:
         # Decide once, from the raw user prompt — not the wrapped reasoning
         # prompt below, which always exceeds any length heuristic once the
         # system framing and scene context are added.
+        #
+        # Previously this forced think=False for every imageless turn where
+        # request_camera was on the table, on the theory that "no image yet"
+        # meant "nothing to reason about." That conflated two different
+        # things: a live tick's trivial "should I look?" check, and a
+        # substantive imageless question like "help me plan chicken
+        # biryani" — the one turn where getting the recipe/step breakdown
+        # right actually matters most. Forcing shallow reasoning on that
+        # turn was backwards. should_think(prompt) alone decides now; the
+        # truncation-retry below is the actual safety net for a turn that
+        # runs long, applied only when it actually happens rather than
+        # preemptively on every imageless question.
         think = should_think(prompt)
         has_image = bool(image_base64) and not split_stages
-
-        # A turn with no image yet, where request_camera is on the table
-        # (see the matching offer_camera check in _build_reason_prompt), has
-        # nothing concrete to reason deeply about — it can only plan or ask
-        # to look. Forcing think=False here keeps these turns fast and,
-        # more importantly, keeps them well clear of the max_tokens ceiling:
-        # this was the exact shape of turn (multi-part planning question,
-        # no image, extended reasoning_effort) that previously ran out of
-        # budget mid-thought and leaked raw chain-of-thought as the answer
-        # (see truncation handling below). Full reasoning still happens once
-        # there's something visual to reason about.
-        offer_camera = settings.TOOLS_ENABLED and not is_live_frame and not has_image
-        if offer_camera:
-            think = False
 
         # Build the reasoning prompt with scene context
         reason_prompt = self._build_reason_prompt(
@@ -266,8 +272,14 @@ class ChitraguptAgent:
         camera_request = next((r for r in tool_results if r["tool"] == "request_camera"), None)
         if camera_request:
             final_text = self._strip_tool_blocks(clean_text) or "Let me take a look."
-            if not is_live_frame:
-                self.memory.add("assistant", final_text)
+            # Not recorded to memory here — this is a provisional holding
+            # message, not the real answer. The user's question was already
+            # recorded above; Phase B (the request_camera followup, once it
+            # has an image) records the real answer as the one and only
+            # assistant turn for this exchange. Recording both would leave
+            # two assistant turns with no new user turn in between, and
+            # recording this placeholder at all is pure noise once Phase B
+            # supersedes it moments later.
             return {
                 "text": final_text,
                 "model": response.model,

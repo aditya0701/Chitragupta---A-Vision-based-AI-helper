@@ -251,6 +251,45 @@ checks didn't catch:
   real number for this app's actual resolution/quality settings instead of
   guessing.
 
+### Second-opinion review fixes (added 2026-07-13, fourth pass)
+An external review of the request_camera flow caught two real bugs the
+earlier passes missed (and correctly cleared two others that looked
+plausible but didn't hold up against the actual code):
+- **Fixed — think=False was firing on substantive questions, not just
+  trivial camera-routing decisions.** The old `offer_camera` check forced
+  `think=False` for *any* imageless tool-enabled turn, which included "help
+  me plan chicken biryani" — the one call where getting the recipe/step
+  breakdown right matters most. Removed the override entirely;
+  `think = should_think(prompt)` alone decides now, and the
+  retry-once-on-truncation logic (previous pass) is the actual safety net
+  for a turn that runs long, applied only when it happens rather than
+  preemptively on every imageless question.
+- **Fixed — the request_camera round trip double-recorded the user's
+  message.** Phase A recorded the user's prompt *and* a placeholder
+  assistant reply ("Let me take a look."); the client's Phase B resend of
+  the identical prompt text triggered a second `memory.add("user", ...)`.
+  Added `is_camera_followup` (threaded from `ChatRequest` through
+  `process()`/`_process_locked`) — skips the user-memory write on Phase B,
+  and the placeholder assistant write on Phase A was removed entirely
+  (Phase B's real answer is now the only thing recorded for the exchange).
+- **Checked and NOT bugs, despite looking plausible:** tool-call ordering
+  between `update_task_list` and `request_camera` doesn't matter — both
+  `_run_structured_tool_calls` and `_execute_tool_calls` execute every tool
+  call in a response fully before the `request_camera` short-circuit check
+  ever runs, so `update_task_list` always executes regardless of position.
+  And the `[SILENT]` exact-match check doesn't conflict with `log_observation`
+  firing on the same tick — tool-block stripping happens before the
+  marker comparison for the regex path, and native tool calls never appear
+  in `message.content` at all for the Groq path, so there's nothing to
+  conflict with in either case.
+- **Deferred, not fixed:** marking a compound task-list item (e.g. "Gather
+  Ingredients") complete from partial visual evidence is still possible —
+  would need per-ingredient sub-items to actually fix, separate scope from
+  this pass. Live Watch still polls every 4s with no way to say "nothing to
+  watch for the next 30 minutes" during a timer wait — no `start_watch`-style
+  feature exists yet despite the idea coming up in review; would need to be
+  designed, not just wired in.
+
 ### Tool-calling: native for Groq, prompt-parsed elsewhere (updated 2026-07-13)
 Originally all tool calls were parsed via regex from a ` ```tool {...}``` `
 block the model writes into its own visible response text

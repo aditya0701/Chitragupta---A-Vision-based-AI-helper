@@ -143,11 +143,15 @@ function captureCurrentFrame() {
   return canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
 }
 
-async function postChat(prompt, imageBase64) {
+async function postChat(prompt, imageBase64, isCameraFollowup) {
   const resp = await fetch('/v1/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt, image_base64: imageBase64 }),
+    body: JSON.stringify({
+      prompt,
+      image_base64: imageBase64,
+      is_camera_followup: !!isCameraFollowup,
+    }),
   });
   return resp.json();
 }
@@ -174,7 +178,7 @@ async function sendMessage() {
     if (data.needs_camera) {
       const frame = captureCurrentFrame();
       if (frame) {
-        data = await postChat(prompt || 'What do you see in this image?', frame);
+        data = await postChat(prompt || 'What do you see in this image?', frame, true);
       } else {
         hideTyping();
         addMessage('assistant', "I'd need the camera on to check that — open Live Watch first.", {});
