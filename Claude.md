@@ -251,6 +251,32 @@ checks didn't catch:
   real number for this app's actual resolution/quality settings instead of
   guessing.
 
+### Silent live-tick pre-filter removed (fixed 2026-07-14, ninth pass, from a real end-to-end transcript)
+A live `request_live_search` test ("find raw rice") produced a transcript
+where a typed follow-up question hit Groq's TPM 429 (expected — see the
+known-constraints TPM cap above, still not retried/backed-off, still
+open). But a second, separate complaint from the same session — "the
+image with rice was sent but I still got no response" — traced to a real
+bug, not user error: `_process_locked` had an undocumented pre-filter,
+`_is_relevant_tick()`, that ran on every live tick once any task-list item
+was `in_progress` (which `start_find_task` sets immediately). It fired its
+own cheap yes/no Groq call ("Is this frame relevant to {goal}? Answer yes
+or no only") *before* the frame ever reached the real reasoning call — if
+that single-shot judgment said "no," the tick returned an empty response
+immediately: no `log_observation`, no reasoning, nothing. This was
+indistinguishable on the client from a legitimate `[SILENT]` response, so
+a frame that actually showed the target object could be silently dropped
+by a crude misjudgment with zero trace. It also doubled the Groq calls (and
+token spend) per tick whenever a find-task was active, compounding the TPM
+429 risk from the same transcript. Removed entirely — every live tick now
+goes straight to the documented pipeline (silence protocol +
+`log_observation`, see "Live Watch pipeline, step by step" above), which
+already decides relevance/silence itself and is the only place that
+decision should live. No replacement pre-filter was added back in; the
+existing perceptual diff gate (client-side) and the model's own silence
+protocol are the cost controls now, same as for a tick with no active
+find-task.
+
 ### Truncation recovery: conclude-from-reasoning, not blind retry (refined 2026-07-13, eighth pass)
 User correction on the previous pass's diagnosis: the "1 time only thinking
 output" transcript actually had reasoning cleanly separated into the

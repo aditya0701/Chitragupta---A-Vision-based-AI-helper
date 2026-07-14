@@ -105,26 +105,6 @@ class ChitraguptAgent:
         async with self._lock:
             return await self._process_locked(image_base64, prompt, is_live_frame, is_camera_followup)
 
-    async def _is_relevant_tick(self, image_base64: str) -> bool:
-        """Cheap pre-filter for live ticks: is this frame worth a full
-        reasoning call? Returns True immediately if there's nothing
-        active to filter against, so behavior is unchanged when no
-        task list exists yet."""
-        doc = tasklist.get_document()
-        active = [i for i in (doc or {}).get("items", []) if i["status"] == "in_progress"]
-        if not active:
-            return True
-        goals = ", ".join(i["content"] for i in active)
-        response = await self.backend.chat(
-            image_base64=image_base64,
-            prompt=(
-                f"Active goals: {goals}. Is this frame relevant to any "
-                "of them? Answer yes or no only, nothing else."
-            ),
-            think=False,
-        )
-        return response.text.strip().lower().startswith("y")
-
     async def _process_locked(
         self,
         image_base64: Optional[str],
@@ -146,29 +126,6 @@ class ChitraguptAgent:
         """
         if not is_live_frame and not is_camera_followup:
             self.memory.add("user", prompt)
-
-        if is_live_frame and image_base64:
-            relevant = await self._is_relevant_tick(image_base64)
-            if not relevant:
-                timer_update = await self._check_timers_locked()
-                final_text = ""
-                if timer_update["completed"]:
-                    final_text = "\n".join(
-                        f"⏰ {t['label']}: {t['message']}" for t in timer_update["completed"]
-                    )
-                return {
-                    "text": final_text,
-                    # ChatResponse (main.py) requires model/provider as
-                    # non-optional strings — "n/a" matches the existing
-                    # convention for a stub response with no real model
-                    # call behind it (see the live-frame rate-limit path
-                    # in main.py's /v1/chat route).
-                    "model": "n/a",
-                    "provider": "n/a",
-                    "tool_calls": [],
-                    "think_blocks": [],
-                    "scene_description": None,
-                }
 
         split_stages = image_base64 and self.backend.SPLIT_VISION_REASONING
 
