@@ -142,8 +142,21 @@ def add_observation(item_ref: str, note: str) -> str:
 _STATUS_MARKS = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]", "skipped": "[-]"}
 
 
-def render_summary(document: Optional[dict]) -> str:
-    """Render the document as compact text for prompt context."""
+def render_summary(document: Optional[dict], lean: bool = False, observations: bool = True) -> str:
+    """Render the document as compact text for prompt context.
+
+    lean=True drops observations from completed/skipped items only — their
+    history is a settled record, not something a live tick needs to
+    re-check relevance against, so it doesn't need to keep riding along on
+    every future tick. Without this, a long multi-item session regrows the
+    exact prompt bulk that trimming conversation_history/native_tools was
+    meant to remove, just from a different source. Used for is_live_frame
+    calls.
+
+    observations=False drops every item's observations outright (titles/
+    status only) — a harder cut used only as an emergency degrade when a
+    provider rejects a request as too large even after the lean trim.
+    """
     if not document or not document.get("items"):
         return ""
     lines = [f"Task: {document['title']}"]
@@ -153,6 +166,8 @@ def render_summary(document: Optional[dict]) -> str:
         if item.get("note"):
             line += f"  ({item['note']})"
         lines.append(line)
+        if not observations or (lean and item["status"] in ("completed", "skipped")):
+            continue
         for obs in item.get("observations", []):
             lines.append(f"    - {obs}")
     return "\n".join(lines)

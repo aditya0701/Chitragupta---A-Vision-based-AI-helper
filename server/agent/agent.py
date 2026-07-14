@@ -231,20 +231,54 @@ class ChitraguptAgent:
         )
 
         native_tools = (
-            self.tools.to_openai_tools()
+            [t.to_openai_tool() for t in self._available_tools(has_image, is_live_frame)]
             if settings.TOOLS_ENABLED and self.backend.SUPPORTS_NATIVE_TOOLS
             else None
         )
 
-        response = await self.backend.chat(
-            # Split-stage backends already consumed the image in Stage 1
-            # above; single-call backends get it here alongside the prompt.
-            image_base64=None if split_stages else image_base64,
-            prompt=reason_prompt,
-            conversation_history=self.memory.get_history()[-10:],
-            think=think,
-            tools=native_tools,
-        )
+        # Live ticks aren't recorded to memory and gain nothing from the
+        # last 10 chat turns — the [Task list] block already injected into
+        # reason_prompt is the durable state that matters here. Sending
+        # full history on every tick was dead weight riding along on
+        # exactly the calls most likely to hit the Groq TPM cap.
+        history = None if is_live_frame else self.memory.get_history()[-10:]
+
+        try:
+            response = await self.backend.chat(
+                # Split-stage backends already consumed the image in Stage 1
+                # above; single-call backends get it here alongside the prompt.
+                image_base64=None if split_stages else image_base64,
+                prompt=reason_prompt,
+                conversation_history=history,
+                think=think,
+                tools=native_tools,
+            )
+        except Exception as e:
+            # Provider rejected the request outright as too large for its
+            # per-minute token cap (Groq: HTTP 413) — this is distinct from
+            # a truncated *response* (handled below), it means the request
+            # never even got a response. Rather than surface the raw
+            # provider error to the user, degrade once: drop every
+            # observation from the task-list injection (not just
+            # completed/skipped ones) and force think=False, then retry.
+            # If it fails again, let it raise — one degrade attempt is
+            # enough to catch a near-miss, not a systemic sizing problem.
+            if getattr(e, "status_code", None) == 413:
+                logger.warning(f"Backend rejected request as too large (413) — retrying with a stripped prompt: {e}")
+                think = False
+                reason_prompt = self._build_reason_prompt(
+                    prompt=prompt, scene=scene_description, has_image=has_image,
+                    think=think, is_live_frame=is_live_frame, strip_task_list=True,
+                )
+                response = await self.backend.chat(
+                    image_base64=None if split_stages else image_base64,
+                    prompt=reason_prompt,
+                    conversation_history=None,
+                    think=think,
+                    tools=native_tools,
+                )
+            else:
+                raise
 
         if response.truncated:
             # Generation was cut off by max_tokens before the model finished.
@@ -287,7 +321,7 @@ class ChitraguptAgent:
                 response = await self.backend.chat(
                     image_base64=None if split_stages else image_base64,
                     prompt=reason_prompt,
-                    conversation_history=self.memory.get_history()[-10:],
+                    conversation_history=history,
                     think=think,
                     tools=native_tools,
                 )
@@ -671,6 +705,18 @@ class ChitraguptAgent:
             },
         }
 
+    def _available_tools(self, has_image: bool, is_live_frame: bool) -> list:
+        """Tools worth offering for this turn — excludes request_camera/
+        request_live_search once there's already an image to look at (a
+        live tick or an image-attached message). Shared by both the native
+        tool-calling path (native_tools) and the prose tool-list built into
+        the prompt for non-native backends, so the two can't drift apart —
+        see CLAUDE.md's "second-opinion review" notes on this exact gap.
+        """
+        offer_camera = not has_image and not is_live_frame
+        camera_tool_names = {"request_camera", "request_live_search"}
+        return [t for t in self.tools.list_tools() if t.name not in camera_tool_names or offer_camera]
+
     def _build_reason_prompt(
         self,
         prompt: str,
@@ -678,6 +724,7 @@ class ChitraguptAgent:
         has_image: bool = False,
         think: bool = True,
         is_live_frame: bool = False,
+        strip_task_list: bool = False,
     ) -> str:
         """Build the prompt for the reasoning model."""
         parts = [
@@ -694,7 +741,9 @@ class ChitraguptAgent:
                 "it directly to answer, describing relevant details as needed."
             )
 
-        doc_summary = tasklist.render_summary(tasklist.get_document())
+        doc_summary = tasklist.render_summary(
+            tasklist.get_document(), lean=is_live_frame, observations=not strip_task_list,
+        )
         if doc_summary:
             parts.append(f"\n[Task list]\n{doc_summary}")
             parts.append(
@@ -715,8 +764,7 @@ class ChitraguptAgent:
             # already has (or, for request_live_search, to re-start watching
             # that's already running).
             offer_camera = not has_image and not is_live_frame
-            camera_tool_names = {"request_camera", "request_live_search"}
-            tools = [t for t in self.tools.list_tools() if t.name not in camera_tool_names or offer_camera]
+            tools = self._available_tools(has_image, is_live_frame)
             tool_list = "\n".join(
                 f"- {t.name}({', '.join(t.parameters)}): {t.description}"
                 for t in tools
