@@ -383,6 +383,73 @@ header .badge {
   padding: 8px;
 }
 
+.activity-status {
+  font-size: 12px;
+  color: #00d2ff;
+  background: #0d0d1a;
+  border: 1px solid #1a1a2e;
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.activity-status.busy::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 210, 255, 0.35);
+  border-top-color: #00d2ff;
+  animation: tool-spin 0.7s linear infinite;
+  flex-shrink: 0;
+}
+.activity-log {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+.activity-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #999;
+  background: #0d0d1a;
+  border: 1px solid #1a1a2e;
+  border-left: 3px solid #3a7bd5;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.activity-entry.status-sending { border-left-color: #ffaa00; }
+.activity-entry.status-replied { border-left-color: #00ff88; }
+.activity-entry.status-silent { border-left-color: #555; color: #666; }
+.activity-entry.status-error { border-left-color: #ff4444; }
+.activity-entry img {
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.activity-entry .activity-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.activity-entry .activity-time {
+  color: #555;
+  font-size: 10px;
+}
+
+.live-preview.frame-flash {
+  box-shadow: inset 0 0 0 3px #00d2ff;
+  transition: box-shadow 0.15s ease-out;
+}
+
 .mode-btn.live-active {
   animation: pulse 1.6s infinite;
 }

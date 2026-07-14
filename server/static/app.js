@@ -163,6 +163,46 @@ function clearImage() {
   document.getElementById('file-input').value = '';
 }
 
+// ─── Activity log — surfaces exactly what the pipeline is doing right now.
+// Added because Live Watch's plain (non-streamed) fetch gave zero feedback
+// between "frame captured" and "response arrived," which could be several
+// seconds of apparent nothing — especially when the model stays silent
+// (the [SILENT] protocol). This gives a live status line plus a per-frame
+// log with a thumbnail of the actual frame that went out, so it's clear
+// which frame the model is looking at and what's happening to it.
+const MAX_ACTIVITY_ENTRIES = 12;
+
+function setActivityStatus(text, busy) {
+  const el = document.getElementById('activity-status');
+  el.textContent = text;
+  el.classList.toggle('busy', !!busy);
+}
+
+function logActivity(thumbDataUrl, text, status) {
+  const log = document.getElementById('activity-log');
+  const entry = document.createElement('div');
+  entry.className = 'activity-entry status-' + status;
+  const time = new Date().toLocaleTimeString([], { hour12: false });
+  entry.innerHTML =
+    (thumbDataUrl ? '<img src="data:image/jpeg;base64,' + thumbDataUrl + '">' : '') +
+    '<div class="activity-text"><span>' + text + '</span><span class="activity-time">' + time + '</span></div>';
+  log.insertBefore(entry, log.firstChild);
+  while (log.children.length > MAX_ACTIVITY_ENTRIES) log.removeChild(log.lastChild);
+  return entry;
+}
+
+function updateActivityEntry(entry, status, text) {
+  if (!entry) return;
+  entry.className = 'activity-entry status-' + status;
+  entry.querySelector('.activity-text span').textContent = text;
+}
+
+function flashCameraFrame() {
+  const preview = document.getElementById('live-preview');
+  preview.classList.add('frame-flash');
+  setTimeout(() => preview.classList.remove('frame-flash'), 200);
+}
+
 function addMessage(role, content, extras) {
   const container = document.getElementById('messages');
   const div = document.createElement('div');
@@ -371,6 +411,7 @@ async function sendMessage() {
   setSending(true);
   addMessage('user', prompt || '(image uploaded)', {});
   input.value = '';
+  setActivityStatus('📤 Sending message to API…', true);
 
   try {
     let data = await runStreamedTurn(prompt || 'What do you see in this image?', currentImageBase64);
@@ -383,19 +424,25 @@ async function sendMessage() {
     if (data && data.needs_camera) {
       const frame = captureCurrentFrame();
       if (frame) {
+        setActivityStatus('📤 Sending requested camera frame to API…', true);
+        logActivity(frame, 'Camera frame sent (model requested it)', 'sending');
         data = await runStreamedTurn(prompt || 'What do you see in this image?', frame, true);
       } else {
         clearImage();
         setSending(false);
+        setActivityStatus('Idle', false);
         addCameraEnableMessage(async () => {
           setSending(true);
           try {
             const retryFrame = captureCurrentFrame();
+            setActivityStatus('📤 Sending requested camera frame to API…', true);
+            logActivity(retryFrame, 'Camera frame sent (model requested it)', 'sending');
             await runStreamedTurn(prompt || 'What do you see in this image?', retryFrame, true);
           } catch (err) {
             addMessage('assistant', '⚠️ Error: ' + err.message, {});
           }
           setSending(false);
+          setActivityStatus('Idle', false);
           input.focus();
         });
         return;
@@ -415,6 +462,7 @@ async function sendMessage() {
   }
 
   setSending(false);
+  setActivityStatus('Idle', false);
   input.focus();
 }
 
@@ -612,6 +660,7 @@ async function startLive() {
   lastSentDiffData = null;
   updateLiveStats();
   restartLiveTimer();
+  setActivityStatus('👁 Watching for changes…', false);
   addMessage('assistant', '📹 Live mode on — watching for changes, sending at most once per interval.', {});
 }
 
@@ -622,6 +671,7 @@ function stopLive() {
   document.getElementById('mode-live-btn').classList.remove('live-active');
   updateLiveStats();
   stopCameraStream();
+  setActivityStatus('Idle', false);
 }
 
 function restartLiveTimer() {
@@ -672,6 +722,7 @@ async function sampleLiveFrame() {
     const delta = meanGrayscaleDelta(sample, lastSentDiffData);
     if (delta < threshold) {
       updateLiveStats();
+      setActivityStatus('👁 Watching — scene unchanged, not sent', false);
       return; // scene unchanged enough — skip the network call entirely
     }
   }
@@ -705,6 +756,15 @@ async function sendLiveFrame(video) {
   const prompt = typedPrompt || 'Watch tick — check the scene against the active task, if any; stay silent if nothing relevant changed.';
   if (typedPrompt) input.value = '';
 
+  // This is the actual "notify me when a frame is sent" moment — fires the
+  // instant the request goes out, not when the response comes back, and
+  // logs a thumbnail of the exact frame so it's clear which one the model
+  // is now looking at (frame N doesn't map to wall-clock time 1:1 once the
+  // diff gate starts skipping ticks).
+  flashCameraFrame();
+  setActivityStatus('📤 Sent frame #' + framesSent + ' — awaiting response…', true);
+  const entry = logActivity(imageBase64, 'Frame #' + framesSent + ' sent to API', 'sending');
+
   try {
     const resp = await fetch('/v1/chat', {
       method: 'POST',
@@ -722,8 +782,12 @@ async function sendLiveFrame(video) {
         displayText += '\n\n<details><summary>💭 Thinking</summary>\n' + data.think_blocks.join('\n') + '\n</details>';
       }
       addMessage('assistant', displayText, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls, think_blocks: data.think_blocks });
+      updateActivityEntry(entry, 'replied', 'Frame #' + framesSent + ' — model replied');
+    } else {
+      updateActivityEntry(entry, 'silent', 'Frame #' + framesSent + ' — silent (no relevant change)');
     }
   } catch (err) {
+    updateActivityEntry(entry, 'error', 'Frame #' + framesSent + ' — error: ' + err.message);
     addMessage('assistant', '⚠️ Live frame error: ' + err.message, {});
   } finally {
     liveSending = false;
@@ -733,6 +797,7 @@ async function sendLiveFrame(video) {
       sendLiveFrame(frame); // flush immediately rather than waiting for the next interval tick
     } else {
       pendingLiveFrame = null;
+      if (liveActive) setActivityStatus('👁 Watching for changes…', false);
     }
   }
 }
