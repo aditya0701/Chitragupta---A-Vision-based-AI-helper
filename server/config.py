@@ -8,7 +8,7 @@ load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 
 class Settings:
-    # Backend mode: "colab" | "api" | "local"
+    # Backend mode: "colab" | "api" | "local" | "hybrid"
     BACKEND_MODE: str = os.getenv("BACKEND_MODE", "colab")
 
     # Colab (Ollama on Colab via ngrok)
@@ -27,6 +27,16 @@ class Settings:
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     API_PROVIDER: str = os.getenv("API_PROVIDER", "gemini")
     API_MODEL: str = os.getenv("API_MODEL", "gemini-flash-latest")
+
+    # Hybrid mode: Groq's qwen3.6-27b does vision only (image -> text
+    # description), DeepSeek does all reasoning/tool-calling in text only.
+    # Split specifically to get reasoning off Groq's combined 8K TPM cap —
+    # see CLAUDE.md's "Known constraints" — onto a provider with no
+    # comparable per-minute token ceiling. Reuses GROQ_API_KEY above for
+    # the vision half.
+    DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
+    DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+    GROQ_VISION_MODEL: str = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
 
     # Off by default while testing plain API chat — every tool mention (even
     # unresolved/hallucinated ones) risks an extra API call and clutters

@@ -211,16 +211,21 @@ class ChitraguptAgent:
                 tools=native_tools,
             )
         except Exception as e:
-            # Provider rejected the request outright as too large for its
-            # per-minute token cap (Groq: HTTP 413) — this is distinct from
-            # a truncated *response* (handled below), it means the request
-            # never even got a response. Rather than surface the raw
-            # provider error to the user, degrade once: drop every
-            # observation from the task-list injection (not just
-            # completed/skipped ones) and force think=False, then retry.
-            # If it fails again, let it raise — one degrade attempt is
-            # enough to catch a near-miss, not a systemic sizing problem.
-            if getattr(e, "status_code", None) == 413:
+            status = getattr(e, "status_code", None)
+            # 413 ("this one request is too big") and 429 ("you've already
+            # spent your rolling per-minute budget, this one just tipped it
+            # over") are different failure shapes even though both come from
+            # the same Groq TPM cap — a 413 shrinks with a leaner prompt, a
+            # 429 doesn't, since the request itself may be perfectly small
+            # and just arrived too soon after previous ones (e.g. rapid live
+            # ticks while actively searching). Neither should surface the
+            # raw provider error to the user.
+            if status == 413:
+                # Degrade once: drop every observation from the task-list
+                # injection (not just completed/skipped ones) and force
+                # think=False, then retry. If it fails again, let it raise —
+                # one degrade attempt is enough to catch a near-miss, not a
+                # systemic sizing problem.
                 logger.warning(f"Backend rejected request as too large (413) — retrying with a stripped prompt: {e}")
                 think = False
                 reason_prompt = self._build_reason_prompt(
@@ -231,6 +236,39 @@ class ChitraguptAgent:
                     image_base64=None if split_stages else image_base64,
                     prompt=reason_prompt,
                     conversation_history=None,
+                    think=think,
+                    tools=native_tools,
+                )
+            elif status == 429:
+                retry_after = self._parse_retry_after(e)
+                if is_live_frame:
+                    # Don't hold the shared lock waiting out a live tick's
+                    # rate limit — another tick comes along in a few seconds
+                    # anyway. Surface the wait so the frontend can back its
+                    # own polling interval off instead of hammering the same
+                    # limit again next tick.
+                    logger.warning(f"Rate limited (429) on live tick — skipping this tick, suggested wait {retry_after}s.")
+                    return {
+                        "text": "",
+                        "model": "n/a",
+                        "provider": "n/a",
+                        "tool_calls": [],
+                        "think_blocks": [],
+                        "scene_description": None,
+                        "rate_limited": True,
+                        "retry_after": retry_after,
+                    }
+                # A direct question deserves an actual answer — wait out the
+                # provider's suggested delay once (capped, in case the
+                # provider ever reports something unreasonable), then retry,
+                # rather than surfacing a raw rate-limit error for something
+                # the user is actively waiting on.
+                logger.warning(f"Rate limited (429) — waiting {retry_after}s then retrying once.")
+                await asyncio.sleep(min(retry_after, 10.0))
+                response = await self.backend.chat(
+                    image_base64=None if split_stages else image_base64,
+                    prompt=reason_prompt,
+                    conversation_history=history,
                     think=think,
                     tools=native_tools,
                 )
@@ -661,6 +699,16 @@ class ChitraguptAgent:
                 "scene_description": None,
             },
         }
+
+    def _parse_retry_after(self, e: Exception, default: float = 5.0) -> float:
+        """Best-effort extraction of a provider's suggested wait time from a
+        429 error's message text (Groq embeds it as "try again in 6.1s").
+        Falls back to `default` if the shape doesn't match — e.g. a
+        different backend's error format — so callers always get a usable
+        number instead of having to handle None.
+        """
+        match = re.search(r"try again in ([\d.]+)s", str(e))
+        return float(match.group(1)) if match else default
 
     def _available_tools(self, has_image: bool, is_live_frame: bool) -> list:
         """Tools worth offering for this turn — excludes request_camera/

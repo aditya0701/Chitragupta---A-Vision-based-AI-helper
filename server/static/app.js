@@ -776,7 +776,20 @@ async function sendLiveFrame(video) {
       }),
     });
     const data = await resp.json();
-    if (!data.scene_unchanged && data.text) {
+    if (data.rate_limited) {
+      // The server deliberately skipped this tick rather than surfacing a
+      // raw 429 — back the polling interval off for the provider's
+      // suggested wait instead of hammering the same per-minute cap again
+      // next tick. Live Watch resumes at its normal interval afterwards.
+      const waitS = data.retry_after || 5;
+      updateActivityEntry(entry, 'silent', 'Frame #' + framesSent + ' — rate limited, pausing ' + waitS.toFixed(1) + 's');
+      setActivityStatus('⏳ Rate limited — pausing ' + Math.ceil(waitS) + 's…', false);
+      if (liveActive && liveTimer) {
+        clearInterval(liveTimer);
+        liveTimer = null;
+        setTimeout(() => { if (liveActive) restartLiveTimer(); }, waitS * 1000);
+      }
+    } else if (!data.scene_unchanged && data.text) {
       let displayText = data.text;
       if (data.think_blocks && data.think_blocks.length > 0) {
         displayText += '\n\n<details><summary>💭 Thinking</summary>\n' + data.think_blocks.join('\n') + '\n</details>';

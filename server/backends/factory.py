@@ -29,5 +29,8 @@ def get_backend() -> VisionBackend:
     elif mode == "local":
         from .ollama_backend import OllamaBackend
         return OllamaBackend()
+    elif mode == "hybrid":
+        from .deepseek_backend import DeepSeekBackend
+        return DeepSeekBackend()
     else:
         raise ValueError(f"Unknown BACKEND_MODE: {mode}")
