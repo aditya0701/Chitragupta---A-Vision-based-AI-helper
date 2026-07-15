@@ -1,12 +1,128 @@
+// Debug UI — same pipeline as the normal app, but every turn dumps exactly
+// what was sent to the model and what came back, inline in the chat itself.
+// No sidebar: settings live in a thin bar under the mode switcher, and
+// everything worth *analyzing* (prompts, raw responses, tool calls, activity)
+// is a block in the message stream, not tucked away somewhere you have to
+// go looking for it.
+
 let currentImageBase64 = null;
 let isProcessing = false;
 
+// ─── Raw-dump rendering — the actual point of this page ───────────────────
+
+// Replaces base64 image payloads with a length note (unreadable as text, and
+// dumping ~100KB of it per turn buries everything else) and caps any other
+// very long string so one runaway tool result doesn't swallow the page.
+function safeStringify(obj) {
+  return JSON.stringify(obj, (key, value) => {
+    if (key === 'image_base64' && typeof value === 'string') {
+      return `<base64 image, ${value.length} chars, omitted>`;
+    }
+    if (typeof value === 'string' && value.length > 4000) {
+      return value.slice(0, 4000) + `...[${value.length - 4000} more chars truncated]`;
+    }
+    return value;
+  }, 2);
+}
+
+function makeSubBlock(title, obj) {
+  const wrap = document.createElement('div');
+  wrap.className = 'dbg-step';
+  const label = document.createElement('div');
+  label.className = 'dbg-step-label';
+  label.textContent = title;
+  const pre = document.createElement('pre');
+  pre.textContent = safeStringify(obj);
+  wrap.appendChild(label);
+  wrap.appendChild(pre);
+  return wrap;
+}
+
+// One block per actual backend.chat()/chat_stream() call the turn made
+// (initial reasoning call, any truncation/rate-limit retry, the tool-result
+// follow-up call, ...) — see agent.py's _record_debug_step. This is "what
+// the model actually saw," not a summary of it.
+function makeStepBlock(i, step) {
+  const wrap = document.createElement('div');
+  wrap.className = 'dbg-step';
+  const label = document.createElement('div');
+  label.className = 'dbg-step-label';
+  label.textContent =
+    `● call ${i + 1}: ${step.label}  (has_image=${step.has_image} think=${step.think}` +
+    (step.tools_offered && step.tools_offered.length ? ` tools_offered=[${step.tools_offered.join(',')}]` : '') +
+    ')';
+  wrap.appendChild(label);
+
+  const promptPre = document.createElement('pre');
+  promptPre.textContent = 'PROMPT SENT:\n' + step.prompt_sent;
+  wrap.appendChild(promptPre);
+
+  const respPre = document.createElement('pre');
+  let respText =
+    `RESPONSE (${step.provider}/${step.model}${step.truncated ? ', TRUNCATED' : ''}):\n`;
+  if (step.response_reasoning) respText += '[reasoning]\n' + step.response_reasoning + '\n\n';
+  respText += '[visible text]\n' + (step.response_text || '(empty)');
+  if (step.tool_calls_raw && step.tool_calls_raw.length) {
+    respText += '\n\n[raw tool_calls from API]\n' + safeStringify(step.tool_calls_raw);
+  }
+  respPre.textContent = respText;
+  wrap.appendChild(respPre);
+
+  return wrap;
+}
+
+// The full raw picture for one turn: the request body, every model call
+// made while handling it, every tool actually executed (with its full
+// arguments and result — this is where a web_search query and its results
+// show up, verbatim), and the final response envelope. Expanded by default
+// on purpose — nothing here is worth hiding behind an extra click when the
+// whole point of this page is to see it.
+function renderDebugDump(container, requestObj, data) {
+  const details = document.createElement('details');
+  details.className = 'dbg-raw';
+  details.open = true;
+  const summary = document.createElement('summary');
+  summary.textContent = '🔍 raw pipeline data';
+  details.appendChild(summary);
+
+  const body = document.createElement('div');
+  body.appendChild(makeSubBlock('→ REQUEST', requestObj));
+
+  const steps = (data.debug && data.debug.steps) || [];
+  steps.forEach((s, i) => body.appendChild(makeStepBlock(i, s)));
+
+  if (data.tool_calls && data.tool_calls.length) {
+    body.appendChild(makeSubBlock('⚡ TOOL CALLS (executed, with results)', data.tool_calls));
+  }
+
+  if (data.vision_prompt || data.scene_description) {
+    body.appendChild(makeSubBlock('👁 VISION STAGE (split backend only)', {
+      vision_prompt: data.vision_prompt, scene_description: data.scene_description,
+    }));
+  }
+
+  body.appendChild(makeSubBlock('← RESPONSE SUMMARY', {
+    text: data.text, model: data.model, provider: data.provider,
+    scene_unchanged: !!data.scene_unchanged,
+    needs_camera: !!data.needs_camera,
+    needs_live_search: !!data.needs_live_search,
+    search_target: data.search_target || null,
+    rate_limited: !!data.rate_limited,
+    retry_after: data.retry_after || null,
+  }));
+
+  if (data.debug && data.debug.timer_completions && data.debug.timer_completions.length) {
+    body.appendChild(makeSubBlock('⏰ TIMER COMPLETIONS FOLDED INTO THIS TURN', data.debug.timer_completions));
+  }
+  if (data.debug && data.debug.note) {
+    body.appendChild(makeSubBlock('NOTE', data.debug.note));
+  }
+
+  details.appendChild(body);
+  container.appendChild(details);
+}
+
 // ─── Conversation export ────────────────────────────────────────────────────
-// Mirrors every rendered message (plain notices via addMessage, and streamed
-// turns via createLiveMessage().finalize) into a plain-data log, independent
-// of the DOM — so "Save conversation" can dump a clean transcript (including
-// think blocks and tool calls) for pasting into a bug report, without having
-// to scrape rendered HTML back out.
 let transcriptLog = [];
 
 function logTranscript(role, text, extras) {
@@ -16,12 +132,13 @@ function logTranscript(role, text, extras) {
     model: extras && extras.model,
     tool_calls: (extras && extras.tool_calls) || [],
     think_blocks: (extras && extras.think_blocks) || [],
+    debug: (extras && extras.rawData && extras.rawData.debug) || null,
     at: new Date().toISOString(),
   });
 }
 
 function exportConversation() {
-  const lines = ['# Chitragupt conversation export', `Exported ${new Date().toISOString()}`, ''];
+  const lines = ['# Chitragupt debug transcript export', `Exported ${new Date().toISOString()}`, ''];
   transcriptLog.forEach((entry) => {
     lines.push(`## ${entry.role} (${entry.at})`);
     lines.push(entry.text);
@@ -32,6 +149,9 @@ function exportConversation() {
     entry.think_blocks.forEach((tb) => {
       lines.push(`\n<details><summary>Thinking</summary>\n\n${tb}\n\n</details>`);
     });
+    if (entry.debug) {
+      lines.push('\n<details><summary>Raw debug</summary>\n\n```json\n' + JSON.stringify(entry.debug, null, 2) + '\n```\n\n</details>');
+    }
     lines.push('');
   });
 
@@ -39,16 +159,13 @@ function exportConversation() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `chitragupt-conversation-${Date.now()}.md`;
+  a.download = `chitragupt-debug-${Date.now()}.md`;
   document.body.appendChild(a);
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
 }
 
-// Shared resolution cap for every image sent to the backend (upload, live
-// tick, or a one-off camera capture) — keeps vision-token cost down without
-// a visible quality hit, since JPEG quality stays high (see below).
 const MAX_FRAME_DIM = 1024;
 
 function scaledDims(w, h, maxDim) {
@@ -56,17 +173,14 @@ function scaledDims(w, h, maxDim) {
   return { width: w * scale, height: h * scale };
 }
 
-// ─── Voice input (Web Speech API — browser-native, no server change) ────────
-// Only Chrome/Edge/Safari implement SpeechRecognition (Firefox doesn't), and
-// it requires a secure context (HTTPS or localhost) same as getUserMedia —
-// the mic button stays hidden entirely rather than showing a dead control.
+// ─── Voice input ────────────────────────────────────────────────────────────
 const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recognizer = null;
 let isRecording = false;
 
 function initVoiceInput() {
   const micBtn = document.getElementById('mic-btn');
-  if (!SpeechRecognitionImpl) return; // leave button hidden — no support
+  if (!SpeechRecognitionImpl) return;
   micBtn.style.display = '';
 
   recognizer = new SpeechRecognitionImpl();
@@ -84,9 +198,6 @@ function initVoiceInput() {
 
   recognizer.onerror = () => stopVoiceInput();
 
-  // Fires when the browser decides you've stopped talking (continuous=false)
-  // — send automatically so speaking a question is the whole interaction,
-  // no follow-up tap needed.
   recognizer.onend = () => {
     isRecording = false;
     micBtn.classList.remove('recording');
@@ -118,29 +229,18 @@ initVoiceInput();
 async function checkHealth() {
   try {
     const resp = await fetch('/health');
-    if (resp.ok) {
-      document.getElementById('status-dot').className = 'status-dot';
-      document.getElementById('status-text').textContent = 'Connected';
-    }
+    if (resp.ok) document.getElementById('status-text').textContent = 'Connected';
   } catch { /* ignore */ }
 }
 checkHealth();
-
-function toggleSidebar(force) {
-  const sidebar = document.getElementById('sidebar');
-  const backdrop = document.getElementById('sidebar-backdrop');
-  const open = force !== undefined ? force : !sidebar.classList.contains('open');
-  sidebar.classList.toggle('open', open);
-  backdrop.classList.toggle('open', open);
-}
 
 function handleFileSelect(event) {
   const file = event.target.files[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = function(e) {
+  reader.onload = function (e) {
     const img = new Image();
-    img.onload = function() {
+    img.onload = function () {
       const { width, height } = scaledDims(img.naturalWidth, img.naturalHeight, MAX_FRAME_DIM);
       const canvas = document.getElementById('capture-canvas');
       canvas.width = width;
@@ -163,31 +263,24 @@ function clearImage() {
   document.getElementById('file-input').value = '';
 }
 
-// ─── Activity log — surfaces exactly what the pipeline is doing right now.
-// Added because Live Watch's plain (non-streamed) fetch gave zero feedback
-// between "frame captured" and "response arrived," which could be several
-// seconds of apparent nothing — especially when the model stays silent
-// (the [SILENT] protocol). This gives a live status line plus a per-frame
-// log with a thumbnail of the actual frame that went out, so it's clear
-// which frame the model is looking at and what's happening to it.
-const MAX_ACTIVITY_ENTRIES = 12;
-
-function setActivityStatus(text, busy) {
+// ─── Activity — same signal as the normal app's sidebar log, just appended
+// straight into the message stream since there's no sidebar to put it in.
+// Not capped: the whole point of this page is not losing anything.
+function setActivityStatus(text) {
   const el = document.getElementById('activity-status');
-  el.textContent = text;
-  el.classList.toggle('busy', !!busy);
+  if (el) el.textContent = text;
 }
 
 function logActivity(thumbDataUrl, text, status) {
-  const log = document.getElementById('activity-log');
+  const container = document.getElementById('messages');
   const entry = document.createElement('div');
   entry.className = 'activity-entry status-' + status;
   const time = new Date().toLocaleTimeString([], { hour12: false });
   entry.innerHTML =
     (thumbDataUrl ? '<img src="data:image/jpeg;base64,' + thumbDataUrl + '">' : '') +
     '<div class="activity-text"><span>' + text + '</span><span class="activity-time">' + time + '</span></div>';
-  log.insertBefore(entry, log.firstChild);
-  while (log.children.length > MAX_ACTIVITY_ENTRIES) log.removeChild(log.lastChild);
+  container.appendChild(entry);
+  container.scrollTop = container.scrollHeight;
   return entry;
 }
 
@@ -203,11 +296,6 @@ function flashCameraFrame() {
   setTimeout(() => preview.classList.remove('frame-flash'), 200);
 }
 
-// Inline, in-conversation visibility into what's actually happening on the
-// wire — every request sent and every outcome, right in the chat you're
-// already watching, instead of a separate sidebar panel you have to look
-// away to check. Deliberately terse/monospace so it reads as a log line,
-// not a real message. `kind` picks a color: send | recv | silent | error | rate.
 function addDebugMessage(text, kind) {
   const container = document.getElementById('messages');
   const div = document.createElement('div');
@@ -218,6 +306,9 @@ function addDebugMessage(text, kind) {
   container.scrollTop = container.scrollHeight;
 }
 
+// extras.rawData (the full response payload) + extras.requestObj (what was
+// POSTed) trigger a full raw dump under the bubble. Plain notices (mode
+// switches, resets) just omit those and render as a normal message.
 function addMessage(role, content, extras) {
   const container = document.getElementById('messages');
   const div = document.createElement('div');
@@ -228,18 +319,18 @@ function addMessage(role, content, extras) {
   }
   if (extras && extras.tool_calls && extras.tool_calls.length > 0) {
     extras.tool_calls.forEach(tc => {
-      html += '<div class="tool-msg">⚡ Used tool: ' + tc.tool + '</div>';
+      html += '<div class="tool-msg">⚡ Used tool: ' + tc.tool + '(' + JSON.stringify(tc.arguments || {}) + ')</div>';
     });
   }
   div.innerHTML = html;
+  if (extras && extras.rawData) {
+    renderDebugDump(div, extras.requestObj || {}, extras.rawData);
+  }
   logTranscript(role, content, extras);
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
 }
 
-// Captures the current camera frame, if a stream is attached — works
-// whether the stream came from Live Watch (continuous polling) or the
-// manual "Enable camera" toggle (stream only, no autonomous ticking).
 function captureCurrentFrame() {
   const video = document.getElementById('camera-video');
   if (!cameraStreamActive || !video || !video.videoWidth) return null;
@@ -251,10 +342,6 @@ function captureCurrentFrame() {
   return canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
 }
 
-// A clickable "enable camera and retry" prompt, shown when request_camera
-// fires but no stream is attached — replaces a dead-end text message with
-// something the user can actually act on (was previously just "open Live
-// Watch first," which is not a popup and easy to miss/ignore).
 function addCameraEnableMessage(onEnabled) {
   const container = document.getElementById('messages');
   const div = document.createElement('div');
@@ -280,11 +367,8 @@ function addCameraEnableMessage(onEnabled) {
   container.scrollTop = container.scrollHeight;
 }
 
-// Builds a live-updating assistant message bubble that fills in as
-// reasoning_delta/content_delta/tool_call_start/tool_result events arrive
-// from /v1/chat/stream, instead of appearing all at once at the end —
-// mirrors how tool calls show up mid-generation in chat apps like Claude
-// Code, rather than only in the final dumped response.
+// Live-updating bubble for the streaming endpoint. Raw dump is attached once
+// the "done" event's full data arrives (finalize()), same as the plain path.
 function createLiveMessage() {
   const container = document.getElementById('messages');
   const div = document.createElement('div');
@@ -336,7 +420,7 @@ function createLiveMessage() {
         line.textContent = '⚡ Used tool: ' + name;
       }
     },
-    finalize(data) {
+    finalize(data, requestObj) {
       div.classList.remove('streaming');
       thinkEl.querySelector('summary').textContent = '💭 Thinking';
       textEl.textContent = data.text || '...';
@@ -346,11 +430,14 @@ function createLiveMessage() {
         tag.textContent = (data.provider || '') + '/' + (data.model || '');
         div.appendChild(tag);
       }
+      renderDebugDump(div, requestObj || {}, data);
       logTranscript('assistant', data.text || '', {
         model: data.model ? (data.provider || '') + '/' + data.model : null,
         tool_calls: data.tool_calls || [],
         think_blocks: data.think_blocks || [],
+        rawData: data,
       });
+      container.scrollTop = container.scrollHeight;
     },
     fail(message) {
       div.classList.remove('streaming');
@@ -360,13 +447,14 @@ function createLiveMessage() {
   };
 }
 
-// Posts to the streaming endpoint and parses the SSE frames (data: {...}\n\n)
-// by hand — fetch()'s ReadableStream instead of EventSource, since
-// EventSource only supports GET and this needs to POST the prompt/image.
-// Wires each event straight into the live bubble as it arrives; returns the
-// final "done" event's data once the stream ends.
 async function runStreamedTurn(prompt, imageBase64, isCameraFollowup) {
   const live = createLiveMessage();
+  const requestObj = {
+    prompt,
+    is_camera_followup: !!isCameraFollowup,
+    has_image: !!imageBase64,
+    image_base64: imageBase64 || null,
+  };
   addDebugMessage(
     'POST /v1/chat/stream  is_camera_followup=' + !!isCameraFollowup +
     '  has_image=' + !!imageBase64 + '  prompt="' + prompt.slice(0, 60) + (prompt.length > 60 ? '…' : '') + '"',
@@ -400,7 +488,7 @@ async function runStreamedTurn(prompt, imageBase64, isCameraFollowup) {
       const event = JSON.parse(line.slice(6));
       switch (event.type) {
         case 'tool_call_start': addDebugMessage('⚡ tool_call_start: ' + event.name, 'recv'); break;
-        case 'tool_result': addDebugMessage('⚡ tool_result: ' + event.tool, 'recv'); break;
+        case 'tool_result': addDebugMessage('⚡ tool_result: ' + event.tool + ' -> ' + String(event.result).slice(0, 300), 'recv'); break;
         case 'error': addDebugMessage('✖ stream error: ' + event.message, 'error'); break;
       }
       switch (event.type) {
@@ -415,11 +503,7 @@ async function runStreamedTurn(prompt, imageBase64, isCameraFollowup) {
   }
 
   if (finalData) {
-    live.finalize(finalData);
-    if (finalData.vision_prompt || finalData.scene_description) {
-      addDebugMessage('  [vision→Qwen] asked: "' + (finalData.vision_prompt || '') + '"', 'send');
-      addDebugMessage('  [vision←Qwen] said: "' + (finalData.scene_description || '') + '"', 'recv');
-    }
+    live.finalize(finalData, requestObj);
     addDebugMessage(
       '← done  provider=' + finalData.provider + ' model=' + finalData.model +
       '  tool_calls=[' + (finalData.tool_calls || []).map(t => t.tool).join(',') + ']' +
@@ -447,38 +531,33 @@ async function sendMessage() {
   setSending(true);
   addMessage('user', prompt || '(image uploaded)', {});
   input.value = '';
-  setActivityStatus('📤 Sending message to API…', true);
+  setActivityStatus('📤 Sending message to API…');
 
   try {
     let data = await runStreamedTurn(prompt || 'What do you see in this image?', currentImageBase64);
 
-    // The model asked to see the current scene instead of guessing — grab
-    // a fresh frame and resend the same question once. No stream attached
-    // (camera never enabled) means we can't fulfill it yet — offer a
-    // one-click way to turn the camera on and retry, instead of a dead-end
-    // message the user has no way to act on.
     if (data && data.needs_camera) {
       const frame = captureCurrentFrame();
       if (frame) {
-        setActivityStatus('📤 Sending requested camera frame to API…', true);
+        setActivityStatus('📤 Sending requested camera frame to API…');
         logActivity(frame, 'Camera frame sent (model requested it)', 'sending');
         data = await runStreamedTurn(prompt || 'What do you see in this image?', frame, true);
       } else {
         clearImage();
         setSending(false);
-        setActivityStatus('Idle', false);
+        setActivityStatus('Idle');
         addCameraEnableMessage(async () => {
           setSending(true);
           try {
             const retryFrame = captureCurrentFrame();
-            setActivityStatus('📤 Sending requested camera frame to API…', true);
+            setActivityStatus('📤 Sending requested camera frame to API…');
             logActivity(retryFrame, 'Camera frame sent (model requested it)', 'sending');
             await runStreamedTurn(prompt || 'What do you see in this image?', retryFrame, true);
           } catch (err) {
             addMessage('assistant', '⚠️ Error: ' + err.message, {});
           }
           setSending(false);
-          setActivityStatus('Idle', false);
+          setActivityStatus('Idle');
           input.focus();
         });
         return;
@@ -487,9 +566,6 @@ async function sendMessage() {
 
     clearImage();
 
-    // The model wants to keep watching for something specific, not just
-    // take one look — switch into Live Watch so it actually can. If
-    // already there (or the camera's already on), this is a no-op.
     if (data && data.needs_live_search) {
       await switchMode('live');
     }
@@ -498,7 +574,7 @@ async function sendMessage() {
   }
 
   setSending(false);
-  setActivityStatus('Idle', false);
+  setActivityStatus('Idle');
   input.focus();
 }
 
@@ -507,32 +583,16 @@ async function resetConversation() {
   document.getElementById('messages').innerHTML = '';
   transcriptLog = [];
   addMessage('assistant', 'Conversation reset. How can I help you?', {});
-  toggleSidebar(false);
 }
 
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => { /* ignore */ });
-  });
-}
+// ─── Live camera streaming ─────────────────────────────────────────────────
 
-// ─── Live camera streaming (budget-conscious) ─────────────────────────────
-//
-// Two throttles run client-side, before any network call is made:
-//   1. A fixed sampling interval bounds the worst-case request rate.
-//   2. A cheap perceptual diff against the last *sent* frame skips the
-//      network/Gemini call entirely when the scene hasn't meaningfully
-//      changed. This is what actually protects the free-tier quota, since
-//      it runs before the request leaves the browser.
-
-const LIVE_SETTINGS_KEY = 'chitragupt-live-settings';
-// Diff thresholds (mean grayscale delta on a 32x32 downsample, 0-255 scale).
-// Lower = more sensitive (sends more often). Slider maps 1/2/3 -> these.
+const LIVE_SETTINGS_KEY = 'chitragupt-debug-live-settings';
 const THRESHOLD_LEVELS = { 1: 6, 2: 12, 3: 22 };
 const THRESHOLD_LABELS = { 1: 'high', 2: 'medium', 3: 'low' };
 
-let liveActive = false; // Live Watch's autonomous polling loop specifically
-let cameraStreamActive = false; // camera stream attached at all (Live Watch OR manual toggle)
+let liveActive = false;
+let cameraStreamActive = false;
 let liveStream = null;
 let liveTimer = null;
 let liveSending = false;
@@ -565,10 +625,10 @@ function updateSettingsLabels() {
 function updateLiveStats() {
   const el = document.getElementById('live-stats');
   if (!liveActive) {
-    el.textContent = 'Not watching';
+    el.textContent = 'not watching';
     return;
   }
-  el.textContent = `Watching — ${framesWatched} sampled, ${framesSent} sent`;
+  el.textContent = `watching — ${framesWatched} sampled, ${framesSent} sent`;
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -578,10 +638,7 @@ document.addEventListener('DOMContentLoaded', () => {
   startTimerPolling();
 });
 
-// ─── Background timers (cooking steps, wait periods) ──────────────────────
-//
-// Polls a cheap server endpoint that's pure arithmetic unless a timer has
-// actually completed — no Groq cost per poll, only once per fired timer.
+// ─── Background timers ──────────────────────────────────────────────────────
 
 const TIMER_POLL_INTERVAL_S = 15;
 
@@ -595,12 +652,12 @@ async function checkTimers() {
     const resp = await fetch('/v1/timers/check');
     const data = await resp.json();
     (data.completed || []).forEach((t) => {
-      addMessage('assistant', `⏰ ${t.label}: ${t.message}`, {});
+      addMessage('assistant', `⏰ ${t.label}: ${t.message}`, { rawData: { debug: t.debug, text: t.message, model: t.debug && t.debug.steps && t.debug.steps[0] && t.debug.steps[0].model, provider: t.debug && t.debug.steps && t.debug.steps[0] && t.debug.steps[0].provider, tool_calls: (t.debug && t.debug.tool_calls) || [] }, requestObj: { poll: '/v1/timers/check', timer_id: t.id, label: t.label } });
     });
   } catch { /* ignore — next poll will retry */ }
 }
 
-// ─── Mode switching (Chat & Image vs Live Watch) ───────────────────────────
+// ─── Mode switching ─────────────────────────────────────────────────────────
 
 let currentMode = 'chat';
 
@@ -609,7 +666,7 @@ async function switchMode(mode) {
 
   if (mode === 'live') {
     await startLive();
-    if (!liveActive) return; // camera permission denied / unavailable — stay on chat mode
+    if (!liveActive) return;
   } else if (currentMode === 'live') {
     stopLive();
   }
@@ -618,18 +675,11 @@ async function switchMode(mode) {
   document.getElementById('mode-chat-btn').classList.toggle('active', mode === 'chat');
   document.getElementById('mode-live-btn').classList.toggle('active', mode === 'live');
   document.getElementById('upload-img-btn').style.display = mode === 'live' ? 'none' : '';
-  // Live Watch owns the camera lifecycle directly while active — the manual
-  // toggle is only for on-demand capture in Chat mode, showing both would
-  // just invite confusion about which one is actually in control.
   document.getElementById('camera-toggle-btn').style.display = mode === 'live' ? 'none' : '';
   document.getElementById('prompt-input').placeholder =
     mode === 'live' ? 'Ask about what the camera sees (optional)...' : 'Ask me anything...';
 }
 
-// Raw camera stream lifecycle — just getUserMedia + wiring the <video>
-// element, no autonomous polling. Used directly by the manual "Enable
-// camera" toggle (on-demand capture only, no per-interval Groq calls), and
-// as the first step of full Live Watch mode (see startLive below).
 async function startCameraStream() {
   if (cameraStreamActive) return true;
   if (!window.isSecureContext) {
@@ -667,22 +717,15 @@ function updateCameraToggleBtn() {
   const btn = document.getElementById('camera-toggle-btn');
   if (!btn) return;
   btn.classList.toggle('camera-on', cameraStreamActive);
-  btn.title = cameraStreamActive ? 'Turn camera off' : 'Enable camera for on-demand questions (no continuous watching)';
+  btn.title = cameraStreamActive ? 'Turn camera off' : 'Enable camera for on-demand questions';
 }
 
-// Manual toggle — deliberately does NOT touch Live Watch's polling loop.
-// This is "camera available for request_camera to use," not "watch
-// continuously" — kept separate so the camera is never running (and
-// costing nothing extra since it's stream-only, but also never silently
-// left on) unless the user explicitly asked for either mode.
 async function toggleCameraStream() {
   if (cameraStreamActive && !liveActive) {
     stopCameraStream();
   } else if (!cameraStreamActive) {
     await startCameraStream();
   }
-  // If Live Watch's polling is active, leave the stream alone — that tab
-  // owns it; use the Live Watch tab's own close button to stop both together.
 }
 
 async function startLive() {
@@ -696,7 +739,7 @@ async function startLive() {
   lastSentDiffData = null;
   updateLiveStats();
   restartLiveTimer();
-  setActivityStatus('👁 Watching for changes…', false);
+  setActivityStatus('👁 Watching for changes…');
   addMessage('assistant', '📹 Live mode on — watching for changes, sending at most once per interval.', {});
 }
 
@@ -707,7 +750,7 @@ function stopLive() {
   document.getElementById('mode-live-btn').classList.remove('live-active');
   updateLiveStats();
   stopCameraStream();
-  setActivityStatus('Idle', false);
+  setActivityStatus('Idle');
 }
 
 function restartLiveTimer() {
@@ -736,7 +779,7 @@ function meanGrayscaleDelta(a, b) {
   return total / count;
 }
 
-let pendingLiveFrame = null; // latest frame captured while a request was in flight
+let pendingLiveFrame = null;
 
 async function sampleLiveFrame() {
   if (!liveActive) return;
@@ -746,11 +789,6 @@ async function sampleLiveFrame() {
   framesWatched += 1;
   const sample = captureDiffSample(video);
 
-  // A typed question waiting to go out always overrides the diff gate — the
-  // user is actively waiting on a reply, so an unchanged scene isn't a
-  // reason to sit on their message until the next tick happens to clear
-  // the threshold (previously this was only checked inside sendLiveFrame,
-  // which the diff-gate return below never let it reach).
   const hasTypedPrompt = !!document.getElementById('prompt-input').value.trim();
 
   if (!hasTypedPrompt && lastSentDiffData) {
@@ -758,8 +796,8 @@ async function sampleLiveFrame() {
     const delta = meanGrayscaleDelta(sample, lastSentDiffData);
     if (delta < threshold) {
       updateLiveStats();
-      setActivityStatus('👁 Watching — scene unchanged, not sent', false);
-      return; // scene unchanged enough — skip the network call entirely
+      setActivityStatus('👁 Watching — scene unchanged, not sent (delta=' + delta.toFixed(1) + ' < ' + threshold + ')');
+      return;
     }
   }
 
@@ -768,10 +806,6 @@ async function sampleLiveFrame() {
   updateLiveStats();
 
   if (liveSending) {
-    // Already mid-request (e.g. a slow tool call) — remember this frame
-    // instead of dropping it, so a moment that matters (marinade done, the
-    // thing you're looking for comes into view) isn't silently lost while
-    // the agent is busy. Only the latest matters; older ones are superseded.
     pendingLiveFrame = video;
     return;
   }
@@ -792,14 +826,10 @@ async function sendLiveFrame(video) {
   const prompt = typedPrompt || 'Watch tick — check the scene against the active task, if any; stay silent if nothing relevant changed.';
   if (typedPrompt) input.value = '';
 
-  // This is the actual "notify me when a frame is sent" moment — fires the
-  // instant the request goes out, not when the response comes back, and
-  // logs a thumbnail of the exact frame so it's clear which one the model
-  // is now looking at (frame N doesn't map to wall-clock time 1:1 once the
-  // diff gate starts skipping ticks).
   flashCameraFrame();
-  setActivityStatus('📤 Sent frame #' + framesSent + ' — awaiting response…', true);
+  setActivityStatus('📤 Sent frame #' + framesSent + ' — awaiting response…');
   const entry = logActivity(imageBase64, 'Frame #' + framesSent + ' sent to API', 'sending');
+  const requestObj = { prompt, is_live_frame: !typedPrompt, has_image: true, image_base64: imageBase64 };
   addDebugMessage(
     'POST /v1/chat  frame #' + framesSent + '  is_live_frame=' + !typedPrompt +
     '  prompt="' + prompt.slice(0, 60) + (prompt.length > 60 ? '…' : '') + '"',
@@ -817,35 +847,24 @@ async function sendLiveFrame(video) {
       }),
     });
     const data = await resp.json();
-    // The Groq vision-only stage (hybrid backend) never reaches the client
-    // as its own network call — it happens inside this single request,
-    // server-side — so this is the only place its instruction/output are
-    // visible at all. Both are only populated when the split-stage vision
-    // step actually ran (hybrid backend, image present).
+
     if (data.vision_prompt || data.scene_description) {
       addDebugMessage('  [vision→Qwen] asked: "' + (data.vision_prompt || '') + '"', 'send');
       addDebugMessage('  [vision←Qwen] said: "' + (data.scene_description || '') + '"', 'recv');
     }
     if (data.rate_limited) {
-      // The server deliberately skipped this tick rather than surfacing a
-      // raw 429 — back the polling interval off for the provider's
-      // suggested wait instead of hammering the same per-minute cap again
-      // next tick. Live Watch resumes at its normal interval afterwards.
       const waitS = data.retry_after || 5;
       updateActivityEntry(entry, 'silent', 'Frame #' + framesSent + ' — rate limited, pausing ' + waitS.toFixed(1) + 's');
       addDebugMessage('← 429 rate_limited  retry_after=' + waitS + 's  pausing live polling', 'rate');
-      setActivityStatus('⏳ Rate limited — pausing ' + Math.ceil(waitS) + 's…', false);
+      addMessage('assistant', '(rate limited, tick skipped)', { rawData: data, requestObj });
+      setActivityStatus('⏳ Rate limited — pausing ' + Math.ceil(waitS) + 's…');
       if (liveActive && liveTimer) {
         clearInterval(liveTimer);
         liveTimer = null;
         setTimeout(() => { if (liveActive) restartLiveTimer(); }, waitS * 1000);
       }
     } else if (!data.scene_unchanged && data.text) {
-      let displayText = data.text;
-      if (data.think_blocks && data.think_blocks.length > 0) {
-        displayText += '\n\n<details><summary>💭 Thinking</summary>\n' + data.think_blocks.join('\n') + '\n</details>';
-      }
-      addMessage('assistant', displayText, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls, think_blocks: data.think_blocks });
+      addMessage('assistant', data.text, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls, think_blocks: data.think_blocks, rawData: data, requestObj });
       updateActivityEntry(entry, 'replied', 'Frame #' + framesSent + ' — model replied');
       addDebugMessage(
         '← 200  provider=' + data.provider + ' model=' + data.model +
@@ -854,6 +873,9 @@ async function sendLiveFrame(video) {
       );
     } else {
       updateActivityEntry(entry, 'silent', 'Frame #' + framesSent + ' — silent (no relevant change)');
+      // Still dump the raw pipeline data for a silent tick — "silent" is a
+      // real outcome worth inspecting (was it [SILENT], or truly empty?).
+      addMessage('assistant', '(silent — no visible reply this tick)', { rawData: data, requestObj });
       addDebugMessage(
         '← 200  provider=' + (data.provider || 'n/a') + ' model=' + (data.model || 'n/a') +
         '  scene_unchanged=' + !!data.scene_unchanged + '  silent=' + !data.text,
@@ -869,10 +891,10 @@ async function sendLiveFrame(video) {
     if (pendingLiveFrame && liveActive) {
       const frame = pendingLiveFrame;
       pendingLiveFrame = null;
-      sendLiveFrame(frame); // flush immediately rather than waiting for the next interval tick
+      sendLiveFrame(frame);
     } else {
       pendingLiveFrame = null;
-      if (liveActive) setActivityStatus('👁 Watching for changes…', false);
+      if (liveActive) setActivityStatus('👁 Watching for changes…');
     }
   }
 }

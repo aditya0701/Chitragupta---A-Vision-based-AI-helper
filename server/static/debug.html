@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0a0a0f">
+<link rel="stylesheet" href="/static/style.css">
+<link rel="stylesheet" href="/static/debug.css">
+<title>Chitragupt — Debug</title>
+</head>
+<body>
+<header>
+  <h1>✦ Chitragupt <span class="debug-flag">DEBUG</span></h1>
+  <span class="badge" id="status-text">Connecting…</span>
+  <a class="normal-ui-link" href="/">← normal UI</a>
+  <button class="dbg-toolbar-btn" onclick="exportConversation()" title="Save raw transcript">💾</button>
+  <button class="dbg-toolbar-btn" onclick="resetConversation()" title="Reset conversation">↻</button>
+</header>
+<div class="mode-switcher">
+  <button class="mode-btn active" id="mode-chat-btn" onclick="switchMode('chat')">💬 Chat &amp; Image</button>
+  <button class="mode-btn" id="mode-live-btn" onclick="switchMode('live')">📹 Live Watch</button>
+</div>
+<div class="dbg-settings-bar">
+  <label>interval <span id="interval-value">4</span>s
+    <input type="range" id="interval-slider" min="2" max="15" step="1" value="4">
+  </label>
+  <label>sensitivity <span id="threshold-value">medium</span>
+    <input type="range" id="threshold-slider" min="1" max="3" step="1" value="2">
+  </label>
+  <span id="activity-status">Idle</span>
+  <span id="live-stats">not watching</span>
+</div>
+<div class="main-container">
+  <div class="chat-area">
+    <div class="messages" id="messages">
+      <div class="message assistant">
+        Debug UI. Every prompt actually sent to the model and every raw reply comes back is dumped inline below each turn — nothing hidden in a sidebar. Use Chat &amp; Image or Live Watch same as the normal app.
+      </div>
+    </div>
+    <canvas id="capture-canvas" style="display:none;"></canvas>
+    <canvas id="diff-canvas" width="32" height="32" style="display:none;"></canvas>
+    <div class="live-preview" id="live-preview" style="display:none;">
+      <video id="camera-video" autoplay playsinline muted></video>
+      <button class="live-preview-close" onclick="switchMode('chat')" title="Stop live camera">✕</button>
+    </div>
+    <div class="input-area">
+      <div class="input-row">
+        <button class="upload-btn" id="upload-img-btn" onclick="document.getElementById('file-input').click()" title="Upload image">📷</button>
+        <input type="file" id="file-input" accept="image/*" onchange="handleFileSelect(event)">
+        <button class="camera-toggle-btn" id="camera-toggle-btn" onclick="toggleCameraStream()" title="Enable camera for on-demand questions">🎥</button>
+        <textarea id="prompt-input" rows="1" placeholder="Ask me anything..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage();}"></textarea>
+        <button class="mic-btn" id="mic-btn" onclick="toggleVoiceInput()" title="Speak instead of typing" style="display:none;">🎤</button>
+        <button id="send-btn" onclick="sendMessage()">Send →</button>
+      </div>
+      <div class="image-preview" id="image-preview" style="display:none;">
+        <img id="preview-img" src="" alt="Preview">
+        <button class="remove-img" onclick="clearImage()">✕</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="/static/debug.js"></script>
+</body>
+</html>

@@ -105,6 +105,40 @@ class ChitraguptAgent:
         async with self._lock:
             return await self._process_locked(image_base64, prompt, is_live_frame, is_camera_followup)
 
+    def _record_debug_step(
+        self,
+        steps: list[dict],
+        label: str,
+        prompt: str,
+        has_image: bool,
+        think: bool,
+        tools: Optional[list[dict]],
+        response: VisionResponse,
+    ) -> None:
+        """Append exactly what this backend.chat() call sent and got back —
+        the actual text the model saw (reason_prompt already has the system
+        framing folded into it, since this app never uses a separate system
+        role) and its raw reply, unfiltered by any of the
+        silence/tool-stripping logic downstream. Conversation history isn't
+        captured here even though it's sent alongside `prompt` on most
+        calls — it's just the last N turns already visible as prior messages
+        in the chat itself, so repeating it verbatim on every single step
+        would be pure noise rather than new information.
+        """
+        steps.append({
+            "label": label,
+            "prompt_sent": prompt,
+            "has_image": bool(has_image),
+            "think": bool(think),
+            "tools_offered": [t["function"]["name"] for t in tools] if tools else [],
+            "response_text": response.text,
+            "response_reasoning": response.reasoning,
+            "truncated": response.truncated,
+            "tool_calls_raw": response.tool_calls,
+            "model": response.model,
+            "provider": response.provider,
+        })
+
     async def _process_locked(
         self,
         image_base64: Optional[str],
@@ -127,6 +161,13 @@ class ChitraguptAgent:
         if not is_live_frame and not is_camera_followup:
             self.memory.add("user", prompt)
 
+        # Every real backend.chat()/chat_stream() call this turn makes gets
+        # recorded here — retries, tool-followup calls, all of it — so the
+        # /debug UI can show exactly what the model was sent and what it
+        # sent back, in order, without guessing which call produced which
+        # visible effect.
+        debug_steps: list[dict] = []
+
         split_stages = image_base64 and self.backend.SPLIT_VISION_REASONING
 
         # ── Stage 1: Vision (Colab only) ────────────────────────────────
@@ -135,14 +176,16 @@ class ChitraguptAgent:
         # kept here for when Colab is used again. API-mode backends pass the
         # image straight into the single reasoning call below instead.
         scene_description = None
+        vision_prompt = None
         if split_stages:
+            vision_prompt = (
+                "Describe everything visible in this image in detail. "
+                "Include: objects, people, actions, text, colours, spatial layout, "
+                "and anything that might matter for helping someone understand this scene."
+            )
             scene_description = await self.backend.vision(
                 image_base64=image_base64,
-                prompt=(
-                    "Describe everything visible in this image in detail. "
-                    "Include: objects, people, actions, text, colours, spatial layout, "
-                    "and anything that might matter for helping someone understand this scene."
-                ),
+                prompt=vision_prompt,
             )
 
             # Check if scene has meaningfully changed
@@ -155,6 +198,7 @@ class ChitraguptAgent:
                     "tool_calls": [],
                     "scene_unchanged": True,
                     "scene_description": scene_description,
+                    "vision_prompt": vision_prompt,
                 }
 
             self.frame_buffer.add(scene_description)
@@ -210,6 +254,7 @@ class ChitraguptAgent:
                 think=think,
                 tools=native_tools,
             )
+            self._record_debug_step(debug_steps, "reason", reason_prompt, has_image, think, native_tools, response)
         except Exception as e:
             status = getattr(e, "status_code", None)
             # 413 ("this one request is too big") and 429 ("you've already
@@ -239,6 +284,7 @@ class ChitraguptAgent:
                     think=think,
                     tools=native_tools,
                 )
+                self._record_debug_step(debug_steps, "reason (413 retry, stripped)", reason_prompt, has_image, think, native_tools, response)
             elif status == 429:
                 retry_after = self._parse_retry_after(e)
                 if is_live_frame:
@@ -257,6 +303,7 @@ class ChitraguptAgent:
                         "scene_description": None,
                         "rate_limited": True,
                         "retry_after": retry_after,
+                        "debug": {"steps": debug_steps, "note": f"429 rate limited, skipped: {e}"},
                     }
                 # A direct question deserves an actual answer — wait out the
                 # provider's suggested delay once (capped, in case the
@@ -272,6 +319,7 @@ class ChitraguptAgent:
                     think=think,
                     tools=native_tools,
                 )
+                self._record_debug_step(debug_steps, "reason (429 retry)", reason_prompt, has_image, think, native_tools, response)
             else:
                 raise
 
@@ -300,6 +348,7 @@ class ChitraguptAgent:
                 response = await self.backend.chat(
                     image_base64=None, prompt=conclude_prompt, think=False, tools=native_tools,
                 )
+                self._record_debug_step(debug_steps, "conclude-from-reasoning (truncation recovery)", conclude_prompt, False, False, native_tools, response)
             else:
                 # Reasoning itself got cut off or never separated cleanly —
                 # nothing usable to hand back, so start over with a lower
@@ -320,6 +369,7 @@ class ChitraguptAgent:
                     think=think,
                     tools=native_tools,
                 )
+                self._record_debug_step(debug_steps, "reason (truncation retry, fresh)", reason_prompt, has_image, think, native_tools, response)
 
         full_text = response.text
 
@@ -381,7 +431,9 @@ class ChitraguptAgent:
                 "tool_calls": tool_results,
                 "think_blocks": think_blocks,
                 "scene_description": scene_description,
+                "vision_prompt": vision_prompt,
                 "needs_camera": True,
+                "debug": {"steps": debug_steps},
             }
 
         # request_live_search: same reasoning as request_camera (the browser
@@ -404,8 +456,10 @@ class ChitraguptAgent:
                 "tool_calls": tool_results,
                 "think_blocks": think_blocks,
                 "scene_description": scene_description,
+                "vision_prompt": vision_prompt,
                 "needs_live_search": True,
                 "search_target": target,
+                "debug": {"steps": debug_steps},
             }
 
         if tool_results and any(self.tools.get(r["tool"]).needs_followup for r in tool_results):
@@ -423,6 +477,7 @@ class ChitraguptAgent:
                 image_base64=None,
                 prompt=final_prompt,
             )
+            self._record_debug_step(debug_steps, "tool-result follow-up", final_prompt, False, True, None, final_response)
             final_text = final_response.text
         elif tool_results:
             # Every tool called was a pure side effect (e.g. start_timer,
@@ -473,6 +528,8 @@ class ChitraguptAgent:
             "tool_calls": tool_results or [],
             "think_blocks": think_blocks,
             "scene_description": scene_description,
+            "vision_prompt": vision_prompt,
+            "debug": {"steps": debug_steps, "timer_completions": timer_update["completed"]},
         }
 
     async def process_stream(
@@ -550,12 +607,15 @@ class ChitraguptAgent:
             else None
         )
 
+        debug_steps: list[dict] = []
+
         response: Optional[VisionResponse] = None
         async for event in self._stream_backend_call(image_base64, reason_prompt, think, native_tools):
             if event["type"] == "done":
                 response = event["response"]
             else:
                 yield event
+        self._record_debug_step(debug_steps, "reason (stream)", reason_prompt, has_image, think, native_tools, response)
 
         if response.truncated:
             # Same two-case recovery as _process_locked's non-streaming path
@@ -579,6 +639,7 @@ class ChitraguptAgent:
                 response = await self.backend.chat(
                     image_base64=None, prompt=conclude_prompt, think=False, tools=native_tools,
                 )
+                self._record_debug_step(debug_steps, "conclude-from-reasoning (truncation recovery, stream)", conclude_prompt, False, False, native_tools, response)
             else:
                 logger.warning(
                     "Truncated with no usable separated reasoning — "
@@ -593,6 +654,7 @@ class ChitraguptAgent:
                     conversation_history=self.memory.get_history()[-10:],
                     think=think, tools=native_tools,
                 )
+                self._record_debug_step(debug_steps, "reason (truncation retry, fresh, stream)", reason_prompt, has_image, think, native_tools, response)
             if response.text:
                 yield {"type": "content_delta", "text": response.text}
 
@@ -633,6 +695,7 @@ class ChitraguptAgent:
                     "think_blocks": think_blocks,
                     "scene_description": None,
                     "needs_camera": True,
+                    "debug": {"steps": debug_steps},
                 },
             }
             return
@@ -653,6 +716,7 @@ class ChitraguptAgent:
                     "scene_description": None,
                     "needs_live_search": True,
                     "search_target": target,
+                    "debug": {"steps": debug_steps},
                 },
             }
             return
@@ -669,6 +733,7 @@ class ChitraguptAgent:
                 f"Please provide a final answer incorporating these results."
             )
             final_response = await self.backend.chat(image_base64=None, prompt=final_prompt)
+            self._record_debug_step(debug_steps, "tool-result follow-up (stream)", final_prompt, False, True, None, final_response)
             final_text = final_response.text
             if final_text:
                 yield {"type": "content_delta", "text": final_text}
@@ -697,6 +762,7 @@ class ChitraguptAgent:
                 "tool_calls": tool_results or [],
                 "think_blocks": think_blocks,
                 "scene_description": None,
+                "debug": {"steps": debug_steps, "timer_completions": timer_update["completed"]},
             },
         }
 
@@ -1013,10 +1079,12 @@ class ChitraguptAgent:
                 if settings.TOOLS_ENABLED and self.backend.SUPPORTS_NATIVE_TOOLS
                 else None
             )
+            timer_debug_steps: list[dict] = []
             try:
                 response = await self.backend.chat(
                     image_base64=None, prompt=reason_prompt, think=False, tools=native_tools,
                 )
+                self._record_debug_step(timer_debug_steps, "timer completion", reason_prompt, False, False, native_tools, response)
                 clean_text = self._remove_think_blocks(response.text).strip()
 
                 tool_results = []
@@ -1036,14 +1104,16 @@ class ChitraguptAgent:
                     tool_context = "\n\n".join(
                         f"Tool '{r['tool']}' returned:\n{r['result']}" for r in tool_results
                     )
+                    followup_prompt = (
+                        f"I called tools while handling this timer completion. Results:\n\n"
+                        f"{tool_context}\n\n{timer_prompt}\n"
+                        "Please give the final brief update for the user."
+                    )
                     final_response = await self.backend.chat(
                         image_base64=None,
-                        prompt=(
-                            f"I called tools while handling this timer completion. Results:\n\n"
-                            f"{tool_context}\n\n{timer_prompt}\n"
-                            "Please give the final brief update for the user."
-                        ),
+                        prompt=followup_prompt,
                     )
+                    self._record_debug_step(timer_debug_steps, "timer completion follow-up", followup_prompt, False, True, None, final_response)
                     message = final_response.text.strip()
                 elif tool_results:
                     message = self._strip_tool_blocks(clean_text) or "\n".join(
@@ -1052,7 +1122,7 @@ class ChitraguptAgent:
                 else:
                     message = clean_text
 
-                timers.mark_fired(t["id"], message)
+                timers.mark_fired(t["id"], message, debug={"steps": timer_debug_steps, "tool_calls": tool_results})
             except Exception as e:
                 # Leave it unfired — it'll be retried on the next poll instead
                 # of blocking other timers' progress from being returned this tick.

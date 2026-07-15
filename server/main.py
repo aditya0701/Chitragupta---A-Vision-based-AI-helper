@@ -84,6 +84,8 @@ class ChatResponse(BaseModel):
     search_target: Optional[str] = None
     rate_limited: bool = False
     retry_after: Optional[float] = None
+    vision_prompt: Optional[str] = None
+    debug: Optional[dict] = None
 
 
 # ─── Routes ───────────────────────────────────────────────────────────────────
@@ -203,3 +205,11 @@ async def service_worker():
 @app.get("/")
 async def web_ui():
     return FileResponse(STATIC_DIR / "index.html")
+
+
+@app.get("/debug")
+async def debug_ui():
+    """No-sidebar UI that dumps every prompt sent to the model and every raw
+    response received, inline in the message stream — for inspecting the
+    pipeline itself, not for demoing the product."""
+    return FileResponse(STATIC_DIR / "debug.html")

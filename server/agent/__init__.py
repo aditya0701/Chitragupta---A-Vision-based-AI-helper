@@ -303,14 +303,14 @@ def build_default_tools() -> ToolRegistry:
     registry.register(Tool(
         name="request_camera",
         description=(
-            "Ask for a single fresh camera frame when answering requires "
-            "seeing the current scene RIGHT NOW and no image is attached to "
-            "this message (e.g. 'is Y done yet', 'what's on the counter'). "
-            "One frame, one look — use request_live_search instead if the "
-            "user needs you to keep watching to find something. Only usable "
-            "when no image was already provided this turn. Do not guess an "
-            "answer that depends on the current scene without calling this "
-            "first."
+            "Ask for a single fresh camera frame when answering the current "
+            "message genuinely requires seeing the scene right now and no "
+            "image is attached to this message. One frame, one look — use "
+            "request_live_search instead if a single frame won't be enough. "
+            "Only usable when no image was already provided this turn. Do "
+            "not guess an answer that depends on the current scene without "
+            "calling this first. This is one of several tools available to "
+            "you, not a headline feature — don't volunteer it unprompted."
         ),
         fn=tool_request_camera,
         parameters={},
@@ -319,22 +319,22 @@ def build_default_tools() -> ToolRegistry:
     registry.register(Tool(
         name="request_live_search",
         description=(
-            "Start continuously watching the camera to help find a specific "
-            "physical object the user is looking for (e.g. 'help me find "
-            "the ice cream', 'where did I put my keys'). Use this instead "
-            "of request_camera when a single frame won't be enough — the "
-            "user needs to move the camera around while you keep checking. "
-            "This ONLY watches for the named target; do not use it for "
-            "general cooking guidance, task tracking, or any other kind of "
-            "ongoing help — that's not enabled yet. Once started, stay "
-            "silent on frames that don't show the target (the live-frame "
-            "protocol handles this automatically) and speak up only when "
-            "you actually see it, or if the user seems to be searching the "
-            "wrong place."
+            "Start continuously watching the camera when the user needs "
+            "help locating a specific physical object and a single frame "
+            "won't be enough — they'll need to move the camera around "
+            "while you keep checking. This ONLY watches for the named "
+            "target; do not use it for general cooking guidance, task "
+            "tracking, or any other kind of ongoing help — that's not "
+            "enabled through this tool. Once started, stay silent on "
+            "frames that don't show the target (the live-frame protocol "
+            "handles this automatically) and speak up only when you "
+            "actually see it, or if the user seems to be searching the "
+            "wrong place. This is one of several tools available to you, "
+            "not a headline feature — don't volunteer it unprompted."
         ),
         fn=tool_request_live_search,
         parameters={
-            "target": {"type": "string", "description": "The specific thing to look for, e.g. 'ice cream' or 'my keys'", "required": True},
+            "target": {"type": "string", "description": "The specific thing to look for, in the user's own words", "required": True},
         },
         needs_followup=False,
     ))

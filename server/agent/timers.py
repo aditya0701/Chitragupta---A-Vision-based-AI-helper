@@ -70,12 +70,13 @@ def mark_firing(timer_id: str):
         _save(data)
 
 
-def mark_fired(timer_id: str, message: str):
+def mark_fired(timer_id: str, message: str, debug: dict | None = None):
     data = _load()
     if timer_id in data:
         data[timer_id]["fired"] = True
         data[timer_id]["firing"] = False
         data[timer_id]["message"] = message
+        data[timer_id]["debug"] = debug
         _save(data)
 
 
