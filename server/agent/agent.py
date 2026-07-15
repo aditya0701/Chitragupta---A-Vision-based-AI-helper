@@ -170,35 +170,96 @@ class ChitraguptAgent:
 
         split_stages = image_base64 and self.backend.SPLIT_VISION_REASONING
 
-        # ── Stage 1: Vision (Colab only) ────────────────────────────────
-        # Only Colab's split qwen3-vl + qwen3 setup sets SPLIT_VISION_REASONING,
-        # so this whole block is skipped under the current Groq/API setup —
-        # kept here for when Colab is used again. API-mode backends pass the
-        # image straight into the single reasoning call below instead.
+        # ── Stage 1: Vision (split backends only) ───────────────────────
+        # Colab's split qwen3-vl + qwen3 setup and DeepSeekBackend's
+        # Groq-vision + DeepSeek-reasoning hybrid both set
+        # SPLIT_VISION_REASONING, so this block runs for either — it's
+        # skipped only for single-call multimodal backends (Groq API,
+        # Gemini, OpenAI, Anthropic), which pass the image straight into
+        # the single reasoning call below instead.
         scene_description = None
         vision_prompt = None
         if split_stages:
-            vision_prompt = (
-                "Describe everything visible in this image in detail. "
-                "Include: objects, people, actions, text, colours, spatial layout, "
-                "and anything that might matter for helping someone understand this scene."
-            )
+            # Hand off the active goal to the vision stage instead of always
+            # asking for a generic full-scene description. Qwen can't see
+            # the task list — without this it wrote one paragraph of
+            # everything, every tick, and DeepSeek (which never sees the
+            # image at all — see the "image_base64=None" call below) had to
+            # comb through that prose afterward to spot relevance itself.
+            # DeepSeek already decided what to watch for when it called
+            # request_live_search/update_task_list; this reads that
+            # decision back out of the task-list state — rather than
+            # spending a live per-frame reasoning call just to ask DeepSeek
+            # what to look for, which would double the calls on every tick
+            # for something it already told us via the task list.
+            active_goals = [
+                i["content"] for i in (tasklist.get_document() or {}).get("items", [])
+                if i["status"] == "in_progress"
+            ]
+            goal_aware = bool(active_goals)
+            if goal_aware:
+                goals_text = "; ".join(active_goals)
+                vision_prompt = (
+                    f"Check this image against this specific goal: {goals_text}. "
+                    "Start your answer with YES or NO — is the target/goal clearly "
+                    "visible in this frame? Then, in one or two more sentences, say "
+                    "where it is if yes, or briefly describe what's in the frame "
+                    "instead if no. Be factual and concise — this is being checked "
+                    "automatically, not read by a person."
+                )
+            else:
+                vision_prompt = (
+                    "Describe everything visible in this image in detail. "
+                    "Include: objects, people, actions, text, colours, spatial layout, "
+                    "and anything that might matter for helping someone understand this scene."
+                )
             scene_description = await self.backend.vision(
                 image_base64=image_base64,
                 prompt=vision_prompt,
             )
+            # Recorded separately from _record_debug_step (whose shape
+            # assumes a VisionResponse) since this stage only returns a
+            # plain string — without this, the debug UI showed nothing
+            # between "frame received" and the reasoning call, making it
+            # look like the reasoning backend (e.g. DeepSeek) had seen the
+            # image itself rather than a separate vision model (Groq/qwen)
+            # having described it first.
+            debug_steps.append({
+                "label": "vision" + (" (goal-aware)" if goal_aware else ""),
+                "prompt_sent": vision_prompt,
+                "has_image": True,
+                "think": False,
+                "tools_offered": [],
+                "response_text": scene_description,
+                "response_reasoning": "",
+                "truncated": False,
+                "tool_calls_raw": [],
+                "model": getattr(self.backend, "vision_model", "unknown"),
+                "provider": "groq",
+            })
 
-            # Check if scene has meaningfully changed
-            if not self.frame_buffer.has_changed(scene_description):
+            # The word-overlap "has this changed" heuristic below is a poor
+            # fit once the vision answer is a short goal-aware yes/no
+            # rather than a full paragraph — two consecutive short answers
+            # ("No, still just a counter" / "No, empty shelf") share most
+            # of their words by construction, so it would short-circuit
+            # almost every goal-aware tick no matter what's actually in
+            # frame, including the one that finally says YES. Skip it when
+            # goal-aware and let the existing client-side pixel-diff gate
+            # plus the model's own [SILENT] protocol do the throttling
+            # instead — same reasoning CLAUDE.md documents for why the old
+            # _is_relevant_tick() pre-filter was removed entirely.
+            if not goal_aware and not self.frame_buffer.has_changed(scene_description):
                 self.frame_buffer.add(scene_description)
                 return {
                     "text": "👁️ Scene unchanged — still monitoring.",
-                    "model": "qwen3-vl:8b",
-                    "provider": "colab",
+                    "model": getattr(self.backend, "vision_model", "unknown"),
+                    "provider": "groq",
                     "tool_calls": [],
                     "scene_unchanged": True,
                     "scene_description": scene_description,
                     "vision_prompt": vision_prompt,
+                    "debug": {"steps": debug_steps},
                 }
 
             self.frame_buffer.add(scene_description)
@@ -462,7 +523,20 @@ class ChitraguptAgent:
                 "debug": {"steps": debug_steps},
             }
 
-        if tool_results and any(self.tools.get(r["tool"]).needs_followup for r in tool_results):
+        # log_observation defaults to needs_followup=False (it's a silent
+        # side effect on most ticks), but a call with found=True means this
+        # note is the thing the user is waiting to hear about — force the
+        # same follow-up call the needs_followup tools get rather than
+        # trusting the model to also have written visible text in the same
+        # completion. That trust was the actual bug: tool-calling models
+        # routinely return an empty content field alongside a tool call, so
+        # a found-it tick that only called log_observation went completely
+        # silent even though the note itself said the target was found.
+        found_alert = any(
+            r["tool"] == "log_observation" and r["arguments"].get("found")
+            for r in tool_results
+        )
+        if tool_results and (found_alert or any(self.tools.get(r["tool"]).needs_followup for r in tool_results)):
             tool_context = "\n\n".join(
                 f"Tool '{r['tool']}' returned:\n{r['result']}" for r in tool_results
             )
@@ -859,6 +933,16 @@ class ChitraguptAgent:
             tool_instruction = (
                 format_instruction
                 + f"Available tools:\n{tool_list}\n\n"
+                "Tool calls execute instantly — you don't wait for a result or get "
+                "a second turn to add more before the user sees your reply. Write "
+                "your complete response — the actual answer, plan, or next step — "
+                "in this SAME message as any tool call. Never stop after only "
+                "announcing what you're about to do (e.g. 'Let me update the task "
+                "list' or 'Sure, updating that now' with nothing else) — that reads "
+                "as a dead end to the user, who then has to prompt you again just "
+                "to get the guidance you already had. Say the placeholder and the "
+                "substance together, or skip the placeholder and just say the "
+                "substance.\n\n"
                 "Tool-specific guidance:\n"
                 "- start_timer: use for any step that needs waiting (boiling, baking, "
                 "marinating, steeping). It runs in the background for free — don't wait "
@@ -915,11 +999,14 @@ class ChitraguptAgent:
                 f"\nThis is an automated watch tick, not a direct question. Check the "
                 f"current frame against the [Task list] item(s) above and their logged "
                 f"observations. Always call log_observation with what this frame shows "
-                f"relevant to an in-progress item. Only write a visible reply if this "
-                f"frame changes something worth telling the user about (progress, a "
-                f"problem, the thing they're looking for). If nothing here is new or "
-                f"relevant, your entire visible reply must be exactly {SILENT_MARKER} "
-                "and nothing else — do not describe the scene."
+                f"relevant to an in-progress item — if this frame shows the thing the "
+                f"user is looking for, or another change important enough to tell them "
+                f"about right now, pass found=true on that call (this guarantees they're "
+                f"told even if you don't write anything else this turn). Only write a "
+                f"visible reply yourself if this frame changes something worth telling "
+                f"the user about (progress, a problem, the thing they're looking for). "
+                f"If nothing here is new or relevant, your entire visible reply must be "
+                f"exactly {SILENT_MARKER} and nothing else — do not describe the scene."
             )
         thinking_instruction = (
             "\n\nThink step by step before responding."

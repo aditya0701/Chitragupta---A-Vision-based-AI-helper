@@ -180,10 +180,21 @@ def tool_update_task_list(title: str, items: list) -> str:
     return f"Task list '{title}' updated ({summary})."
 
 
-def tool_log_observation(item: str, note: str) -> str:
+def tool_log_observation(item: str, note: str, found: bool = False) -> str:
     """Silently record a short fact against a task-list item — the substitute
     for re-describing the whole scene every turn: write the fact once, read
-    it back later instead of needing the original image again."""
+    it back later instead of needing the original image again.
+
+    `found` doesn't change what's stored — it's read back by agent.py to
+    decide whether this observation needs a guaranteed spoken alert (see the
+    found_alert check in _process_locked). Tool-calling models frequently
+    return an empty `content` alongside a tool call in the same completion
+    (the API accepts text+tool_calls together, but this model reliably
+    produces neither), so a live tick where the model just called
+    log_observation with nothing else previously went completely silent even
+    when the note said the target was found. `found=True` routes that case
+    through the existing tool-result follow-up call instead of relying on
+    the model to also write visible text in the same turn."""
     from . import tasklist
     return tasklist.add_observation(item, note)
 
@@ -291,12 +302,17 @@ def build_default_tools() -> ToolRegistry:
             "e.g. what you just saw relevant to it. Does not produce a reply "
             "to the user by itself; call this on every frame that's relevant "
             "to an active item, whether or not you also decide to say "
-            "something out loud this turn."
+            "something out loud this turn. Set found=true if this note means "
+            "you found the thing the user is looking for (or another change "
+            "important enough to guarantee they're told) — this triggers a "
+            "spoken alert on its own, so the user is notified even if you "
+            "don't separately write visible text this turn."
         ),
         fn=tool_log_observation,
         parameters={
             "item": {"type": "string", "description": "The exact task-list item content (or its id) this observation is about", "required": True},
             "note": {"type": "string", "description": "Short factual note, e.g. 'freezer drawer open, chicken tenders visible, no ice cream'", "required": True},
+            "found": {"type": "boolean", "description": "True if this note means the target was found or something important changed — guarantees a spoken alert", "required": False},
         },
         needs_followup=False,
     ))
