@@ -203,6 +203,21 @@ function flashCameraFrame() {
   setTimeout(() => preview.classList.remove('frame-flash'), 200);
 }
 
+// Inline, in-conversation visibility into what's actually happening on the
+// wire — every request sent and every outcome, right in the chat you're
+// already watching, instead of a separate sidebar panel you have to look
+// away to check. Deliberately terse/monospace so it reads as a log line,
+// not a real message. `kind` picks a color: send | recv | silent | error | rate.
+function addDebugMessage(text, kind) {
+  const container = document.getElementById('messages');
+  const div = document.createElement('div');
+  div.className = 'message debug' + (kind ? ' debug-' + kind : '');
+  const time = new Date().toLocaleTimeString([], { hour12: false });
+  div.textContent = '[' + time + '] ' + text;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
 function addMessage(role, content, extras) {
   const container = document.getElementById('messages');
   const div = document.createElement('div');
@@ -352,6 +367,11 @@ function createLiveMessage() {
 // final "done" event's data once the stream ends.
 async function runStreamedTurn(prompt, imageBase64, isCameraFollowup) {
   const live = createLiveMessage();
+  addDebugMessage(
+    'POST /v1/chat/stream  is_camera_followup=' + !!isCameraFollowup +
+    '  has_image=' + !!imageBase64 + '  prompt="' + prompt.slice(0, 60) + (prompt.length > 60 ? '…' : '') + '"',
+    'send',
+  );
   const resp = await fetch('/v1/chat/stream', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -379,6 +399,11 @@ async function runStreamedTurn(prompt, imageBase64, isCameraFollowup) {
       if (!line) continue;
       const event = JSON.parse(line.slice(6));
       switch (event.type) {
+        case 'tool_call_start': addDebugMessage('⚡ tool_call_start: ' + event.name, 'recv'); break;
+        case 'tool_result': addDebugMessage('⚡ tool_result: ' + event.tool, 'recv'); break;
+        case 'error': addDebugMessage('✖ stream error: ' + event.message, 'error'); break;
+      }
+      switch (event.type) {
         case 'reasoning_delta': live.onReasoning(event.text); break;
         case 'content_delta': live.onContent(event.text); break;
         case 'tool_call_start': live.onToolStart(event.name); break;
@@ -391,8 +416,15 @@ async function runStreamedTurn(prompt, imageBase64, isCameraFollowup) {
 
   if (finalData) {
     live.finalize(finalData);
+    addDebugMessage(
+      '← done  provider=' + finalData.provider + ' model=' + finalData.model +
+      '  tool_calls=[' + (finalData.tool_calls || []).map(t => t.tool).join(',') + ']' +
+      '  needs_camera=' + !!finalData.needs_camera + '  needs_live_search=' + !!finalData.needs_live_search,
+      'recv',
+    );
   } else {
     live.fail('stream ended with no response');
+    addDebugMessage('✖ stream ended with no "done" event', 'error');
   }
   return finalData;
 }
@@ -764,6 +796,11 @@ async function sendLiveFrame(video) {
   flashCameraFrame();
   setActivityStatus('📤 Sent frame #' + framesSent + ' — awaiting response…', true);
   const entry = logActivity(imageBase64, 'Frame #' + framesSent + ' sent to API', 'sending');
+  addDebugMessage(
+    'POST /v1/chat  frame #' + framesSent + '  is_live_frame=' + !typedPrompt +
+    '  prompt="' + prompt.slice(0, 60) + (prompt.length > 60 ? '…' : '') + '"',
+    'send',
+  );
 
   try {
     const resp = await fetch('/v1/chat', {
@@ -783,6 +820,7 @@ async function sendLiveFrame(video) {
       // next tick. Live Watch resumes at its normal interval afterwards.
       const waitS = data.retry_after || 5;
       updateActivityEntry(entry, 'silent', 'Frame #' + framesSent + ' — rate limited, pausing ' + waitS.toFixed(1) + 's');
+      addDebugMessage('← 429 rate_limited  retry_after=' + waitS + 's  pausing live polling', 'rate');
       setActivityStatus('⏳ Rate limited — pausing ' + Math.ceil(waitS) + 's…', false);
       if (liveActive && liveTimer) {
         clearInterval(liveTimer);
@@ -796,11 +834,22 @@ async function sendLiveFrame(video) {
       }
       addMessage('assistant', displayText, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls, think_blocks: data.think_blocks });
       updateActivityEntry(entry, 'replied', 'Frame #' + framesSent + ' — model replied');
+      addDebugMessage(
+        '← 200  provider=' + data.provider + ' model=' + data.model +
+        '  tool_calls=[' + (data.tool_calls || []).map(t => t.tool).join(',') + ']',
+        'recv',
+      );
     } else {
       updateActivityEntry(entry, 'silent', 'Frame #' + framesSent + ' — silent (no relevant change)');
+      addDebugMessage(
+        '← 200  provider=' + (data.provider || 'n/a') + ' model=' + (data.model || 'n/a') +
+        '  scene_unchanged=' + !!data.scene_unchanged + '  silent=' + !data.text,
+        'silent',
+      );
     }
   } catch (err) {
     updateActivityEntry(entry, 'error', 'Frame #' + framesSent + ' — error: ' + err.message);
+    addDebugMessage('✖ request failed: ' + err.message, 'error');
     addMessage('assistant', '⚠️ Live frame error: ' + err.message, {});
   } finally {
     liveSending = false;

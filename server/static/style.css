@@ -137,6 +137,25 @@ header .badge {
 .live-text {
   white-space: pre-wrap;
 }
+.message.debug {
+  align-self: center;
+  max-width: 95%;
+  width: 100%;
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  font-family: 'Consolas', 'Menlo', monospace;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #6a6a88;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.message.debug.debug-send { color: #5a8ac0; }
+.message.debug.debug-recv { color: #7ac07a; }
+.message.debug.debug-silent { color: #55556a; }
+.message.debug.debug-error { color: #d06060; }
+.message.debug.debug-rate { color: #d0a040; }
 .message.streaming .live-text:empty::after {
   content: '...';
   opacity: 0.5;

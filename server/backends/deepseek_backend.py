@@ -19,7 +19,7 @@ Requires:
 
 import json
 import logging
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from groq import AsyncGroq
 from openai import AsyncOpenAI
@@ -122,6 +122,87 @@ class DeepSeekBackend(VisionBackend):
             truncated=choice.finish_reason == "length",
             tool_calls=parsed_tool_calls,
         )
+
+    async def chat_stream(
+        self,
+        image_base64: Optional[str],
+        prompt: str,
+        conversation_history: Optional[list[dict]] = None,
+        think: bool = True,
+        tools: Optional[list[dict]] = None,
+    ) -> AsyncIterator[dict]:
+        """Same call as chat(), but yields events as tokens arrive — confirmed
+        against DeepSeek's docs that their API streams the same OpenAI-shaped
+        way Groq's does (stream=True, chat.completion.chunk deltas, tool
+        calls supported mid-stream). Event shapes match GroqBackend.chat_stream
+        exactly so agent.py's duck-typed dispatch (hasattr(backend,
+        "chat_stream")) picks this up with no caller-side changes. Unlike
+        Groq, DeepSeek doesn't expose a separate reasoning field the way
+        reasoning_format="parsed" does — deepseek-v4-flash's `content` delta
+        carries everything, so no reasoning_delta events are emitted here.
+        """
+        messages = []
+        if conversation_history:
+            for msg in conversation_history:
+                messages.append({"role": msg["role"], "content": msg["content"]})
+        messages.append({"role": "user", "content": prompt})
+
+        create_kwargs = dict(model=self.model, messages=messages, max_tokens=2048, stream=True)
+        if tools:
+            create_kwargs["tools"] = tools
+            create_kwargs["tool_choice"] = "auto"
+
+        stream = await self.client.chat.completions.create(**create_kwargs)
+
+        content_parts: list[str] = []
+        tool_calls_acc: dict[int, dict] = {}
+        finish_reason = None
+
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+            delta = choice.delta
+
+            if delta.content:
+                content_parts.append(delta.content)
+                yield {"type": "content_delta", "text": delta.content}
+
+            for tc in (delta.tool_calls or []):
+                slot = tool_calls_acc.setdefault(tc.index, {"id": None, "name": None, "arguments": ""})
+                if tc.id:
+                    slot["id"] = tc.id
+                if tc.function and tc.function.name:
+                    is_new_name = slot["name"] is None
+                    slot["name"] = tc.function.name
+                    if is_new_name:
+                        yield {"type": "tool_call_start", "name": slot["name"]}
+                if tc.function and tc.function.arguments:
+                    slot["arguments"] += tc.function.arguments
+
+        logger.info(f"DeepSeek stream finished: finish_reason={finish_reason}")
+
+        parsed_tool_calls = []
+        for slot in tool_calls_acc.values():
+            try:
+                arguments = json.loads(slot["arguments"]) if slot["arguments"] else {}
+            except json.JSONDecodeError as e:
+                logger.warning(f"DeepSeek tool call '{slot['name']}' had unparseable arguments: {e}")
+                continue
+            parsed_tool_calls.append({"id": slot["id"], "name": slot["name"], "arguments": arguments})
+
+        yield {
+            "type": "done",
+            "response": VisionResponse(
+                text="".join(content_parts),
+                model=self.model,
+                provider="deepseek",
+                truncated=finish_reason == "length",
+                tool_calls=parsed_tool_calls,
+            ),
+        }
 
     async def health_check(self) -> bool:
         try:
