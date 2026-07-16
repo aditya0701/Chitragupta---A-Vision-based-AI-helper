@@ -112,11 +112,17 @@ def start_find_task(target: str) -> dict:
 MAX_OBSERVATIONS_PER_ITEM = 5
 
 
-def add_observation(item_ref: str, note: str) -> str:
+def add_observation(item_ref: str, note: str, found: bool = False) -> str:
     """Append a short note to whichever task-list item `item_ref` matches
     (by id or, case-insensitively, by content). Capped per item so the
     prompt injection in render_summary stays small regardless of session
     length — older notes are dropped, not the whole log.
+
+    `found=True` also marks the matched item "completed" — a find-task
+    (registered by request_live_search/start_find_task as "in_progress") is
+    by definition done once the target's been spotted, so this is what lets
+    agent.py detect "the active goal just finished" from task-list state
+    alone, without a separate signal threaded through just for this.
     """
     document = get_document()
     if not document or not document.get("items"):
@@ -134,6 +140,9 @@ def add_observation(item_ref: str, note: str) -> str:
     obs.append(note.strip())
     if len(obs) > MAX_OBSERVATIONS_PER_ITEM:
         del obs[: len(obs) - MAX_OBSERVATIONS_PER_ITEM]
+
+    if found:
+        match["status"] = "completed"
 
     DOCUMENT_FILE.write_text(json.dumps(document, indent=2))
     return f"Logged observation for '{match['content']}'."

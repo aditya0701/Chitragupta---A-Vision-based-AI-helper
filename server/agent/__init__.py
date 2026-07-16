@@ -196,7 +196,7 @@ def tool_log_observation(item: str, note: str, found: bool = False) -> str:
     through the existing tool-result follow-up call instead of relying on
     the model to also write visible text in the same turn."""
     from . import tasklist
-    return tasklist.add_observation(item, note)
+    return tasklist.add_observation(item, note, found=found)
 
 
 def tool_request_camera() -> str:

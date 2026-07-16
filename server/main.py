@@ -82,6 +82,7 @@ class ChatResponse(BaseModel):
     needs_camera: bool = False
     needs_live_search: bool = False
     search_target: Optional[str] = None
+    goal_complete: bool = False
     rate_limited: bool = False
     retry_after: Optional[float] = None
     vision_prompt: Optional[str] = None

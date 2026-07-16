@@ -852,6 +852,15 @@ async function sendLiveFrame(video) {
         '  tool_calls=[' + (data.tool_calls || []).map(t => t.tool).join(',') + ']',
         'recv',
       );
+      if (data.goal_complete) {
+        // The find-goal that started this Live Watch session just got
+        // marked complete server-side (log_observation found=true) — no
+        // reason to keep polling and burning API calls once the thing was
+        // already found, so close the camera automatically instead of
+        // leaving that to a manual tab switch.
+        addDebugMessage('🎯 goal_complete — auto-stopping Live Watch and closing camera', 'recv');
+        stopLive();
+      }
     } else {
       updateActivityEntry(entry, 'silent', 'Frame #' + framesSent + ' — silent (no relevant change)');
       addDebugMessage(

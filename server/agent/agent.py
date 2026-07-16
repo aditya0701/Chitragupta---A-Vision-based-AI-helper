@@ -540,13 +540,29 @@ class ChitraguptAgent:
             tool_context = "\n\n".join(
                 f"Tool '{r['tool']}' returned:\n{r['result']}" for r in tool_results
             )
-            final_prompt = (
-                f"I called tools to answer the user. Here are the results:\n\n"
-                f"{tool_context}\n\n"
-                f"Original question: {prompt}\n"
-                f"Scene context: {scene_description or 'N/A'}\n"
-                f"Please provide a final answer incorporating these results."
-            )
+            if found_alert:
+                # This is the moment the user's been waiting for — a plain
+                # "target located" report reads as flat/robotic here in a way
+                # it wouldn't on a routine tool result. Ask explicitly for a
+                # warm, helper-style delivery instead of the default
+                # factual/concise tone.
+                final_prompt = (
+                    f"You just found what the user was looking for. Here's what you saw:\n\n"
+                    f"{tool_context}\n\n"
+                    f"Original request: {prompt}\n"
+                    f"Scene context: {scene_description or 'N/A'}\n"
+                    "Tell them now, like a helpful friend who just spotted it for them — "
+                    "warm and a little pleased, not a flat status report. Say what it is "
+                    "and where it is, in one or two short spoken sentences."
+                )
+            else:
+                final_prompt = (
+                    f"I called tools to answer the user. Here are the results:\n\n"
+                    f"{tool_context}\n\n"
+                    f"Original question: {prompt}\n"
+                    f"Scene context: {scene_description or 'N/A'}\n"
+                    f"Please provide a final answer incorporating these results."
+                )
             final_response = await self.backend.chat(
                 image_base64=None,
                 prompt=final_prompt,
@@ -603,6 +619,11 @@ class ChitraguptAgent:
             "think_blocks": think_blocks,
             "scene_description": scene_description,
             "vision_prompt": vision_prompt,
+            # Tells the client it's safe (encouraged, even) to auto-stop Live
+            # Watch and close the camera — the find-goal that started this
+            # session of continuous polling just got marked "completed" in
+            # the task list (see tasklist.add_observation's found= handling).
+            "goal_complete": found_alert,
             "debug": {"steps": debug_steps, "timer_completions": timer_update["completed"]},
         }
 
@@ -994,20 +1015,33 @@ class ChitraguptAgent:
                     if offer_camera else ""
                 )
             )
-        if is_live_frame and doc_summary:
+        # Broadened from is_live_frame-only: any turn that has an image AND an
+        # active task list should log_observation, not just automated watch
+        # ticks — a direct image upload or a request_camera follow-up is just
+        # as much "camera + task info received" as a live tick is, and was
+        # previously only covered by the much weaker generic tool-description
+        # line above, not this forceful "always call" instruction.
+        if has_image and doc_summary:
             parts.append(
-                f"\nThis is an automated watch tick, not a direct question. Check the "
-                f"current frame against the [Task list] item(s) above and their logged "
-                f"observations. Always call log_observation with what this frame shows "
-                f"relevant to an in-progress item — if this frame shows the thing the "
-                f"user is looking for, or another change important enough to tell them "
-                f"about right now, pass found=true on that call (this guarantees they're "
-                f"told even if you don't write anything else this turn). Only write a "
-                f"visible reply yourself if this frame changes something worth telling "
-                f"the user about (progress, a problem, the thing they're looking for). "
-                f"If nothing here is new or relevant, your entire visible reply must be "
-                f"exactly {SILENT_MARKER} and nothing else — do not describe the scene."
+                f"\nCheck the current frame against the [Task list] item(s) above and "
+                f"their logged observations. Always call log_observation with what this "
+                f"frame shows relevant to an in-progress item — if this frame shows the "
+                f"thing the user is looking for, or another change important enough to "
+                f"tell them about right now, pass found=true on that call (this "
+                f"guarantees they're told even if you don't write anything else this turn)."
             )
+            if is_live_frame:
+                # The silence protocol stays scoped to live ticks specifically —
+                # a direct user turn (image upload, request_camera follow-up)
+                # always got a real question and must always get a real answer.
+                parts.append(
+                    f"This is an automated watch tick, not a direct question. Only write "
+                    f"a visible reply yourself if this frame changes something worth "
+                    f"telling the user about (progress, a problem, the thing they're "
+                    f"looking for). If nothing here is new or relevant, your entire "
+                    f"visible reply must be exactly {SILENT_MARKER} and nothing else — "
+                    f"do not describe the scene."
+                )
         thinking_instruction = (
             "\n\nThink step by step before responding."
             if think

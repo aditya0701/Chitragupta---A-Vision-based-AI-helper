@@ -107,6 +107,7 @@ function renderDebugDump(container, requestObj, data) {
     needs_camera: !!data.needs_camera,
     needs_live_search: !!data.needs_live_search,
     search_target: data.search_target || null,
+    goal_complete: !!data.goal_complete,
     rate_limited: !!data.rate_limited,
     retry_after: data.retry_after || null,
   }));
@@ -871,6 +872,13 @@ async function sendLiveFrame(video) {
         '  tool_calls=[' + (data.tool_calls || []).map(t => t.tool).join(',') + ']',
         'recv',
       );
+      if (data.goal_complete) {
+        // Same auto-stop as the main app — the find-goal driving this Live
+        // Watch session was just marked complete (log_observation
+        // found=true), so there's nothing left to watch for.
+        addDebugMessage('🎯 goal_complete — auto-stopping Live Watch and closing camera', 'recv');
+        stopLive();
+      }
     } else {
       updateActivityEntry(entry, 'silent', 'Frame #' + framesSent + ' — silent (no relevant change)');
       // Still dump the raw pipeline data for a silent tick — "silent" is a
