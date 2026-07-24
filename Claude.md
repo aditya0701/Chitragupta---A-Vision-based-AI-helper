@@ -826,8 +826,23 @@ Remaining:
       Same secure-context requirement as the camera (HTTPS or localhost).
       Tap to talk, releases/auto-sends on the browser's own end-of-speech
       detection (`continuous: false`) — no second tap needed to submit.
-- [ ] TTS output (text-only for now, by design — add once the text pipeline is
-      trusted; Web Speech API first, since it's free and needs no server change)
+- [x] TTS output — done 2026-07-24 via browser Web Speech API
+      (`speechSynthesis`/`SpeechSynthesisUtterance`), client-side only, no
+      server change — the read-aloud counterpart to the existing Web Speech
+      voice *input*. Off by default (persisted in `chitragupt-tts-enabled`),
+      toggled by the 🔊 button (`#tts-btn`, `toggleTts()`), hidden entirely
+      where unsupported. `speak(text)` cancels any in-progress utterance first
+      ("latest matters," same as the live-frame buffer) and strips
+      markdown/HTML — think blocks dropped whole — before speaking. Wired into
+      the three real "assistant said something" moments: streamed typed-turn
+      completion (`createLiveMessage().finalize`), live-frame replies
+      (speaks `data.text`, not the think-block HTML), and timer completions
+      (`checkTimers`). Opening the mic calls `synth.cancel()` so the assistant
+      isn't talking over you / bleeding into the recognizer. Same
+      secure-context requirement as camera/mic. Chose Web Speech over
+      Groq/ElevenLabs TTS deliberately: free, on-device, ~zero latency, no
+      server call and no TPM-budget cost — a paid voice can be swapped in later
+      behind the same `speak()` function if nicer voices are wanted.
 - [ ] Adaptive poll backoff (currently a fixed 15s client poll; could back off to
       minutes when no timer is close to firing, bounded below Render's idle
       timeout so it doesn't reintroduce the spin-down problem)

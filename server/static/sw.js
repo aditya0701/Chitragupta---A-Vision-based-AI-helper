@@ -1,4 +1,4 @@
-const CACHE_NAME = 'chitragupt-shell-v13';
+const CACHE_NAME = 'chitragupt-shell-v14';
 const SHELL_URLS = [
   '/',
   '/static/style.css',

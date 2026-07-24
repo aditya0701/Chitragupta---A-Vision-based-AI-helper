@@ -351,6 +351,24 @@ header .badge {
   0%, 100% { box-shadow: 0 0 0 0 rgba(255, 68, 68, 0.5); }
   50% { box-shadow: 0 0 0 8px rgba(255, 68, 68, 0); }
 }
+.tts-btn {
+  background: #1a1a2e;
+  border: 1px solid #2a2a4a;
+  border-radius: 10px;
+  padding: 12px;
+  color: #aaa;
+  cursor: pointer;
+  font-size: 18px;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  min-width: 44px;
+  min-height: 44px;
+}
+.tts-btn:hover { border-color: #3a7bd5; }
+.tts-btn.tts-on {
+  background: #1a2e3a;
+  border-color: #00d2ff;
+  color: #6ed7ff;
+}
 #file-input { display: none; }
 .typing-indicator {
   align-self: flex-start;

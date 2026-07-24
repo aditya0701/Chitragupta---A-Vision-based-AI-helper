@@ -259,6 +259,8 @@ function toggleVoiceInput() {
     recognizer.stop();
     return;
   }
+  // Stop any spoken reply before opening the mic (see app.js).
+  if (synth) synth.cancel();
   document.getElementById('prompt-input').value = '';
   isRecording = true;
   micBtn.classList.add('recording');
@@ -271,6 +273,58 @@ function toggleVoiceInput() {
 }
 
 initVoiceInput();
+
+// ─── Voice output / TTS (Web Speech API — browser-native, free) ─────────────
+// Mirror of app.js's TTS: browser-native speechSynthesis, off by default,
+// toggled by the 🔊 button, hidden where unsupported. See app.js for rationale.
+const TTS_KEY = 'chitragupt-debug-tts-enabled';
+const synth = window.speechSynthesis || null;
+let ttsEnabled = false;
+
+function initTts() {
+  const btn = document.getElementById('tts-btn');
+  if (!synth) { if (btn) btn.style.display = 'none'; return; }
+  ttsEnabled = localStorage.getItem(TTS_KEY) === '1';
+  updateTtsBtn();
+}
+
+function toggleTts() {
+  if (!synth) return;
+  ttsEnabled = !ttsEnabled;
+  try { localStorage.setItem(TTS_KEY, ttsEnabled ? '1' : '0'); } catch { /* ignore */ }
+  updateTtsBtn();
+  if (!ttsEnabled) synth.cancel();
+}
+
+function updateTtsBtn() {
+  const btn = document.getElementById('tts-btn');
+  if (!btn) return;
+  btn.classList.toggle('tts-on', ttsEnabled);
+  btn.textContent = ttsEnabled ? '🔊' : '🔇';
+  btn.title = ttsEnabled ? 'Voice replies on — tap to mute' : 'Voice replies off — tap to hear responses';
+}
+
+function ttsCleanText(text) {
+  return String(text || '')
+    .replace(/<details[\s\S]*?<\/details>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[*_`#>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function speak(text) {
+  if (!ttsEnabled || !synth) return;
+  const clean = ttsCleanText(text);
+  if (!clean) return;
+  synth.cancel();
+  const utterance = new SpeechSynthesisUtterance(clean);
+  utterance.lang = 'en-US';
+  utterance.rate = 1.0;
+  synth.speak(utterance);
+}
+
+initTts();
 
 async function checkHealth() {
   try {
@@ -496,6 +550,7 @@ function createLiveMessage() {
         think_blocks: data.think_blocks || [],
         rawData: data,
       });
+      speak(data.text); // read the finished answer aloud (once, not per delta)
       container.scrollTop = container.scrollHeight;
     },
     fail(message) {
@@ -729,6 +784,7 @@ async function checkTimers() {
     const data = await resp.json();
     (data.completed || []).forEach((t) => {
       addMessage('assistant', `⏰ ${t.label}: ${t.message}`, { rawData: { debug: t.debug, text: t.message, model: t.debug && t.debug.steps && t.debug.steps[0] && t.debug.steps[0].model, provider: t.debug && t.debug.steps && t.debug.steps[0] && t.debug.steps[0].provider, tool_calls: (t.debug && t.debug.tool_calls) || [] }, requestObj: { poll: '/v1/timers/check', timer_id: t.id, label: t.label } });
+      speak(`${t.label}. ${t.message}`); // a fired timer is exactly a hands-free moment
     });
   } catch { /* ignore — next poll will retry */ }
 }
@@ -965,6 +1021,7 @@ async function sendLiveFrame(video) {
       }
     } else if (!data.scene_unchanged && data.text) {
       addMessage('assistant', data.text, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls, think_blocks: data.think_blocks, rawData: data, requestObj });
+      speak(data.text);
       updateActivityEntry(entry, 'replied', 'Frame #' + framesSent + ' — model replied');
       addDebugMessage(
         '← 200  provider=' + data.provider + ' model=' + data.model +

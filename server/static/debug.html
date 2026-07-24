@@ -50,6 +50,7 @@
         <button class="camera-toggle-btn" id="camera-toggle-btn" onclick="toggleCameraStream()" title="Enable camera for on-demand questions">🎥</button>
         <textarea id="prompt-input" rows="1" placeholder="Ask me anything..." onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage();}"></textarea>
         <button class="mic-btn" id="mic-btn" onclick="toggleVoiceInput()" title="Speak instead of typing" style="display:none;">🎤</button>
+        <button class="tts-btn" id="tts-btn" onclick="toggleTts()" title="Voice replies off — tap to hear responses">🔇</button>
         <button id="send-btn" onclick="sendMessage()">Send →</button>
       </div>
       <div class="image-preview" id="image-preview" style="display:none;">

@@ -330,6 +330,18 @@ usability bugs, now fixed:
   `[vision←Qwen]`, tool start/result, done event) is captured and dumped as a
   time-ordered `## Pipeline / wire log` block in the export.
 
+- **Voice output (TTS).** *Issue / motivation:* the whole point is hands-free
+  use, but replies were text-only — you had to look at the screen to know a
+  timer fired or that it spotted something. *Fix:* the assistant can now read
+  its replies aloud via the browser's built-in `speechSynthesis` (the read-aloud
+  counterpart to the existing voice *input*) — **free, on-device, ~zero
+  latency, no server call and no API cost**. Off by default, toggled with the
+  🔊 button; it speaks finished answers, live-frame replies, and timer
+  completions, and stays out of the way of the mic. Chose the browser API over
+  Groq/ElevenLabs TTS deliberately — they're paid and add network latency for
+  something the browser does free and instantly; a paid voice can be dropped in
+  later behind the same `speak()` function if nicer voices are wanted.
+
 - **Earlier the same session:** unified the UI into one screen (removed the
   separate Live Watch mode — the camera is simply on or off, and turning it on
   starts hands-free watching in place), fixed the silence protocol leaking prose
@@ -352,11 +364,6 @@ usability bugs, now fixed:
   question with a photo can be answered without the picture actually reaching the
   model. *Why it matters:* it's a correctness bug that can produce confident
   answers grounded in nothing.
-
-- **TTS (spoken output).** Text-only by design until the text pipeline is fully
-  trusted; planned via the browser's free Web Speech API. Pairs naturally with
-  the speak-after-task fix — once the assistant reliably *says* something, having
-  it read aloud is the hands-free payoff.
 
 - **Faster / cheaper inference.** Investigating paid Qwen hosting and larger
   model versions vs. the current Groq free tier (capped at 8K tokens/minute,

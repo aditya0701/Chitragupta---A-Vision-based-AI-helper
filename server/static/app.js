@@ -143,6 +143,9 @@ function toggleVoiceInput() {
     recognizer.stop();
     return;
   }
+  // Stop any spoken reply before opening the mic, so the assistant isn't
+  // talking over you (and so its own voice can't bleed into the recognizer).
+  if (synth) synth.cancel();
   document.getElementById('prompt-input').value = '';
   isRecording = true;
   micBtn.classList.add('recording');
@@ -155,6 +158,68 @@ function toggleVoiceInput() {
 }
 
 initVoiceInput();
+
+// ─── Voice output / TTS (Web Speech API — browser-native, free, on-device) ──
+// The read-aloud counterpart to voice input: same API family, no server call,
+// no API key, effectively zero latency since synthesis runs locally. This is
+// the hands-free payoff — the assistant can actually tell you a timer fired or
+// that it spotted something without you looking at the screen. Off by default
+// (persisted), toggled by the 🔊 button; hidden entirely where unsupported.
+const TTS_KEY = 'chitragupt-tts-enabled';
+const synth = window.speechSynthesis || null;
+let ttsEnabled = false;
+
+function initTts() {
+  const btn = document.getElementById('tts-btn');
+  if (!synth) { if (btn) btn.style.display = 'none'; return; }
+  ttsEnabled = localStorage.getItem(TTS_KEY) === '1';
+  updateTtsBtn();
+}
+
+function toggleTts() {
+  if (!synth) return;
+  ttsEnabled = !ttsEnabled;
+  try { localStorage.setItem(TTS_KEY, ttsEnabled ? '1' : '0'); } catch { /* ignore */ }
+  updateTtsBtn();
+  if (!ttsEnabled) synth.cancel(); // silence anything mid-utterance immediately
+}
+
+function updateTtsBtn() {
+  const btn = document.getElementById('tts-btn');
+  if (!btn) return;
+  btn.classList.toggle('tts-on', ttsEnabled);
+  btn.textContent = ttsEnabled ? '🔊' : '🔇';
+  btn.title = ttsEnabled ? 'Voice replies on — tap to mute' : 'Voice replies off — tap to hear responses';
+}
+
+// Strip markdown/HTML so the synthesizer reads clean prose, not "less-than
+// details greater-than". Think blocks are dropped whole — they're the model's
+// private reasoning, not something to read aloud.
+function ttsCleanText(text) {
+  return String(text || '')
+    .replace(/<details[\s\S]*?<\/details>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[*_`#>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Speak an assistant reply aloud, if TTS is on. Cancels any in-progress
+// utterance first: in a live kitchen session the newest thing to say
+// supersedes a stale one (same "latest matters" logic as the live-frame
+// buffer), rather than letting narration queue up and fall behind.
+function speak(text) {
+  if (!ttsEnabled || !synth) return;
+  const clean = ttsCleanText(text);
+  if (!clean) return;
+  synth.cancel();
+  const utterance = new SpeechSynthesisUtterance(clean);
+  utterance.lang = 'en-US';
+  utterance.rate = 1.0;
+  synth.speak(utterance);
+}
+
+initTts();
 
 async function checkHealth() {
   try {
@@ -403,6 +468,7 @@ function createLiveMessage() {
         tool_calls: data.tool_calls || [],
         think_blocks: data.think_blocks || [],
       });
+      speak(data.text); // read the finished answer aloud (once, not per delta)
     },
     fail(message) {
       div.classList.remove('streaming');
@@ -665,6 +731,7 @@ async function checkTimers() {
     const data = await resp.json();
     (data.completed || []).forEach((t) => {
       addMessage('assistant', `⏰ ${t.label}: ${t.message}`, {});
+      speak(`${t.label}. ${t.message}`); // a fired timer is exactly a hands-free moment
     });
   } catch { /* ignore — next poll will retry */ }
 }
@@ -945,6 +1012,7 @@ async function sendLiveFrame(video) {
         displayText += '\n\n<details><summary>💭 Thinking</summary>\n' + data.think_blocks.join('\n') + '\n</details>';
       }
       addMessage('assistant', displayText, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls, think_blocks: data.think_blocks });
+      speak(data.text); // speak the reply, not displayText (which carries think-block HTML)
       updateActivityEntry(entry, 'replied', 'Frame #' + framesSent + ' — model replied');
       addDebugMessage(
         '← 200  provider=' + data.provider + ' model=' + data.model +
