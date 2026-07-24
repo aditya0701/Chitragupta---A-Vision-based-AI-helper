@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from .config import settings
 from .backends.factory import get_backend
 from .agent.agent import ChitraguptAgent
+from .live.routes import router as live_router, page_router as live_page_router
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("chitragupt")
@@ -38,6 +39,11 @@ app.add_middleware(
 
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+# Parallel live tick system (server/live) — /v2/* API + /live page. Fully
+# independent of the v1 agent below; both run at the same time.
+app.include_router(live_router)
+app.include_router(live_page_router)
 
 # ─── Agent singleton ──────────────────────────────────────────────────────────
 
@@ -193,6 +199,17 @@ async def reset_conversation():
     agent = get_agent()
     agent.reset_conversation()
     return {"status": "conversation reset"}
+
+
+@app.get("/v1/tasks")
+async def get_tasks():
+    """The current task-list document (title + items with status/note/
+    observations), or {"document": null} when none is active. Read-only — the
+    model owns all writes via update_task_list / start_find_task; this just
+    surfaces the persisted document so the UI can render it. Cheap (a file
+    read), safe to poll alongside /v1/timers/check."""
+    from .agent import tasklist
+    return {"document": tasklist.get_document()}
 
 
 # ─── Web UI ───────────────────────────────────────────────────────────────────

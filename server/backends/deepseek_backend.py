@@ -31,11 +31,16 @@ logger = logging.getLogger("chitragupt")
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
+# Kept deliberately short. Every token here is output the reasoning stage must
+# read AND counts against Groq's 8K TPM cap — a verbose "describe everything"
+# prompt was producing ~575-token paragraphs per frame, which both slowed the
+# vision call and burned the per-minute budget in 2-3 calls (see CLAUDE.md's
+# vision-latency finding). A one-line gist is all the reasoning stage needs
+# when there's no specific goal; goal-directed frames get the tighter
+# object-detection directive built in agent.py instead.
 VISION_PROMPT = (
-    "Describe everything visible in this image in detail. Include: objects, "
-    "people, actions, text, colours, spatial layout, and anything that "
-    "might matter for helping someone understand this scene. Be factual and "
-    "specific. Do not offer advice or opinions — that's a separate step."
+    "In 1-2 short sentences, state only the main objects and what's happening "
+    "in this image. No lists, no colours/textures/layout detail, no advice."
 )
 
 
@@ -51,7 +56,7 @@ class DeepSeekBackend(VisionBackend):
 
     # ── Stage 1: Vision (Groq) ──────────────────────────────────────────────
 
-    async def vision(self, image_base64: str, prompt: str = VISION_PROMPT) -> str:
+    async def vision(self, image_base64: str, prompt: str = VISION_PROMPT, max_tokens: int = 160) -> str:
         resp = await self.vision_client.chat.completions.create(
             model=self.vision_model,
             messages=[{
@@ -61,7 +66,12 @@ class DeepSeekBackend(VisionBackend):
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
                 ],
             }],
-            max_tokens=512,
+            # 160 (was 512): a gist or a "FOUND/NOT FOUND: <where>" detection
+            # answer needs a fraction of this. The old cap let the model run to
+            # ~575 tokens of prose, the single biggest lever on both vision
+            # latency and the 8K TPM cap. A short answer that gets cut off is
+            # still usable; a 575-token one wastes budget every frame.
+            max_tokens=max_tokens,
             # No reasoning needed for a pure description call — this is the
             # smallest possible Groq request for this stage, deliberately
             # kept far under the 8K TPM cap since it never carries history,

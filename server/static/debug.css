@@ -96,3 +96,29 @@ header .normal-ui-link:hover { text-decoration: underline; }
 .message.assistant, .message.user {
   max-width: 92%;
 }
+
+/* ─── Task-list bar (horizontal, compact) ───────────────────────────────── */
+.dbg-task-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 16px;
+  background: #0d0d1a;
+  border-bottom: 1px solid #1a1a2e;
+  font-size: 12px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+.dbg-task-label { color: #555; text-transform: uppercase; letter-spacing: 1px; flex: none; }
+.task-title { color: #6a9fd8; text-transform: none; letter-spacing: 0; }
+.dbg-task-bar .task-panel { display: flex; gap: 14px; align-items: center; }
+.dbg-task-bar .task-empty { color: #444; font-style: italic; }
+.dbg-task-bar .task-item { display: inline-flex; align-items: center; gap: 4px; color: #bbb; }
+.dbg-task-bar .task-icon { font-size: 12px; }
+.dbg-task-bar .task-pending .task-icon { color: #888; }
+.dbg-task-bar .task-in_progress .task-icon { color: #6a9fd8; }
+.dbg-task-bar .task-in_progress { color: #fff; }
+.dbg-task-bar .task-completed .task-icon { color: #00cc77; }
+.dbg-task-bar .task-completed { color: #6a8a7a; text-decoration: line-through; }
+.dbg-task-bar .task-skipped .task-icon { color: #a06060; }
+.dbg-task-bar .task-skipped { color: #7a5a5a; text-decoration: line-through; }

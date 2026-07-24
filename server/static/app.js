@@ -266,7 +266,7 @@ function addCameraEnableMessage(onEnabled) {
   btn.onclick = async () => {
     btn.disabled = true;
     btn.textContent = 'Starting camera...';
-    const ok = await startCameraStream();
+    const ok = await startLive();
     if (ok) {
       div.remove();
       onEnabled();
@@ -488,10 +488,23 @@ async function sendMessage() {
     clearImage();
 
     // The model wants to keep watching for something specific, not just
-    // take one look — switch into Live Watch so it actually can. If
-    // already there (or the camera's already on), this is a no-op.
+    // take one look — turn the camera + watching loop on in place. No-ops if
+    // already watching; no screen switch since there are no modes anymore.
     if (data && data.needs_live_search) {
-      await switchMode('live');
+      await startLive();
+    }
+
+    // A find-goal can also complete on a typed turn — the user asks or
+    // answers ("is it this one?") while Live Watch is already running, and
+    // the found=true lands on this chat response, not a live tick. The tick
+    // path auto-closes the camera on goal_complete (see sendLiveFrame); mirror
+    // it here, otherwise the camera keeps polling after the thing was found.
+    if (data && data.goal_complete) {
+      if (liveActive) {
+        stopLive();
+      } else if (cameraStreamActive) {
+        stopCameraStream();
+      }
     }
   } catch (err) {
     addMessage('assistant', '⚠️ Error: ' + err.message, {});
@@ -499,6 +512,7 @@ async function sendMessage() {
 
   setSending(false);
   setActivityStatus('Idle', false);
+  refreshTaskList(); // a turn may have created/updated/completed a task
   input.focus();
 }
 
@@ -587,7 +601,8 @@ const TIMER_POLL_INTERVAL_S = 15;
 
 function startTimerPolling() {
   checkTimers();
-  setInterval(checkTimers, TIMER_POLL_INTERVAL_S * 1000);
+  refreshTaskList();
+  setInterval(() => { checkTimers(); refreshTaskList(); }, TIMER_POLL_INTERVAL_S * 1000);
 }
 
 async function checkTimers() {
@@ -600,36 +615,63 @@ async function checkTimers() {
   } catch { /* ignore — next poll will retry */ }
 }
 
-// ─── Mode switching (Chat & Image vs Live Watch) ───────────────────────────
+// ─── Task-list panel ───────────────────────────────────────────────────────
+//
+// Read-only view of the server-side task document (server/data/document.json)
+// the model maintains via update_task_list / start_find_task. That document
+// always drove the model's prompt context but had no UI surface, so a task the
+// model created — e.g. a "Find X" live-search goal — was invisible to the user.
+// Refreshed on load, after each turn (sendMessage / sendLiveFrame), and on the
+// timer poll tick so autonomous changes (a fired timer marking a step done)
+// show up without a user action.
 
-let currentMode = 'chat';
+const TASK_STATUS_ICON = { pending: '○', in_progress: '◐', completed: '✓', skipped: '⊘' };
 
-async function switchMode(mode) {
-  if (mode === currentMode) return;
-
-  if (mode === 'live') {
-    await startLive();
-    if (!liveActive) return; // camera permission denied / unavailable — stay on chat mode
-  } else if (currentMode === 'live') {
-    stopLive();
-  }
-
-  currentMode = mode;
-  document.getElementById('mode-chat-btn').classList.toggle('active', mode === 'chat');
-  document.getElementById('mode-live-btn').classList.toggle('active', mode === 'live');
-  document.getElementById('upload-img-btn').style.display = mode === 'live' ? 'none' : '';
-  // Live Watch owns the camera lifecycle directly while active — the manual
-  // toggle is only for on-demand capture in Chat mode, showing both would
-  // just invite confusion about which one is actually in control.
-  document.getElementById('camera-toggle-btn').style.display = mode === 'live' ? 'none' : '';
-  document.getElementById('prompt-input').placeholder =
-    mode === 'live' ? 'Ask about what the camera sees (optional)...' : 'Ask me anything...';
+function escapeHtmlLite(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 }
 
+async function refreshTaskList() {
+  try {
+    const resp = await fetch('/v1/tasks');
+    const data = await resp.json();
+    renderTaskList(data.document);
+  } catch { /* ignore — next refresh retries */ }
+}
+
+function renderTaskList(doc) {
+  const panel = document.getElementById('task-panel');
+  const titleEl = document.getElementById('task-title');
+  if (!panel) return;
+  if (!doc || !doc.items || doc.items.length === 0) {
+    if (titleEl) titleEl.textContent = '';
+    panel.innerHTML = '<div class="task-empty">No active task list</div>';
+    return;
+  }
+  if (titleEl) titleEl.textContent = doc.title || '';
+  panel.innerHTML = doc.items.map((it) => {
+    const icon = TASK_STATUS_ICON[it.status] || '○';
+    const note = it.note ? `<div class="task-note">${escapeHtmlLite(it.note)}</div>` : '';
+    const obs = (it.observations && it.observations.length)
+      ? `<div class="task-obs">👁 ${it.observations.length} seen</div>` : '';
+    return `<div class="task-item task-${escapeHtmlLite(it.status)}">`
+      + `<span class="task-icon">${icon}</span>`
+      + `<div class="task-body"><span class="task-content">${escapeHtmlLite(it.content)}</span>${note}${obs}</div>`
+      + `</div>`;
+  }).join('');
+}
+
+// ─── Mode switching (Chat & Image vs Live Watch) ───────────────────────────
+
+// One unified screen — no Chat/Live tabs. The camera is either off (plain
+// chat) or on (camera + hands-free watching together, in place). The 🎥 button
+// and startLive()/stopLive() are the only camera controls; there is no mode to
+// switch, so a request_camera/request_live_search just turns watching on
+// without ever changing screens.
+
 // Raw camera stream lifecycle — just getUserMedia + wiring the <video>
-// element, no autonomous polling. Used directly by the manual "Enable
-// camera" toggle (on-demand capture only, no per-interval Groq calls), and
-// as the first step of full Live Watch mode (see startLive below).
+// element, no autonomous polling. Always paired with the polling loop by
+// startLive()/stopLive() below; not called on its own anymore.
 async function startCameraStream() {
   if (cameraStreamActive) return true;
   if (!window.isSecureContext) {
@@ -666,47 +708,50 @@ function stopCameraStream() {
 function updateCameraToggleBtn() {
   const btn = document.getElementById('camera-toggle-btn');
   if (!btn) return;
-  btn.classList.toggle('camera-on', cameraStreamActive);
-  btn.title = cameraStreamActive ? 'Turn camera off' : 'Enable camera for on-demand questions (no continuous watching)';
+  // Keyed on liveActive (watching) since camera-on and watching are now the
+  // same thing — turning the camera on always starts the watching loop.
+  btn.classList.toggle('camera-on', liveActive);
+  btn.title = liveActive ? 'Turn camera off (stop watching)' : 'Turn camera on to watch';
 }
 
-// Manual toggle — deliberately does NOT touch Live Watch's polling loop.
-// This is "camera available for request_camera to use," not "watch
-// continuously" — kept separate so the camera is never running (and
-// costing nothing extra since it's stream-only, but also never silently
-// left on) unless the user explicitly asked for either mode.
+// The 🎥 button. Camera on ⇒ hands-free watching on; off ⇒ plain chat. There's
+// no "camera on but not watching" state anymore — the two are one control.
 async function toggleCameraStream() {
-  if (cameraStreamActive && !liveActive) {
-    stopCameraStream();
-  } else if (!cameraStreamActive) {
-    await startCameraStream();
+  if (liveActive) {
+    stopLive();
+  } else {
+    await startLive();
   }
-  // If Live Watch's polling is active, leave the stream alone — that tab
-  // owns it; use the Live Watch tab's own close button to stop both together.
 }
 
+// Turn the camera on AND start the watching loop. Returns true on success so
+// callers (the 🎥 toggle, request_camera's enable prompt, a needs_live_search
+// response) can tell whether the camera actually came up. Safe to call when
+// already watching — it no-ops.
 async function startLive() {
+  if (liveActive) return true;
   const ok = await startCameraStream();
-  if (!ok) return;
+  if (!ok) return false;
 
-  document.getElementById('mode-live-btn').classList.add('live-active');
   liveActive = true;
   framesWatched = 0;
   framesSent = 0;
   lastSentDiffData = null;
   updateLiveStats();
+  updateCameraToggleBtn();
   restartLiveTimer();
   setActivityStatus('👁 Watching for changes…', false);
-  addMessage('assistant', '📹 Live mode on — watching for changes, sending at most once per interval.', {});
+  addMessage('assistant', "📹 Camera on — I'm watching. Ask me anything, or I'll speak up when something changes.", {});
+  return true;
 }
 
 function stopLive() {
   liveActive = false;
   if (liveTimer) clearInterval(liveTimer);
   liveTimer = null;
-  document.getElementById('mode-live-btn').classList.remove('live-active');
   updateLiveStats();
   stopCameraStream();
+  updateCameraToggleBtn();
   setActivityStatus('Idle', false);
 }
 
@@ -875,6 +920,7 @@ async function sendLiveFrame(video) {
     addMessage('assistant', '⚠️ Live frame error: ' + err.message, {});
   } finally {
     liveSending = false;
+    refreshTaskList(); // a live tick may have logged an observation / found the goal
     if (pendingLiveFrame && liveActive) {
       const frame = pendingLiveFrame;
       pendingLiveFrame = null;

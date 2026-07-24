@@ -1,4 +1,4 @@
-const CACHE_NAME = 'chitragupt-shell-v7';
+const CACHE_NAME = 'chitragupt-shell-v11';
 const SHELL_URLS = [
   '/',
   '/static/style.css',
@@ -28,7 +28,16 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
   // Never cache API calls — chat/vision responses must always be fresh.
-  if (url.pathname.startsWith('/v1/') || url.pathname === '/health') {
+  // /v2 + /live (the parallel live tick system) are excluded from the SW
+  // entirely, page and assets included, so iterating on it never fights
+  // the shell cache.
+  if (
+    url.pathname.startsWith('/v1/') ||
+    url.pathname.startsWith('/v2/') ||
+    url.pathname === '/health' ||
+    url.pathname === '/live' ||
+    url.pathname.startsWith('/static/live')
+  ) {
     return;
   }
 

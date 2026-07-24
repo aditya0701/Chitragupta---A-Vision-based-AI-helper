@@ -16,10 +16,6 @@
   <button class="dbg-toolbar-btn" onclick="exportConversation()" title="Save raw transcript">💾</button>
   <button class="dbg-toolbar-btn" onclick="resetConversation()" title="Reset conversation">↻</button>
 </header>
-<div class="mode-switcher">
-  <button class="mode-btn active" id="mode-chat-btn" onclick="switchMode('chat')">💬 Chat &amp; Image</button>
-  <button class="mode-btn" id="mode-live-btn" onclick="switchMode('live')">📹 Live Watch</button>
-</div>
 <div class="dbg-settings-bar">
   <label>interval <span id="interval-value">4</span>s
     <input type="range" id="interval-slider" min="2" max="15" step="1" value="4">
@@ -29,6 +25,10 @@
   </label>
   <span id="activity-status">Idle</span>
   <span id="live-stats">not watching</span>
+</div>
+<div class="dbg-task-bar">
+  <span class="dbg-task-label">tasks<span class="task-title" id="task-title"></span></span>
+  <div class="task-panel" id="task-panel"><span class="task-empty">none</span></div>
 </div>
 <div class="main-container">
   <div class="chat-area">
@@ -41,7 +41,7 @@
     <canvas id="diff-canvas" width="32" height="32" style="display:none;"></canvas>
     <div class="live-preview" id="live-preview" style="display:none;">
       <video id="camera-video" autoplay playsinline muted></video>
-      <button class="live-preview-close" onclick="switchMode('chat')" title="Stop live camera">✕</button>
+      <button class="live-preview-close" onclick="stopLive()" title="Turn camera off">✕</button>
     </div>
     <div class="input-area">
       <div class="input-row">

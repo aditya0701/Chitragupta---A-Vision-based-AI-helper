@@ -25,6 +25,23 @@ logger = logging.getLogger("chitragupt")
 # _process_locked).
 SILENT_MARKER = "[SILENT]"
 
+# A chatty reasoning backend (DeepSeek, in the active hybrid config) tends to
+# *narrate* its silence — "nothing relevant has changed, staying silent" —
+# instead of emitting the bare SILENT_MARKER the prompt asks for. On a live
+# tick that narration IS the repetitive-description leak we're suppressing, so
+# detection can't rely on an exact marker match. These patterns catch a reply
+# whose entire content is a declaration that there's nothing worth saying.
+# Gated on is_live_frame + a length cap at the call site so a substantive
+# update that merely mentions one of these phrases is never suppressed.
+_SILENCE_NARRATION_RE = re.compile(
+    r"\b(?:stay(?:ing)?|remain(?:ing)?|keep(?:ing)?|be)\s+silent\b"
+    r"|\bsilent\s+as\s+instructed\b"
+    r"|\bnothing\s+(?:relevant|new|of\s+note|worth\s+(?:noting|mentioning|saying))\b"
+    r"|\bno\s+(?:relevant\s+)?(?:change|update)s?\b"
+    r"|\b(?:scene|frame|everything)\s+(?:remains?|is\s+still|stays?)\s+(?:the\s+same|unchanged|blurred)\b",
+    re.IGNORECASE,
+)
+
 
 class FrameBuffer:
     """Rolling buffer of frame descriptions for change detection."""
@@ -199,19 +216,28 @@ class ChitraguptAgent:
             goal_aware = bool(active_goals)
             if goal_aware:
                 goals_text = "; ".join(active_goals)
+                # Object-detection directive, not a scene description. The
+                # target is known (DeepSeek set it via request_live_search /
+                # update_task_list), so the vision stage's only job is to
+                # locate it — a strict, tiny output format keeps this cheap
+                # and keeps it off the TPM cap. Anything the model adds beyond
+                # the format is wasted tokens the reasoning stage must re-parse.
                 vision_prompt = (
-                    f"Check this image against this specific goal: {goals_text}. "
-                    "Start your answer with YES or NO — is the target/goal clearly "
-                    "visible in this frame? Then, in one or two more sentences, say "
-                    "where it is if yes, or briefly describe what's in the frame "
-                    "instead if no. Be factual and concise — this is being checked "
-                    "automatically, not read by a person."
+                    f"OBJECT DETECTION. Target(s) to find: {goals_text}.\n"
+                    "Reply in EXACTLY one line, in one of these two forms and nothing else:\n"
+                    "FOUND: <a short phrase for where the target is in the frame>\n"
+                    "NOT FOUND: <a short phrase for what is in view instead>\n"
+                    "No preamble, no full-scene description, no colours/layout detail."
                 )
             else:
+                # No specific goal — a one-line gist is all the reasoning
+                # stage needs. Kept terse for the same TPM/latency reason as
+                # the detection directive above (was an exhaustive
+                # "describe everything in detail" paragraph).
                 vision_prompt = (
-                    "Describe everything visible in this image in detail. "
-                    "Include: objects, people, actions, text, colours, spatial layout, "
-                    "and anything that might matter for helping someone understand this scene."
+                    "In 1-2 short sentences, state only the main objects and "
+                    "what's happening in this image. No lists, no "
+                    "colours/textures/layout detail, no advice."
                 )
             scene_description = await self.backend.vision(
                 image_base64=image_base64,
@@ -595,7 +621,7 @@ class ChitraguptAgent:
         # narration problem. Direct user turns never hit this: they always
         # got a real prompt from the user and must always get a real reply,
         # so this check is deliberately gated on is_live_frame.
-        if is_live_frame and final_text.strip().upper() == SILENT_MARKER:
+        if is_live_frame and self._is_silent_live_reply(final_text):
             final_text = ""
 
         # Fold in any timer that finished while we were talking, so a
@@ -816,6 +842,16 @@ class ChitraguptAgent:
             }
             return
 
+        # A log_observation(found=true) means the find-goal that started this
+        # Live Watch session is done — the client uses goal_complete (in the
+        # done event below) to auto-close the camera. Computed the same way as
+        # the non-streaming path (_process_locked); it was missing here, which
+        # is why a find-goal completing on a typed turn (rendered via this
+        # stream path) never closed the camera.
+        found_alert = any(
+            r["tool"] == "log_observation" and r["arguments"].get("found")
+            for r in tool_results
+        )
         if tool_results and any(self.tools.get(r["tool"]).needs_followup for r in tool_results):
             tool_context = "\n\n".join(
                 f"Tool '{r['tool']}' returned:\n{r['result']}" for r in tool_results
@@ -857,6 +893,7 @@ class ChitraguptAgent:
                 "tool_calls": tool_results or [],
                 "think_blocks": think_blocks,
                 "scene_description": None,
+                "goal_complete": found_alert,
                 "debug": {"steps": debug_steps, "timer_completions": timer_update["completed"]},
             },
         }
@@ -1038,9 +1075,12 @@ class ChitraguptAgent:
                     f"This is an automated watch tick, not a direct question. Only write "
                     f"a visible reply yourself if this frame changes something worth "
                     f"telling the user about (progress, a problem, the thing they're "
-                    f"looking for). If nothing here is new or relevant, your entire "
-                    f"visible reply must be exactly {SILENT_MARKER} and nothing else — "
-                    f"do not describe the scene."
+                    f"looking for). If nothing here is new or relevant, output the single "
+                    f"token {SILENT_MARKER} as your entire visible reply — nothing before "
+                    f"or after it. Do NOT narrate: writing a sentence like \"nothing "
+                    f"relevant has changed\" or \"staying silent\" is itself wrong and "
+                    f"leaks noise to the user. Either say the useful thing, or output only "
+                    f"{SILENT_MARKER}."
                 )
         thinking_instruction = (
             "\n\nThink step by step before responding."
@@ -1071,6 +1111,31 @@ class ChitraguptAgent:
         text = re.sub(r"```tool\s*\n?{.*?}\n?```", "", text, flags=re.DOTALL)
         text = re.sub(r"<tool>.*?</tool>", "", text, flags=re.DOTALL)
         return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    def _is_silent_live_reply(self, text: str) -> bool:
+        """Whether a live-tick reply should be suppressed to silence.
+
+        Covers three shapes, in order of confidence:
+        1. an empty reply,
+        2. SILENT_MARKER appearing anywhere (model emitted the token, maybe
+           wrapped in stray prose the exact-match check would have missed),
+        3. a reasoning model narrating its own silence instead of emitting the
+           token at all — the observed DeepSeek/hybrid failure mode.
+
+        Case 3 is gated on a length cap: a short reply that reads as a
+        no-change declaration is noise, but a long, substantive update that
+        happens to mention one of these phrases must still reach the user.
+        Only ever called for is_live_frame turns — a direct user turn always
+        gets a real answer regardless.
+        """
+        stripped = text.strip()
+        if not stripped:
+            return True
+        if SILENT_MARKER in stripped.upper():
+            return True
+        if len(stripped) <= 300 and _SILENCE_NARRATION_RE.search(stripped):
+            return True
+        return False
 
     def _run_structured_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
         """Execute tool calls already parsed by a native-tool-calling backend

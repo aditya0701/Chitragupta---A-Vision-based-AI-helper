@@ -81,6 +81,31 @@ def set_document(title: str, items: list[dict]) -> dict:
         return existing
 
     document = {"title": title, "items": normalized}
+
+    # Protect an active live-search goal from being silently wiped by a
+    # full-replace that omitted it. request_live_search's start_find_task()
+    # appends a "Find <target>" item (in_progress) as a side effect; when the
+    # model calls update_task_list in the SAME turn, it wrote that call before
+    # start_find_task had run, so its full item list can't yet include the find
+    # item. Tool execution order within a turn isn't guaranteed, so without
+    # this the just-registered goal — which the live-frame silence/observation
+    # machinery checks every frame against — can disappear the instant it's
+    # created. Only in_progress find-goals are protected: once the target's
+    # been found (add_observation marks the item completed) the model is free
+    # to drop or keep it like any other item.
+    new_contents = {i["content"].lower() for i in normalized}
+    for item in existing.get("items", []):
+        if (
+            item.get("status") == "in_progress"
+            and item.get("content", "").lower().startswith("find ")
+            and item.get("content", "").lower() not in new_contents
+        ):
+            document["items"].append(item)
+            logger.info(
+                f"set_document: preserved active find-goal {item['content']!r} "
+                "that an incoming full-replace omitted."
+            )
+
     DOCUMENT_FILE.parent.mkdir(parents=True, exist_ok=True)
     DOCUMENT_FILE.write_text(json.dumps(document, indent=2))
     return document

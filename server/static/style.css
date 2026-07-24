@@ -558,3 +558,23 @@ header .badge {
   .input-row { gap: 8px; }
   .input-row button { padding: 12px 16px; }
 }
+
+/* ─── Task-list panel (sidebar) ─────────────────────────────────────────── */
+/* Read-only view of the server-side task document the model maintains. */
+.task-title { color: #00d2ff; font-weight: 400; text-transform: none; letter-spacing: 0; }
+.task-panel { font-size: 13px; margin-bottom: 8px; }
+.task-empty { color: #555; font-style: italic; padding: 4px 0; }
+.task-item { display: flex; gap: 8px; align-items: flex-start; padding: 5px 0; border-bottom: 1px solid #16162a; }
+.task-item:last-child { border-bottom: none; }
+.task-icon { flex: none; width: 16px; text-align: center; font-size: 13px; line-height: 1.5; }
+.task-body { flex: 1; min-width: 0; }
+.task-content { color: #ccc; word-break: break-word; }
+.task-note { color: #888; font-size: 11px; margin-top: 2px; font-style: italic; }
+.task-obs { color: #6a6a9a; font-size: 11px; margin-top: 2px; }
+.task-pending .task-icon { color: #888; }
+.task-in_progress .task-icon { color: #00d2ff; }
+.task-in_progress .task-content { color: #fff; }
+.task-completed .task-icon { color: #00ff88; }
+.task-completed .task-content { color: #6a8a7a; text-decoration: line-through; }
+.task-skipped .task-icon { color: #a06060; }
+.task-skipped .task-content { color: #7a5a5a; text-decoration: line-through; }

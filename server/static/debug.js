@@ -354,7 +354,7 @@ function addCameraEnableMessage(onEnabled) {
   btn.onclick = async () => {
     btn.disabled = true;
     btn.textContent = 'Starting camera...';
-    const ok = await startCameraStream();
+    const ok = await startLive();
     if (ok) {
       div.remove();
       onEnabled();
@@ -568,7 +568,19 @@ async function sendMessage() {
     clearImage();
 
     if (data && data.needs_live_search) {
-      await switchMode('live');
+      await startLive();
+    }
+
+    // A find-goal can also complete on a typed turn (user asks/answers while
+    // Live Watch is running) — the found=true lands here, not on a live tick.
+    // The tick path auto-closes on goal_complete (see sendLiveFrame); mirror
+    // it here so the camera doesn't keep polling after the thing was found.
+    if (data && data.goal_complete) {
+      if (liveActive) {
+        stopLive();
+      } else if (cameraStreamActive) {
+        stopCameraStream();
+      }
     }
   } catch (err) {
     addMessage('assistant', '⚠️ Error: ' + err.message, {});
@@ -576,6 +588,7 @@ async function sendMessage() {
 
   setSending(false);
   setActivityStatus('Idle');
+  refreshTaskList(); // a turn may have created/updated/completed a task
   input.focus();
 }
 
@@ -645,7 +658,8 @@ const TIMER_POLL_INTERVAL_S = 15;
 
 function startTimerPolling() {
   checkTimers();
-  setInterval(checkTimers, TIMER_POLL_INTERVAL_S * 1000);
+  refreshTaskList();
+  setInterval(() => { checkTimers(); refreshTaskList(); }, TIMER_POLL_INTERVAL_S * 1000);
 }
 
 async function checkTimers() {
@@ -658,28 +672,49 @@ async function checkTimers() {
   } catch { /* ignore — next poll will retry */ }
 }
 
+// ─── Task-list panel ───────────────────────────────────────────────────────
+// Read-only view of the server-side task document (server/data/document.json)
+// the model maintains via update_task_list / start_find_task — previously it
+// had no UI surface at all, so model-created tasks (e.g. a "Find X" goal) were
+// invisible. Refreshed on load, after each turn, and on the timer poll tick.
+
+const TASK_STATUS_ICON = { pending: '○', in_progress: '◐', completed: '✓', skipped: '⊘' };
+
+function escapeHtmlLite(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
+async function refreshTaskList() {
+  try {
+    const resp = await fetch('/v1/tasks');
+    const data = await resp.json();
+    renderTaskList(data.document);
+  } catch { /* ignore — next refresh retries */ }
+}
+
+function renderTaskList(doc) {
+  const panel = document.getElementById('task-panel');
+  const titleEl = document.getElementById('task-title');
+  if (!panel) return;
+  if (!doc || !doc.items || doc.items.length === 0) {
+    if (titleEl) titleEl.textContent = '';
+    panel.innerHTML = '<span class="task-empty">none</span>';
+    return;
+  }
+  if (titleEl) titleEl.textContent = ' · ' + (doc.title || '');
+  panel.innerHTML = doc.items.map((it) => {
+    const icon = TASK_STATUS_ICON[it.status] || '○';
+    const obs = (it.observations && it.observations.length) ? ` 👁${it.observations.length}` : '';
+    const note = it.note ? ` — ${escapeHtmlLite(it.note)}` : '';
+    return `<span class="task-item task-${escapeHtmlLite(it.status)}" title="${escapeHtmlLite(it.status)}${escapeHtmlLite(note)}">`
+      + `<span class="task-icon">${icon}</span> ${escapeHtmlLite(it.content)}${obs}</span>`;
+  }).join('');
+}
+
 // ─── Mode switching ─────────────────────────────────────────────────────────
 
-let currentMode = 'chat';
-
-async function switchMode(mode) {
-  if (mode === currentMode) return;
-
-  if (mode === 'live') {
-    await startLive();
-    if (!liveActive) return;
-  } else if (currentMode === 'live') {
-    stopLive();
-  }
-
-  currentMode = mode;
-  document.getElementById('mode-chat-btn').classList.toggle('active', mode === 'chat');
-  document.getElementById('mode-live-btn').classList.toggle('active', mode === 'live');
-  document.getElementById('upload-img-btn').style.display = mode === 'live' ? 'none' : '';
-  document.getElementById('camera-toggle-btn').style.display = mode === 'live' ? 'none' : '';
-  document.getElementById('prompt-input').placeholder =
-    mode === 'live' ? 'Ask about what the camera sees (optional)...' : 'Ask me anything...';
-}
+// One unified screen — no Chat/Live tabs (mirrors app.js). Camera off = plain
+// chat; camera on = camera + hands-free watching together, in place.
 
 async function startCameraStream() {
   if (cameraStreamActive) return true;
@@ -717,40 +752,43 @@ function stopCameraStream() {
 function updateCameraToggleBtn() {
   const btn = document.getElementById('camera-toggle-btn');
   if (!btn) return;
-  btn.classList.toggle('camera-on', cameraStreamActive);
-  btn.title = cameraStreamActive ? 'Turn camera off' : 'Enable camera for on-demand questions';
+  btn.classList.toggle('camera-on', liveActive);
+  btn.title = liveActive ? 'Turn camera off (stop watching)' : 'Turn camera on to watch';
 }
 
+// The 🎥 button. Camera on ⇒ hands-free watching on; off ⇒ plain chat.
 async function toggleCameraStream() {
-  if (cameraStreamActive && !liveActive) {
-    stopCameraStream();
-  } else if (!cameraStreamActive) {
-    await startCameraStream();
+  if (liveActive) {
+    stopLive();
+  } else {
+    await startLive();
   }
 }
 
 async function startLive() {
+  if (liveActive) return true;
   const ok = await startCameraStream();
-  if (!ok) return;
+  if (!ok) return false;
 
-  document.getElementById('mode-live-btn').classList.add('live-active');
   liveActive = true;
   framesWatched = 0;
   framesSent = 0;
   lastSentDiffData = null;
   updateLiveStats();
+  updateCameraToggleBtn();
   restartLiveTimer();
   setActivityStatus('👁 Watching for changes…');
-  addMessage('assistant', '📹 Live mode on — watching for changes, sending at most once per interval.', {});
+  addMessage('assistant', "📹 Camera on — I'm watching. Ask me anything, or I'll speak up when something changes.", {});
+  return true;
 }
 
 function stopLive() {
   liveActive = false;
   if (liveTimer) clearInterval(liveTimer);
   liveTimer = null;
-  document.getElementById('mode-live-btn').classList.remove('live-active');
   updateLiveStats();
   stopCameraStream();
+  updateCameraToggleBtn();
   setActivityStatus('Idle');
 }
 
@@ -896,6 +934,7 @@ async function sendLiveFrame(video) {
     addMessage('assistant', '⚠️ Live frame error: ' + err.message, {});
   } finally {
     liveSending = false;
+    refreshTaskList(); // a live tick may have logged an observation / found the goal
     if (pendingLiveFrame && liveActive) {
       const frame = pendingLiveFrame;
       pendingLiveFrame = null;
