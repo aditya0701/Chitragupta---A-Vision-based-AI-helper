@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Chitragupta Live — world-doc system</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #0f1115; color: #e2e5ea;
+      height: 100dvh; display: flex; flex-direction: column;
+    }
+    header {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 14px; background: #161a22; border-bottom: 1px solid #262c38;
+    }
+    header h1 { font-size: 15px; font-weight: 600; }
+    header .tag { font-size: 11px; color: #7c8598; }
+    header a { color: #6ea8fe; font-size: 12px; text-decoration: none; margin-left: auto; }
+    header button { margin-left: 8px; }
+    main { flex: 1; display: flex; min-height: 0; }
+    .col { display: flex; flex-direction: column; min-height: 0; }
+    #left { flex: 1.2; border-right: 1px solid #262c38; }
+    #right { flex: 1; }
+
+    #camera-wrap { background: #000; position: relative; }
+    #camera-video { width: 100%; max-height: 34dvh; display: block; object-fit: contain; }
+    #camera-off { padding: 24px; text-align: center; color: #7c8598; font-size: 13px; }
+    #controls {
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      padding: 8px 12px; background: #12151c; border-bottom: 1px solid #262c38;
+      font-size: 12px;
+    }
+    button {
+      background: #232a38; color: #e2e5ea; border: 1px solid #333c4e;
+      border-radius: 6px; padding: 6px 12px; font-size: 12px; cursor: pointer;
+    }
+    button:hover { background: #2c3547; }
+    button.active { background: #1f4b8f; border-color: #2d6cd6; }
+    #controls label { color: #98a1b3; display: flex; gap: 5px; align-items: center; }
+    #controls input[type=range] { width: 80px; }
+
+    #transcript { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .msg { max-width: 88%; padding: 8px 12px; border-radius: 10px; font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
+    .msg.user { align-self: flex-end; background: #1f4b8f; }
+    .msg.assistant { align-self: flex-start; background: #232a38; }
+    .msg.trigger { align-self: flex-start; background: #3a2d16; border: 1px solid #6b5320; }
+    .msg.system { align-self: center; background: none; color: #7c8598; font-size: 11px; padding: 2px; }
+    .msg .ts { display: block; font-size: 10px; color: #9aa5bb; margin-top: 4px; }
+    .caption-dot { align-self: center; color: #3f4a5f; font-size: 10px; padding: 0; cursor: default; }
+
+    #chat-row { display: flex; gap: 8px; padding: 10px 12px; background: #12151c; border-top: 1px solid #262c38; }
+    #chat-input {
+      flex: 1; background: #1a1f29; color: #e2e5ea; border: 1px solid #333c4e;
+      border-radius: 8px; padding: 9px 12px; font-size: 13px;
+    }
+    #chat-input:focus { outline: none; border-color: #2d6cd6; }
+
+    #doc-head { padding: 8px 12px; background: #12151c; border-bottom: 1px solid #262c38;
+                font-size: 12px; color: #98a1b3; display: flex; justify-content: space-between; align-items: center; }
+    #doc-panel {
+      flex: 1; overflow-y: auto; padding: 12px; font-family: ui-monospace, Consolas, monospace;
+      font-size: 12px; line-height: 1.55; white-space: pre-wrap; color: #b9c2d4;
+    }
+    #status-line { font-size: 11px; color: #7c8598; padding: 4px 12px; background: #12151c; }
+
+    @media (max-width: 800px) {
+      main { flex-direction: column; }
+      #left { border-right: none; border-bottom: 1px solid #262c38; }
+      #right { max-height: 30dvh; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>📜 Chitragupta Live</h1>
+    <span class="tag">world-doc tick system (v2)</span>
+    <a href="/">← classic UI</a>
+    <button id="reset-btn" title="Clear world doc + conversation">Reset</button>
+  </header>
+  <main>
+    <div class="col" id="left">
+      <div id="camera-wrap">
+        <video id="camera-video" autoplay playsinline muted style="display:none"></video>
+        <div id="camera-off">Camera off — start it to begin ticking.</div>
+      </div>
+      <div id="controls">
+        <button id="camera-btn">🎥 Start camera</button>
+        <button id="tick-btn" disabled>▶ Start ticks</button>
+        <label>every <input type="range" id="interval" min="2" max="15" value="4"><span id="interval-val">4s</span></label>
+        <label>sensitivity <input type="range" id="sensitivity" min="1" max="20" value="6"></label>
+        <label><input type="checkbox" id="show-captions"> show captions</label>
+      </div>
+      <div id="transcript"></div>
+      <div id="status-line">idle</div>
+      <div id="chat-row">
+        <input id="chat-input" type="text" placeholder="Talk to Chitragupta… (current frame auto-attached when camera is on)">
+        <button id="send-btn">Send</button>
+      </div>
+    </div>
+    <div class="col" id="right">
+      <div id="doc-head"><span>World document</span><button id="doc-refresh">↻</button></div>
+      <div id="doc-panel">(empty — it fills as the system observes and plans)</div>
+    </div>
+  </main>
+  <script src="/static/live.js"></script>
+</body>
+</html>

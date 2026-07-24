@@ -4,8 +4,11 @@ from . import VisionBackend
 from ..config import settings
 
 
-def get_backend() -> VisionBackend:
-    mode = settings.BACKEND_MODE
+def get_backend(mode: str | None = None) -> VisionBackend:
+    # `mode` override added for the live system (server/live), which picks
+    # its backend independently of BACKEND_MODE. Existing callers pass
+    # nothing and get the old behavior unchanged.
+    mode = mode or settings.BACKEND_MODE
 
     if mode == "colab":
         from .colab import ColabBackend

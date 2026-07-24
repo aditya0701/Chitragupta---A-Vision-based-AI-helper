@@ -619,6 +619,71 @@ Ties to the deferred `start_watch`-style idle-cost item below.
 
 ---
 
+## Parallel system: live tick world-doc architecture (`server/live/`, added 2026-07-16)
+
+A second, independent workflow running alongside the v1 agent — `/v2/*` API +
+`/live` UI page, separate persisted state (`server/data/live/worlddoc.json`),
+sharing only the backend classes and `Tool`/`ToolRegistry`. Nothing in
+`server/live/` is imported by the old system; the only v1-file changes were
+connectors (two `include_router` lines in `main.py`, an optional `mode` param
+on `get_backend()`, and a `/v2`+`/live` service-worker cache exclusion).
+
+**Design inversion vs. v1:** the world document is the primary state and
+speech is a side-effect of it. Ticks continuously update the doc; a
+zero-LLM-cost trigger engine decides when to wake the reasoning model.
+
+- **World doc** (`worlddoc.py`) — five sections: `tasks` (TodoWrite-style,
+  with the same alias/wipe-guard defenses as v1), `expectations`, durable
+  `environment` facts ("chili is on the top shelf"), compacted `narrative`
+  (time-span summaries), raw `recent` tick captions (bounded). Every entry
+  timestamped; the render header carries current wall-clock time so temporal
+  comparisons are readable arithmetic for the model (Qwen3-VL's
+  textual-timestamp lesson applied at system level). Section order is
+  stability-first to maximize DeepSeek prefix-cache hits across ticks.
+- **Expectations** — things that *should* happen. `anchor="time"` ones store
+  an absolute `due_ts` (restart-resilient, subsumes v1 timers) and are checked
+  by pure arithmetic; if the deadline passes unconfirmed they fire ("you
+  forgot the rice"). `anchor="event"` ones carry a `condition` the model
+  itself checks against each frame ("user heads to checkout") — they ride
+  along in the tick prompt, no separate machinery. Satisfying happens
+  silently via `resolve_expectation`; only unmet deadlines speak.
+- **Trigger engine** (`triggers.py`) — per tick/poll arithmetic: overdue
+  expectations + stale in-progress tasks (no mention in `STALENESS_S` →
+  unprompted "still on it?" check-in). Fired expectations are claimed
+  (status flipped) *before* any awaited call — same double-fire lesson as
+  `timers.mark_firing()`. A politeness budget (`MIN_UNPROMPTED_GAP_S`,
+  priority-aware) gates all unprompted speech so proactivity doesn't nag.
+- **Enriched vision stage** (`vision.py`) — tier-1 temporal grounding: the
+  previous tick's caption is passed back as text so the vision model
+  describes *change and motion* ("door now fills the frame — user
+  approaching"), plus action-verb/state-qualifier/consistent-place-words
+  rules and goal-conditioned fine detail (DeepStack analog: coarse gist
+  always, read labels only when a goal needs it).
+- **Compaction** (`compaction.py`) — when `recent` overflows, the oldest
+  batch is summarized (one cheap `think=False` call) into narrative with
+  time spans preserved + promoted environment facts; raw captions are then
+  dropped. The newest window is never compacted. Failure falls back to a
+  crude join — degraded, never silently lost.
+- **LiveAgent** (`agent.py`) — `tick()` (silence default, `[SILENT]`
+  protocol), `chat()` (never silent; doc is its memory — environment facts
+  answer "where is X"), `poll()` (free heartbeat; wakes the model only when
+  a trigger fired). One `asyncio.Lock` serializes all three. Native tool
+  calling only — no regex-parse fallback path in v2 (tools are disabled
+  with a warning on non-native backends).
+- **Backend** — `LIVE_BACKEND_MODE` env (default `hybrid`, i.e. Groq vision
+  + DeepSeek reasoning; `same` follows v1's `BACKEND_MODE`). The tick loop's
+  append-mostly doc is exactly what DeepSeek's prefix cache discounts.
+- **UI** (`static/live.html`/`live.js`, standalone) — camera + tick loop
+  with client-side perceptual diff gate and busy-buffering (latest pending
+  frame flushed when free), chat that auto-attaches the current frame when
+  the camera is on, live world-doc panel, 20s `/v2/poll` heartbeat.
+- **Verified** by a 27-check fake-backend smoke test (plan→tools, silent
+  tick housekeeping, tier-1 vision context, expectation fire/resolve,
+  politeness gate, compaction, free quiet poll, staleness check-in). Not
+  yet exercised against live Groq/DeepSeek traffic.
+
+---
+
 ## File structure (actual, as built)
 
 ```
@@ -635,6 +700,15 @@ Ties to the deferred `start_watch`-style idle-cost item below.
     │   │                        mark_firing() claim added 2026-07-13 to prevent double-fire)
     │   └── tasklist.py          Persisted task/recipe document (Claude Code TodoWrite-style;
     │                            per-item observations + add_observation() added 2026-07-13)
+    ├── live/                    Parallel tick-based world-doc system (see section above)
+    │   ├── config.py            LIVE_* env settings (backend mode, bounds, politeness)
+    │   ├── worlddoc.py          The world document — tasks/expectations/environment/narrative/recent
+    │   ├── triggers.py          Zero-cost arithmetic trigger engine + politeness budget
+    │   ├── tools.py             Live tool registry (set/resolve_expectation, mark_task, log_environment)
+    │   ├── vision.py            Enriched tick vision prompt (tier-1 previous-caption grounding)
+    │   ├── compaction.py        Span-preserving memory consolidation
+    │   ├── agent.py             LiveAgent — tick/chat/poll under one lock
+    │   └── routes.py            /v2/* API + /live page
     ├── backends/
     │   ├── __init__.py          VisionBackend ABC, VisionResponse, should_think() heuristic
     │   ├── groq_backend.py      Active backend
