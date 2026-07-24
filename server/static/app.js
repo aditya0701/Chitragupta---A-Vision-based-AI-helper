@@ -9,6 +9,36 @@ let isProcessing = false;
 // to scrape rendered HTML back out.
 let transcriptLog = [];
 
+// The same log doubles as a crash-safe cache: it's mirrored to localStorage on
+// every message so an accidental browser back/close/reload restores the visible
+// conversation instead of losing it. (The task list already survives via the
+// server-persisted /v1/tasks doc; this covers the chat side.) Capped so a long
+// session stays well under the ~5MB localStorage quota.
+const CONVERSATION_KEY = 'chitragupt-conversation-v1';
+const CONVERSATION_MAX = 200;
+
+function saveConversation() {
+  try {
+    localStorage.setItem(CONVERSATION_KEY, JSON.stringify(transcriptLog.slice(-CONVERSATION_MAX)));
+  } catch { /* quota/serialize issue — non-fatal, just don't persist this turn */ }
+}
+
+function restoreConversation() {
+  let saved;
+  try {
+    saved = JSON.parse(localStorage.getItem(CONVERSATION_KEY) || '[]');
+  } catch { return; }
+  if (!Array.isArray(saved) || saved.length === 0) return;
+  transcriptLog = saved;
+  saved.forEach((e) => renderMessage(e.role, e.text || '', { model: e.model, tool_calls: e.tool_calls }));
+  const container = document.getElementById('messages');
+  const note = document.createElement('div');
+  note.className = 'restore-note';
+  note.textContent = '↑ restored from your last session';
+  container.appendChild(note);
+  container.scrollTop = container.scrollHeight;
+}
+
 function logTranscript(role, text, extras) {
   transcriptLog.push({
     role,
@@ -18,6 +48,7 @@ function logTranscript(role, text, extras) {
     think_blocks: (extras && extras.think_blocks) || [],
     at: new Date().toISOString(),
   });
+  saveConversation();
 }
 
 function exportConversation() {
@@ -34,6 +65,16 @@ function exportConversation() {
     });
     lines.push('');
   });
+
+  // The wire log — every POST, the split-stage vision prompt/description, each
+  // tool_call_start/tool_result, and the final done event — captured in order.
+  // This is the "post and other stuff" that a plain transcript drops; it's what
+  // actually makes an exported report useful for debugging the pipeline.
+  if (debugLog.length) {
+    lines.push('## Pipeline / wire log', '', '```');
+    debugLog.forEach((d) => lines.push(`[${d.at}] ${d.kind ? d.kind.toUpperCase() + ' ' : ''}${d.text}`));
+    lines.push('```', '');
+  }
 
   const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
   const url = URL.createObjectURL(blob);
@@ -208,21 +249,28 @@ function flashCameraFrame() {
 // already watching, instead of a separate sidebar panel you have to look
 // away to check. Deliberately terse/monospace so it reads as a log line,
 // not a real message. `kind` picks a color: send | recv | silent | error | rate.
+const DEBUG_LOG_MAX = 400;
+let debugLog = []; // wire log mirrored for exportConversation (POST/vision/tool/done lines)
+
 function addDebugMessage(text, kind) {
+  const time = new Date().toLocaleTimeString([], { hour12: false });
+  debugLog.push({ text, kind, at: time });
+  if (debugLog.length > DEBUG_LOG_MAX) debugLog.shift();
   const container = document.getElementById('messages');
   const div = document.createElement('div');
   div.className = 'message debug' + (kind ? ' debug-' + kind : '');
-  const time = new Date().toLocaleTimeString([], { hour12: false });
   div.textContent = '[' + time + '] ' + text;
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
 }
 
-function addMessage(role, content, extras) {
+// DOM-only render, no logging — shared by addMessage (live) and
+// restoreConversation (replaying the cached log without double-logging it).
+function renderMessage(role, content, extras) {
   const container = document.getElementById('messages');
   const div = document.createElement('div');
   div.className = 'message ' + role;
-  let html = content.replace(/\n/g, '<br>');
+  let html = (content || '').replace(/\n/g, '<br>');
   if (extras && extras.model) {
     html += '<div class="model-tag">' + extras.model + '</div>';
   }
@@ -232,9 +280,13 @@ function addMessage(role, content, extras) {
     });
   }
   div.innerHTML = html;
-  logTranscript(role, content, extras);
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
+}
+
+function addMessage(role, content, extras) {
+  renderMessage(role, content, extras);
+  logTranscript(role, content, extras);
 }
 
 // Captures the current camera frame, if a stream is attached — works
@@ -520,6 +572,7 @@ async function resetConversation() {
   await fetch('/v1/reset', { method: 'POST' });
   document.getElementById('messages').innerHTML = '';
   transcriptLog = [];
+  try { localStorage.removeItem(CONVERSATION_KEY); } catch { /* ignore */ }
   addMessage('assistant', 'Conversation reset. How can I help you?', {});
   toggleSidebar(false);
 }
@@ -587,6 +640,7 @@ function updateLiveStats() {
 
 document.addEventListener('DOMContentLoaded', () => {
   loadLiveSettings();
+  restoreConversation(); // bring back the chat if the browser was closed/reloaded
   document.getElementById('interval-slider').addEventListener('input', () => { updateSettingsLabels(); saveLiveSettings(); restartLiveTimer(); });
   document.getElementById('threshold-slider').addEventListener('input', () => { updateSettingsLabels(); saveLiveSettings(); });
   startTimerPolling();

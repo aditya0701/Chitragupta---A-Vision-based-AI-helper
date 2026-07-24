@@ -209,19 +209,24 @@ class ChitraguptAgent:
             # spending a live per-frame reasoning call just to ask DeepSeek
             # what to look for, which would double the calls on every tick
             # for something it already told us via the task list.
-            active_goals = [
+            in_progress = [
                 i["content"] for i in (tasklist.get_document() or {}).get("items", [])
                 if i["status"] == "in_progress"
             ]
-            goal_aware = bool(active_goals)
-            if goal_aware:
-                goals_text = "; ".join(active_goals)
-                # Object-detection directive, not a scene description. The
-                # target is known (DeepSeek set it via request_live_search /
-                # update_task_list), so the vision stage's only job is to
-                # locate it — a strict, tiny output format keeps this cheap
-                # and keeps it off the TPM cap. Anything the model adds beyond
-                # the format is wasted tokens the reasoning stage must re-parse.
+            goal_aware = bool(in_progress)
+            # Only a "Find X" item (from request_live_search / start_find_task)
+            # is a visual SEARCH — those, and only those, become object-
+            # detection targets, with the "Find " prefix stripped to the bare
+            # object. Other in_progress items are cooking STEPS ("Soak the
+            # dal"), not things to locate; feeding a step to the detector as a
+            # target produced nonsense ("find: Soak urad and rajma dal").
+            find_targets = [c[5:].strip() for c in in_progress if c.lower().startswith("find ")]
+            if find_targets:
+                goals_text = "; ".join(find_targets)
+                # Object-detection directive, not a scene description. A strict,
+                # tiny output format keeps this cheap and off the TPM cap;
+                # anything beyond the format is wasted tokens the reasoning
+                # stage must re-parse.
                 vision_prompt = (
                     f"OBJECT DETECTION. Target(s) to find: {goals_text}.\n"
                     "Reply in EXACTLY one line, in one of these two forms and nothing else:\n"
@@ -229,11 +234,21 @@ class ChitraguptAgent:
                     "NOT FOUND: <a short phrase for what is in view instead>\n"
                     "No preamble, no full-scene description, no colours/layout detail."
                 )
+            elif in_progress:
+                # Active step(s) but nothing to visually search for — describe
+                # the frame as it relates to the current step so the reasoning
+                # stage sees relevant progress, without treating the step
+                # itself as a detection target.
+                steps_text = "; ".join(in_progress)
+                vision_prompt = (
+                    f"The user is working on: {steps_text}. In 1-2 short "
+                    "sentences, describe only what in this image is relevant to "
+                    "that (progress, state, or a problem). No colours/layout "
+                    "detail, no advice."
+                )
             else:
-                # No specific goal — a one-line gist is all the reasoning
-                # stage needs. Kept terse for the same TPM/latency reason as
-                # the detection directive above (was an exhaustive
-                # "describe everything in detail" paragraph).
+                # No active task — a one-line gist is all the reasoning stage
+                # needs. Terse for the same TPM/latency reason as above.
                 vision_prompt = (
                     "In 1-2 short sentences, state only the main objects and "
                     "what's happening in this image. No lists, no "
@@ -562,7 +577,23 @@ class ChitraguptAgent:
             r["tool"] == "log_observation" and r["arguments"].get("found")
             for r in tool_results
         )
-        if tool_results and (found_alert or any(self.tools.get(r["tool"]).needs_followup for r in tool_results)):
+        # A side-effect tool (update_task_list, start_timer) ran but the model
+        # wrote no visible text with it — on a direct user turn that leaves the
+        # user with a bare "⚡ Used tool" blob and no spoken reply (the "it made
+        # a task but never said anything back" bug). Treat it like a fresh tick:
+        # feed the tool confirmation back so the model produces a real spoken
+        # response about what it set up and what's next. Gated to non-live turns
+        # (a live tick updating the task list silently is expected and must stay
+        # silent) and only fires when the model actually went silent, so a turn
+        # where it already narrated the change costs nothing extra.
+        side_effect_silent = bool(
+            tool_results
+            and not is_live_frame
+            and not found_alert
+            and not any(self.tools.get(r["tool"]).needs_followup for r in tool_results)
+            and not self._strip_tool_blocks(clean_text).strip()
+        )
+        if tool_results and (found_alert or side_effect_silent or any(self.tools.get(r["tool"]).needs_followup for r in tool_results)):
             tool_context = "\n\n".join(
                 f"Tool '{r['tool']}' returned:\n{r['result']}" for r in tool_results
             )
@@ -580,6 +611,18 @@ class ChitraguptAgent:
                     "Tell them now, like a helpful friend who just spotted it for them — "
                     "warm and a little pleased, not a flat status report. Say what it is "
                     "and where it is, in one or two short spoken sentences."
+                )
+            elif side_effect_silent:
+                # The model set something up (task list / timer) but didn't say
+                # anything — prompt it to actually tell the user, out loud.
+                final_prompt = (
+                    f"You just did the following for the user (these are confirmations "
+                    f"that the action succeeded, not new information to look up):\n\n"
+                    f"{tool_context}\n\n"
+                    f"Original message: {prompt}\n"
+                    f"Scene context: {scene_description or 'N/A'}\n"
+                    "Now reply out loud in one or two short, natural sentences: tell them "
+                    "what you set up and what to do first. Don't recite the whole list back."
                 )
             else:
                 final_prompt = (
@@ -852,17 +895,40 @@ class ChitraguptAgent:
             r["tool"] == "log_observation" and r["arguments"].get("found")
             for r in tool_results
         )
-        if tool_results and any(self.tools.get(r["tool"]).needs_followup for r in tool_results):
+        # Same "side-effect tool ran but the model said nothing" recovery as
+        # the non-stream path (_process_locked): a typed turn that only calls
+        # update_task_list / start_timer and writes no visible text would
+        # otherwise show a bare tool blob with no spoken reply. Feed the
+        # confirmation back so the model actually tells the user what it set up.
+        # Only fires when the model went silent, so normal narrated turns cost
+        # nothing extra. (The stream path is never a live-frame tick.)
+        side_effect_silent = bool(
+            tool_results
+            and not found_alert
+            and not any(self.tools.get(r["tool"]).needs_followup for r in tool_results)
+            and not self._strip_tool_blocks(clean_text).strip()
+        )
+        if tool_results and (side_effect_silent or any(self.tools.get(r["tool"]).needs_followup for r in tool_results)):
             tool_context = "\n\n".join(
                 f"Tool '{r['tool']}' returned:\n{r['result']}" for r in tool_results
             )
-            final_prompt = (
-                f"I called tools to answer the user. Here are the results:\n\n"
-                f"{tool_context}\n\n"
-                f"Original question: {prompt}\n"
-                f"Scene context: N/A\n"
-                f"Please provide a final answer incorporating these results."
-            )
+            if side_effect_silent:
+                final_prompt = (
+                    f"You just did the following for the user (these are confirmations "
+                    f"that the action succeeded, not new information to look up):\n\n"
+                    f"{tool_context}\n\n"
+                    f"Original message: {prompt}\n"
+                    "Now reply out loud in one or two short, natural sentences: tell them "
+                    "what you set up and what to do first. Don't recite the whole list back."
+                )
+            else:
+                final_prompt = (
+                    f"I called tools to answer the user. Here are the results:\n\n"
+                    f"{tool_context}\n\n"
+                    f"Original question: {prompt}\n"
+                    f"Scene context: N/A\n"
+                    f"Please provide a final answer incorporating these results."
+                )
             final_response = await self.backend.chat(image_base64=None, prompt=final_prompt)
             self._record_debug_step(debug_steps, "tool-result follow-up (stream)", final_prompt, False, True, None, final_response)
             final_text = final_response.text
@@ -1002,11 +1068,17 @@ class ChitraguptAgent:
                 "substance together, or skip the placeholder and just say the "
                 "substance.\n\n"
                 "Tool-specific guidance:\n"
-                "- start_timer: use for any step that needs waiting (boiling, baking, "
-                "marinating, steeping). It runs in the background for free — don't wait "
-                "for it or ask about it again yourself; completion is announced to the "
-                "user automatically when it's done. Start it, then keep helping with "
-                "whatever's next.\n"
+                "- start_timer: for a step that needs an actual wait (boiling, baking, "
+                "marinating, steeping) — but ONLY once that step has genuinely STARTED. "
+                "That means the user has told you they've begun it (\"the eggs are on\", "
+                "\"I put it on the stove\", \"start the timer\") or you can clearly see it "
+                "has started in the camera. If they are only planning or saying what they "
+                "want to do next (\"I want to boil eggs\"), do NOT start a timer yet — "
+                "acknowledge, and ask them to tell you when they've actually started it "
+                "(or to say 'start the timer'). Never start one preemptively. Once "
+                "started it runs in the background for free — don't wait for it or ask "
+                "about it again yourself; completion is announced automatically. Then keep "
+                "helping with whatever's next.\n"
                 "- update_task_list: use whenever you're guiding a multi-step task (a "
                 "recipe, a shopping list, a project)."
                 + (

@@ -251,6 +251,55 @@ checks didn't catch:
   real number for this app's actual resolution/quality settings instead of
   guessing.
 
+### Real-cooking feedback batch (added 2026-07-24, from a full dal-makhani session)
+A real end-to-end cooking use (found/soaked the dal, added eggs+sausages,
+camera open/close worked well) surfaced a batch of usability fixes:
+
+- **Speak-after-task (silent task creation).** A typed turn where the model
+  called a side-effect tool (`update_task_list`/`start_timer`) but wrote no
+  visible text left the user with a bare "⚡ Used tool" blob and no spoken
+  reply — it "made a task but never said anything back." Fixed in both
+  `_process_locked` and `process_stream` with a `side_effect_silent` gate:
+  when the only tools were `needs_followup=False`, no found-alert, and the
+  model's visible text is empty after stripping tool blocks, do **one**
+  follow-up call (feeding the tool confirmations back) so the model actually
+  tells the user what it set up and what's next — treating it "like a fresh
+  tick," per the user's own suggestion. Only fires when the model went
+  silent, so a turn where it already narrated the change costs nothing
+  extra; gated to non-live turns (a live tick's silent task update must
+  stay silent). Verified with a 3-case test (silent→2 calls+text,
+  already-spoke→1 call, live-silent→1 call+empty).
+- **Debug `.md` export was missing the wire log.** The `addDebugMessage`
+  lines (every POST, the split-stage `[vision→Qwen]`/`[vision←Qwen]`
+  prompt+description, `tool_call_start`/`tool_result`, the final done
+  event) rendered inline but were never captured into `exportConversation`,
+  so an exported report dropped "the post and other stuff." Now mirrored
+  into a bounded `debugLog` array (`DEBUG_LOG_MAX=400`) and dumped as a
+  time-ordered `## Pipeline / wire log` code block at the end of the export.
+  Applied to both `app.js` and `debug.js` (the debug page's export already
+  had per-turn raw dumps; this adds the flat trace alongside).
+- **Crash-safe conversation cache mirrored to the debug UI.** The
+  localStorage conversation cache (`app.js`, added the prior pass — restores
+  the visible chat after an accidental browser back/close/reload; the task
+  list already survives server-side via `/v1/tasks`) is now also in
+  `debug.js` under its own key (`chitragupt-debug-conversation-v1`),
+  persisting a **slimmed** entry (role/text/model/tool_calls/think_blocks)
+  — the heavy raw-pipeline `debug` payload is deliberately *not* persisted
+  (base64, would blow the ~5MB quota), so a restored debug turn shows text +
+  tool calls but not its raw dump. Both UIs refactored `addMessage` into a
+  DOM-only `renderMessage` + `logTranscript` so restore can replay without
+  double-logging. SW `CACHE_NAME` bumped to `v13`.
+- **Also fixed earlier in this session** (message-19 batch): the
+  task-step-as-vision-target bug (only actual "Find X" goals drive object
+  detection now, "Find " prefix stripped) and premature-timer guidance
+  (only start a timer once the step has genuinely begun — user-confirmed or
+  camera-visible — never on a "I want to boil eggs" planning statement).
+- **Still open from this batch:** V2 camera-based stove/appliance detection
+  to proactively offer a timer ("I can see the eggs are on — want a
+  timer?") — a bigger event-condition-expectation feature in the v2 trigger
+  system, deferred to its own pass. Also still open: the streaming-blind
+  vision bug (DeepSeek `chat_stream` ignores `image_base64`).
+
 ### Silent live-tick pre-filter removed (fixed 2026-07-14, ninth pass, from a real end-to-end transcript)
 A live `request_live_search` test ("find raw rice") produced a transcript
 where a typed follow-up question hit Groq's TPM 429 (expected — see the

@@ -126,6 +126,41 @@ function renderDebugDump(container, requestObj, data) {
 // ─── Conversation export ────────────────────────────────────────────────────
 let transcriptLog = [];
 
+// Crash-safe cache (mirrors app.js): the visible conversation is persisted to
+// localStorage so an accidental browser close/reload restores it. The heavy
+// raw-pipeline `debug` payload (can carry base64) is deliberately NOT persisted
+// — it would blow the ~5MB quota fast — so a restored turn shows text + tool
+// calls but not its raw dump. Live wire log/raw dumps for the current session
+// are unaffected.
+const CONVERSATION_KEY = 'chitragupt-debug-conversation-v1';
+const CONVERSATION_MAX = 200;
+
+function saveConversation() {
+  try {
+    const slim = transcriptLog.slice(-CONVERSATION_MAX).map((e) => ({
+      role: e.role, text: e.text, model: e.model,
+      tool_calls: e.tool_calls, think_blocks: e.think_blocks, at: e.at,
+    }));
+    localStorage.setItem(CONVERSATION_KEY, JSON.stringify(slim));
+  } catch { /* quota/serialize issue — non-fatal */ }
+}
+
+function restoreConversation() {
+  let saved;
+  try {
+    saved = JSON.parse(localStorage.getItem(CONVERSATION_KEY) || '[]');
+  } catch { return; }
+  if (!Array.isArray(saved) || saved.length === 0) return;
+  transcriptLog = saved;
+  saved.forEach((e) => renderMessage(e.role, e.text || '', { model: e.model, tool_calls: e.tool_calls }));
+  const container = document.getElementById('messages');
+  const note = document.createElement('div');
+  note.className = 'restore-note';
+  note.textContent = '↑ restored from your last session (raw dumps not persisted)';
+  container.appendChild(note);
+  container.scrollTop = container.scrollHeight;
+}
+
 function logTranscript(role, text, extras) {
   transcriptLog.push({
     role,
@@ -136,6 +171,7 @@ function logTranscript(role, text, extras) {
     debug: (extras && extras.rawData && extras.rawData.debug) || null,
     at: new Date().toISOString(),
   });
+  saveConversation();
 }
 
 function exportConversation() {
@@ -155,6 +191,15 @@ function exportConversation() {
     }
     lines.push('');
   });
+
+  // The wire log in order — every POST, the split-stage vision prompt/desc,
+  // each tool_call_start/tool_result, and the final done event. Complements
+  // the per-turn raw debug dumps above with a flat, time-ordered trace.
+  if (debugLog.length) {
+    lines.push('## Pipeline / wire log', '', '```');
+    debugLog.forEach((d) => lines.push(`[${d.at}] ${d.kind ? d.kind.toUpperCase() + ' ' : ''}${d.text}`));
+    lines.push('```', '');
+  }
 
   const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
   const url = URL.createObjectURL(blob);
@@ -297,11 +342,16 @@ function flashCameraFrame() {
   setTimeout(() => preview.classList.remove('frame-flash'), 200);
 }
 
+const DEBUG_LOG_MAX = 400;
+let debugLog = []; // wire log mirrored for exportConversation (POST/vision/tool/done lines)
+
 function addDebugMessage(text, kind) {
+  const time = new Date().toLocaleTimeString([], { hour12: false });
+  debugLog.push({ text, kind, at: time });
+  if (debugLog.length > DEBUG_LOG_MAX) debugLog.shift();
   const container = document.getElementById('messages');
   const div = document.createElement('div');
   div.className = 'message debug' + (kind ? ' debug-' + kind : '');
-  const time = new Date().toLocaleTimeString([], { hour12: false });
   div.textContent = '[' + time + '] ' + text;
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
@@ -310,11 +360,15 @@ function addDebugMessage(text, kind) {
 // extras.rawData (the full response payload) + extras.requestObj (what was
 // POSTed) trigger a full raw dump under the bubble. Plain notices (mode
 // switches, resets) just omit those and render as a normal message.
-function addMessage(role, content, extras) {
+// DOM-only render, no logging — shared by addMessage (live) and
+// restoreConversation (replaying the cached log without double-logging it).
+// A restored turn passes no rawData, so it renders text + tool calls but not
+// the heavy raw-pipeline dump (which isn't persisted).
+function renderMessage(role, content, extras) {
   const container = document.getElementById('messages');
   const div = document.createElement('div');
   div.className = 'message ' + role;
-  let html = content.replace(/\n/g, '<br>');
+  let html = (content || '').replace(/\n/g, '<br>');
   if (extras && extras.model) {
     html += '<div class="model-tag">' + extras.model + '</div>';
   }
@@ -327,9 +381,13 @@ function addMessage(role, content, extras) {
   if (extras && extras.rawData) {
     renderDebugDump(div, extras.requestObj || {}, extras.rawData);
   }
-  logTranscript(role, content, extras);
   container.appendChild(div);
   container.scrollTop = container.scrollHeight;
+}
+
+function addMessage(role, content, extras) {
+  renderMessage(role, content, extras);
+  logTranscript(role, content, extras);
 }
 
 function captureCurrentFrame() {
@@ -596,6 +654,8 @@ async function resetConversation() {
   await fetch('/v1/reset', { method: 'POST' });
   document.getElementById('messages').innerHTML = '';
   transcriptLog = [];
+  debugLog = [];
+  try { localStorage.removeItem(CONVERSATION_KEY); } catch { /* ignore */ }
   addMessage('assistant', 'Conversation reset. How can I help you?', {});
 }
 
@@ -647,6 +707,7 @@ function updateLiveStats() {
 
 document.addEventListener('DOMContentLoaded', () => {
   loadLiveSettings();
+  restoreConversation(); // bring back the chat if the browser was closed/reloaded
   document.getElementById('interval-slider').addEventListener('input', () => { updateSettingsLabels(); saveLiveSettings(); restartLiveTimer(); });
   document.getElementById('threshold-slider').addEventListener('input', () => { updateSettingsLabels(); saveLiveSettings(); });
   startTimerPolling();

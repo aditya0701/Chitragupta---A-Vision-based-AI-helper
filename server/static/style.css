@@ -578,3 +578,6 @@ header .badge {
 .task-completed .task-content { color: #6a8a7a; text-decoration: line-through; }
 .task-skipped .task-icon { color: #a06060; }
 .task-skipped .task-content { color: #7a5a5a; text-decoration: line-through; }
+
+/* Divider shown when a session is restored from localStorage after reload */
+.restore-note { text-align: center; color: #555; font-size: 11px; font-style: italic; margin: 10px 0; }
