@@ -218,6 +218,23 @@ const MAX_FRAME_DIM = 1024;
 // live judgments don't need 1024px; ~640 sends far less image per frame.
 const LIVE_FRAME_DIM = 640;
 
+// Mirrors app.js. Live ticks switch to full resolution when the server reports
+// frame_detail='fine' (an in-progress step asked for a close look — a label, a
+// price, a model number). The choice has to be made before capture: resolution
+// discarded in the browser cannot be recovered server-side afterwards.
+let liveFrameDetail = 'coarse';
+
+function applyFrameDetail(data) {
+  if (data && data.frame_detail && data.frame_detail !== liveFrameDetail) {
+    liveFrameDetail = data.frame_detail;
+    addDebugMessage(
+      '🔍 frame detail → ' + liveFrameDetail +
+      ' (live ticks now ' + (liveFrameDetail === 'fine' ? MAX_FRAME_DIM : LIVE_FRAME_DIM) + 'px)',
+      'recv',
+    );
+  }
+}
+
 function scaledDims(w, h, maxDim) {
   const scale = Math.min(1, maxDim / Math.max(w, h));
   return { width: w * scale, height: h * scale };
@@ -622,6 +639,7 @@ async function runStreamedTurn(prompt, imageBase64, isCameraFollowup) {
 
   if (finalData) {
     live.finalize(finalData, requestObj);
+    applyFrameDetail(finalData);
     addDebugMessage(
       '← done  provider=' + finalData.provider + ' model=' + finalData.model +
       '  tool_calls=[' + (finalData.tool_calls || []).map(t => t.tool).join(',') + ']' +
@@ -993,7 +1011,7 @@ async function sendLiveFrame(video) {
   const typedPrompt = input.value.trim();
   // Autonomous ticks get the tighter LIVE_FRAME_DIM; a typed question riding
   // along keeps full resolution (mirrors app.js).
-  const frameDim = typedPrompt ? MAX_FRAME_DIM : LIVE_FRAME_DIM;
+  const frameDim = (typedPrompt || liveFrameDetail === 'fine') ? MAX_FRAME_DIM : LIVE_FRAME_DIM;
   const canvas = document.getElementById('capture-canvas');
   const { width, height } = scaledDims(video.videoWidth, video.videoHeight, frameDim);
   canvas.width = width;
@@ -1025,6 +1043,7 @@ async function sendLiveFrame(video) {
       }),
     });
     const data = await resp.json();
+    applyFrameDetail(data);
 
     if (data.vision_prompt || data.scene_description) {
       addDebugMessage('  [vision→Qwen] asked: "' + (data.vision_prompt || '') + '"', 'send');

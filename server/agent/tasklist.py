@@ -22,6 +22,13 @@ DOCUMENT_FILE = Path(__file__).parent.parent / "data" / "document.json"
 
 VALID_STATUSES = {"pending", "in_progress", "completed", "skipped"}
 
+# How closely the vision stage has to look. "coarse" is the 640px live-tick
+# default — fine for "is the thing there / what is happening". "fine" sends the
+# frame at full resolution and lets the vision model read text, which is the
+# only way label reading works: you cannot recover detail from a frame that was
+# already downscaled before it left the browser.
+VALID_DETAIL = {"coarse", "fine"}
+
 
 def get_document() -> Optional[dict]:
     if not DOCUMENT_FILE.exists():
@@ -76,6 +83,14 @@ def set_document(title: str, items: list[dict]) -> dict:
             "watch_for": (item.get("watch_for") or "").strip()
             or (existing_item or {}).get("watch_for")
             or None,
+            # How closely the camera has to look for this step. "fine" costs
+            # roughly 2.5x the image tokens of "coarse" (full resolution vs the
+            # 640px live-tick cap), so it is opt-in and scoped to one item —
+            # when the step stops being in_progress the cost stops with it.
+            # See agent.py's vision stage and app.js's capture sizing.
+            "detail": (item.get("detail") or "").strip().lower()
+            if (item.get("detail") or "").strip().lower() in VALID_DETAIL
+            else (existing_item or {}).get("detail") or None,
         })
 
     if items and not normalized and existing.get("items"):
@@ -147,6 +162,23 @@ def start_find_task(target: str) -> dict:
 MAX_OBSERVATIONS_PER_ITEM = 5
 
 FIND_GOAL_PREFIX = "find "
+
+
+def active_detail() -> str:
+    """The detail level the camera should be capturing at right now.
+
+    "fine" if any in-progress item asked for it, else "coarse". Read by the
+    vision stage and echoed to the client, which sizes its next capture from
+    it — the resolution decision has to reach the browser, because a frame
+    downscaled before upload can never be inspected closely afterwards.
+    """
+    document = get_document()
+    if not document:
+        return "coarse"
+    for item in document.get("items", []):
+        if item.get("status") == "in_progress" and item.get("detail") == "fine":
+            return "fine"
+    return "coarse"
 
 
 def is_find_goal_content(content: str) -> bool:
@@ -265,7 +297,8 @@ def render_summary(document: Optional[dict], lean: bool = False, observations: b
         # finished item it isn't driving anything, and would just be prompt
         # bulk on every future turn.
         if item["status"] == "in_progress" and item.get("watch_for"):
-            lines.append(f"    watching for: {item['watch_for']}")
+            close = " (close-up)" if item.get("detail") == "fine" else ""
+            lines.append(f"    watching for{close}: {item['watch_for']}")
         if not observations or (lean and item["status"] in ("completed", "skipped")):
             continue
         for obs in item.get("observations", []):

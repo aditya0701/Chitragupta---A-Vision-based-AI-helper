@@ -73,7 +73,7 @@ Both under `server/data/` — gitignored, survives restarts **by design**.
 | File | Module | What |
 |---|---|---|
 | `timers.json` | `agent/timers.py` | Wall-clock `start_time + duration`, not `asyncio.sleep` — survives a Render restart. Due-checks are pure arithmetic, zero LLM cost. |
-| `document.json` | `agent/tasklist.py` | The task list. TodoWrite-style **full-list replace**. Items carry `status`, `note`, `observations[]`, `watch_for`. |
+| `document.json` | `agent/tasklist.py` | The task list. TodoWrite-style **full-list replace**. Items carry `status`, `note`, `observations[]`, `watch_for`, `detail`. |
 
 Both are injected into every reasoning prompt (`[Timers]`, `[Task list]`), so the
 model acts on them without being reminded.
@@ -87,7 +87,8 @@ model acts on them without being reminded.
   "status": "in_progress",                      // pending|in_progress|completed|skipped
   "note": "used tofu instead of paneer",        // substitutions
   "observations": ["..."],                      // max 5, oldest dropped
-  "watch_for": "Read the ingredient list and list any of: beef, gelatin, lard."
+  "watch_for": "Read the ingredient list and list any of: beef, gelatin, lard.",
+  "detail": "fine"                              // coarse (default) | fine
 }
 ```
 
@@ -95,6 +96,12 @@ model acts on them without being reminded.
 see the camera; a separate model looks on its behalf and reports only what it was
 asked for. Briefs must request **observations, not judgement** — the reasoning
 model supplies the critique. See `DECISIONS.md` §6.3.
+
+**`detail`** is how closely the camera must look. `fine` sends the frame at full
+resolution and lets the vision model read text — the only way label reading
+works, since resolution discarded in the browser can't be recovered later. It
+costs ~2.5x per frame, so it's opt-in and scoped to one in-progress item: when
+the step finishes, the cost stops. See `DECISIONS.md` §6.5.
 
 ---
 
@@ -104,7 +111,9 @@ Camera samples on an interval with a **client-side perceptual diff gate** — if
 scene hasn't meaningfully changed, no request leaves the browser. That gate is the
 main cost control.
 
-- Silent ticks: `LIVE_FRAME_DIM = 640`. Typed question riding along: `MAX_FRAME_DIM = 1024`.
+- Silent ticks: `LIVE_FRAME_DIM = 640`. Typed question riding along, or an active
+  `detail: "fine"` step: `MAX_FRAME_DIM = 1024`. The server echoes `frame_detail`
+  on every response and the client sizes its **next** capture from it.
 - A tick firing mid-request is buffered (`pendingLiveFrame`), not dropped.
 - **Silence protocol** — on a live tick with an active goal, if nothing is new the
   entire reply must be exactly `[SILENT]`, stripped server-side. Direct user turns
@@ -112,7 +121,7 @@ main cost control.
 - `log_observation` runs on every relevant tick — text facts accumulate so "where
   is X" can be answered from history, not just the current frame.
 
-Full step-by-step pipeline: `DECISIONS.md` §6.4.
+Full step-by-step pipeline: `DECISIONS.md` §6.5.
 
 ---
 
@@ -122,7 +131,7 @@ Each of these cost a real debugging session. Details in `DECISIONS.md`.
 
 | Rule | Why |
 |---|---|
-| **Bump `CACHE_NAME` in `sw.js`** whenever `index.html`/`app.js`/`style.css` change | Cache-first SW otherwise serves a stale shell forever. Currently `v16`. §8.1 |
+| **Bump `CACHE_NAME` in `sw.js`** whenever `index.html`/`app.js`/`style.css` change | Cache-first SW otherwise serves a stale shell forever. Currently `v17`. §8.1 |
 | **Mirror changes across `_process_locked` and `_process_stream_locked`** | They duplicate tool availability, recovery and response shape. A fix in one is a bug in the other. §5.2 |
 | **Mirror `app.js` ↔ `debug.js`** | Camera and frame logic exist in both. §8.2 |
 | **One flag, one consequence** | `found` drove three unrelated outcomes and broke the camera. §4.4 |
@@ -204,13 +213,14 @@ Working and exercised in real sessions: the hybrid pipeline, native tool calling
 timers, task tracking, live watching with silence, voice in (Web Speech
 `SpeechRecognition`) and out (`speechSynthesis`), PWA install.
 
-Recent work (see `git log`): the `found`/`alert` split, `watch_for`, the
-`request_camera` double-fire fix, camera-ready frame capture, live-tick resolution
-cut, generalisation away from cooking-only wording, and `cancel_timer`.
+Recent work (see `git log`): the `found`/`alert` split, `watch_for` + the
+coarse/fine detail tier, running the vision stage on the streaming path (it never
+did — images on typed turns were silently discarded), the `request_camera`
+double-fire fix, camera-ready frame capture, generalisation away from
+cooking-only wording, and `cancel_timer`.
 
-**Next up, in order:** resolution tiers + a fine-detail inspection tool (needed
-before shopping/label reading is usable), then adaptive poll backoff. Full list
-with rationale: `DECISIONS.md` §10.
+**Next up, in order:** adaptive poll backoff, then attaching the live frame
+directly in `sendMessage`. Full list with rationale: `DECISIONS.md` §10.
 
 There is no automated test suite — verification is ad-hoc harnesses plus reading
 exported session wire logs. `DECISIONS.md` "Testing notes" explains why the wire

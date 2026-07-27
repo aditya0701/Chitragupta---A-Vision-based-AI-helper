@@ -286,6 +286,7 @@ class ChitraguptAgent:
                     "scene_unchanged": True,
                     "scene_description": scene_description,
                     "vision_prompt": vision_prompt,
+                    "frame_detail": tasklist.active_detail(),
                     "debug": {"steps": debug_steps},
                 }
 
@@ -523,6 +524,7 @@ class ChitraguptAgent:
                 "think_blocks": think_blocks,
                 "scene_description": scene_description,
                 "vision_prompt": vision_prompt,
+                "frame_detail": tasklist.active_detail(),
                 "needs_camera": True,
                 "debug": {"steps": debug_steps},
             }
@@ -548,6 +550,7 @@ class ChitraguptAgent:
                 "think_blocks": think_blocks,
                 "scene_description": scene_description,
                 "vision_prompt": vision_prompt,
+                "frame_detail": tasklist.active_detail(),
                 "needs_live_search": True,
                 "search_target": target,
                 "debug": {"steps": debug_steps},
@@ -694,6 +697,7 @@ class ChitraguptAgent:
             "think_blocks": think_blocks,
             "scene_description": scene_description,
             "vision_prompt": vision_prompt,
+            "frame_detail": tasklist.active_detail(),
             # Tells the client it's safe (encouraged, even) to auto-stop Live
             # Watch and close the camera — the find-goal that started this
             # session of continuous polling just got marked "completed" in
@@ -793,6 +797,7 @@ class ChitraguptAgent:
             yield {
                 "type": "vision",
                 "vision_prompt": vision_prompt,
+                "frame_detail": tasklist.active_detail(),
                 "scene_description": scene_description,
             }
 
@@ -910,6 +915,7 @@ class ChitraguptAgent:
                     "think_blocks": think_blocks,
                     "scene_description": scene_description,
                     "vision_prompt": vision_prompt,
+                    "frame_detail": tasklist.active_detail(),
                     "needs_camera": True,
                     "debug": {"steps": debug_steps},
                 },
@@ -931,6 +937,7 @@ class ChitraguptAgent:
                     "think_blocks": think_blocks,
                     "scene_description": scene_description,
                     "vision_prompt": vision_prompt,
+                    "frame_detail": tasklist.active_detail(),
                     "needs_live_search": True,
                     "search_target": target,
                     "debug": {"steps": debug_steps},
@@ -1029,6 +1036,7 @@ class ChitraguptAgent:
                 "think_blocks": think_blocks,
                 "scene_description": scene_description,
                 "vision_prompt": vision_prompt,
+                "frame_detail": tasklist.active_detail(),
                 "goal_complete": goal_complete,
                 "debug": {"steps": debug_steps, "timer_completions": timer_update["completed"]},
             },
@@ -1118,6 +1126,13 @@ class ChitraguptAgent:
         ]
         in_progress = [i["content"] for i in in_progress_items]
         goal_aware = bool(in_progress)
+        # Only meaningful alongside a watch_for brief: "look closely" is not an
+        # instruction on its own, it's a modifier on what you were asked to look
+        # at. The client sizes its capture from the same value (echoed back as
+        # frame_detail), so by the time a fine frame arrives here it really is
+        # full resolution.
+        detail = tasklist.active_detail()
+        vision_max_tokens = 160
         # The reasoning model's own brief to the vision stage, when it
         # wrote one (update_task_list's watch_for). Preferred over every
         # inference below, because those are guesses at intent from item
@@ -1182,6 +1197,25 @@ class ChitraguptAgent:
                 "give advice; that is the assistant's job, not yours.\n\n"
                 + "\n".join(f"- {b}" for b in watch_briefs)
             )
+            if detail == "fine":
+                # The default wrapper's "no full-scene description, four
+                # sentences" framing actively suppresses the thing a close look
+                # is for. Reading a label means transcribing more text than a
+                # gist ever needs, so both the instruction and the token budget
+                # have to change with the resolution — a full-res frame whose
+                # answer is still capped at a terse gist buys nothing.
+                vision_prompt += (
+                    "\n\nThis is a CLOSE-UP request and the frame is full "
+                    "resolution. Read any text that bears on the question — "
+                    "ingredients, labels, prices, sizes, model numbers, dial "
+                    "markings — and quote it exactly rather than summarising. "
+                    "Colour and small visual differences matter here, so "
+                    "describe them when they distinguish one thing from "
+                    "another. Report exactly what you can make out; where the "
+                    "text is too small or blurred to read, say which part you "
+                    "could not read instead of guessing at it."
+                )
+                vision_max_tokens = 500
         elif find_targets:
             goals_text = "; ".join(find_targets)
             # Object-detection directive, not a scene description. A strict,
@@ -1218,6 +1252,7 @@ class ChitraguptAgent:
         scene_description = await self.backend.vision(
             image_base64=image_base64,
             prompt=vision_prompt,
+            max_tokens=vision_max_tokens,
         )
         # Recorded separately from _record_debug_step (whose shape
         # assumes a VisionResponse) since this stage only returns a
@@ -1227,7 +1262,9 @@ class ChitraguptAgent:
         # image itself rather than a separate vision model (Groq/qwen)
         # having described it first.
         debug_steps.append({
-            "label": "vision" + (" (goal-aware)" if goal_aware else ""),
+            "label": "vision"
+            + (" (goal-aware)" if goal_aware else "")
+            + (" [close-up]" if detail == "fine" else ""),
             "prompt_sent": vision_prompt,
             "has_image": True,
             "think": False,

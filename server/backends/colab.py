@@ -52,6 +52,7 @@ class ColabBackend(VisionBackend):
         self,
         image_base64: str,
         prompt: str = VISION_SYSTEM,
+        max_tokens: int = 160,
     ) -> str:
         """Send image to qwen3-vl:8b and return a text description."""
         payload = {
@@ -64,7 +65,7 @@ class ColabBackend(VisionBackend):
                 }
             ],
             "stream": False,
-            "options": {"temperature": 0.2, "num_predict": 512},
+            "options": {"temperature": 0.2, "num_predict": max(512, max_tokens)},
         }
 
         async with httpx.AsyncClient(timeout=300.0) as client:

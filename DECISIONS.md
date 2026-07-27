@@ -349,7 +349,42 @@ the task list, not a per-tick round trip asking what to look for.
 An unbriefed find-goal is appended to a briefed request, or it would silently stop
 being searched the moment another step got a brief.
 
-### 6.4 Pipeline, end to end
+### 6.4 Detail tiers — the decision has to happen before capture
+
+640px is fine for "is the thing there / what is happening" and useless for
+reading a label. But raising resolution alone would not have worked: the vision
+wrapper explicitly said *"no full-scene description, four sentences"* and ran at
+`max_tokens=160`, so a full-res frame still came back as a terse gist.
+
+The binding constraint is that **resolution discarded in the browser can never be
+recovered server-side**. So the level cannot be chosen when the model realises it
+needs detail — by then the frame is already 640px. It has to be chosen *before
+capture*, which means the decision must reach the client.
+
+Task items carry `detail: "coarse" | "fine"`. When any in-progress item asks for
+`fine`:
+
+- the server echoes `frame_detail` on **every** response;
+- the client sizes its **next** capture at `MAX_FRAME_DIM` instead of `LIVE_FRAME_DIM`;
+- the vision wrapper gains a close-up instruction — read text, quote exactly,
+  say which part was unreadable rather than guessing — and `max_tokens` goes
+  160 → 500.
+
+All three have to move together. Full-res pixels with a gist prompt and a 160-token
+cap buys nothing.
+
+**Cost is bounded by scope, not by a counter.** `fine` costs roughly 2.5x per
+frame, and it is tied to one `in_progress` item — completing the step ends the
+cost. A `pending` item asking for `fine` deliberately does *not* raise it, or
+planning a close look later would make every frame expensive now.
+
+**Not built:** a one-shot `inspect_detail(question)` tool for "look closely right
+now" without a standing goal. It needs a `request_camera`-style round trip using a
+full-res frame retained client-side, since the tick frame in hand is already
+downscaled. The standing-brief route covers the continuous case (shopping,
+inspection) and needs no new round trip, so it went first.
+
+### 6.5 Pipeline, end to end
 
 1. `startCameraStream()` — `getUserMedia`, waits for a decoded frame.
 2. `startLive()` — `setInterval(sampleLiveFrame, …)`, 2–15s (default 4s).
@@ -507,18 +542,17 @@ Ordered by how much they hurt in real use.
 
 | # | Item | Notes |
 |---|---|---|
-| 1 | **Resolution tiers + fine-detail tool** | 640px can't read labels; the vision prompt forbids that detail anyway. Needs client-side plumbing: keep the full-res frame locally, upload only when asked. Split `detect_object` (coarse) from `inspect_detail` (full res). **Guard the cost** — it's the most expensive call. |
-| 2 | **Adaptive poll backoff** | Fixed 4s tick regardless of context. Nothing throttles a 20-minute simmer. Bound below Render's idle timeout. |
-| 3 | **The diff gate dies while walking** | Every frame differs, so it skips nothing. Shopping would burn TPD far faster than cooking. The cost model assumes a static scene. |
-| 4 | **Vision flip-flops** | Stale/contradictory frame descriptions surfaced as confident claims. A grounding problem, not a wiring bug. |
-| 5 | **Context loss** | ~3-turn amnesia observed. Unverified against code — could be history truncation or task-list crowding. |
-| 6 | **Attach the live frame in `sendMessage`** | §5.3. Removes the whole `request_camera` dance from the common case. |
-| 7 | **Streaming-blind vision** | DeepSeek `chat_stream` ignores `image_base64`. |
-| 8 | **Compound-item completion** | "Gather Ingredients" can be marked done from partial visual evidence. Needs sub-items. |
-| 9 | **No pruning of completed items' observations** | Grows unboundedly across a long session. |
-| 10 | **Render keep-alive pinger** | Only matters for unattended timers >15 min. |
-| 11 | **Multi-timer UI progress** | `active` is already returned by `/v1/timers/check`, just unrendered. |
-| 12 | **Egocentric fine-tuning** | Long-term. Identify real failure cases on real footage *first*, then fine-tune on those patterns only. Ego4D / Egocentric-1M / EPIC-Kitchens. |
+| 1 | **Adaptive poll backoff** | Fixed 4s tick regardless of context. Nothing throttles a 20-minute simmer. Bound below Render's idle timeout. |
+| 2 | **The diff gate dies while walking** | Every frame differs, so it skips nothing. Shopping would burn TPD far faster than cooking. The cost model assumes a static scene. |
+| 3 | **Vision flip-flops** | Stale/contradictory frame descriptions surfaced as confident claims. A grounding problem, not a wiring bug. |
+| 4 | **Context loss** | ~3-turn amnesia observed. Unverified against code — could be history truncation or task-list crowding. |
+| 5 | **Attach the live frame in `sendMessage`** | §5.3. Removes the whole `request_camera` dance from the common case. |
+| 6 | **One-shot `inspect_detail`** | Close look with no standing goal. Needs a client-retained full-res frame + a round trip. §6.4. |
+| 7 | **Compound-item completion** | "Gather Ingredients" can be marked done from partial visual evidence. Needs sub-items. |
+| 8 | **No pruning of completed items' observations** | Grows unboundedly across a long session. |
+| 9 | **Render keep-alive pinger** | Only matters for unattended timers >15 min. |
+| 10 | **Multi-timer UI progress** | `active` is already returned by `/v1/timers/check`, just unrendered. |
+| 11 | **Egocentric fine-tuning** | Long-term. Identify real failure cases on real footage *first*, then fine-tune on those patterns only. Ego4D / Egocentric-1M / EPIC-Kitchens. |
 
 ---
 

@@ -78,6 +78,7 @@ class GeminiBackend(VisionBackend):
         self,
         image_base64: str,
         prompt: str = VISION_SYSTEM,
+        max_tokens: int = 160,
     ) -> str:
         """Send image to Gemini and return a text description.
 

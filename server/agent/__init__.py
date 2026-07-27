@@ -338,6 +338,22 @@ def build_default_tools() -> ToolRegistry:
                                 "changes."
                             ),
                         },
+                        "detail": {
+                            "type": "string",
+                            "enum": ["coarse", "fine"],
+                            "description": (
+                                "How closely the camera must look for this step. Default 'coarse' — "
+                                "enough to tell what something is, where it is, and what is "
+                                "happening. Use 'fine' ONLY when the answer depends on small print "
+                                "or small differences the camera would otherwise miss: reading an "
+                                "ingredient list, a label, a price, a model or serial number, a "
+                                "measurement on a dial, or telling near-identical items apart. "
+                                "'fine' sends the camera at full resolution and costs several times "
+                                "more per frame, so set it back to 'coarse' (or complete the step) "
+                                "once the close look is done — don't leave it on for a whole "
+                                "session."
+                            ),
+                        },
                     },
                     "required": ["content", "status"],
                 },

@@ -98,9 +98,30 @@ const MAX_FRAME_DIM = 1024;
 // of a vision call). A gist / "where's the X" / "is the pan on" judgment does
 // not need 1024px, so live ticks send ~640px: roughly 2.5x less image area,
 // hence ~2.5x more frames per day before hitting the cap, with no meaningful
-// loss for scene-level understanding. Bump back toward 1024 if fine detail on
-// live frames ever matters more than daily frame budget.
+// loss for scene-level understanding.
 const LIVE_FRAME_DIM = 640;
+
+// Which of the two caps live ticks currently use, driven by the server's
+// `frame_detail` (from whichever task-list item is in progress asking for a
+// close look — reading a label, a price, a model number).
+//
+// The decision has to happen HERE, before capture, and that is the whole point:
+// resolution thrown away in the browser can never be recovered server-side, so
+// a 640px frame simply cannot be inspected closely later no matter what the
+// model asks for afterwards. The server tells us what the next frame needs to
+// be; we size it accordingly.
+let liveFrameDetail = 'coarse';
+
+function applyFrameDetail(data) {
+  if (data && data.frame_detail && data.frame_detail !== liveFrameDetail) {
+    liveFrameDetail = data.frame_detail;
+    addDebugMessage(
+      '🔍 frame detail → ' + liveFrameDetail +
+      ' (live ticks now ' + (liveFrameDetail === 'fine' ? MAX_FRAME_DIM : LIVE_FRAME_DIM) + 'px)',
+      'recv',
+    );
+  }
+}
 
 function scaledDims(w, h, maxDim) {
   const scale = Math.min(1, maxDim / Math.max(w, h));
@@ -544,6 +565,7 @@ async function runStreamedTurn(prompt, imageBase64, isCameraFollowup) {
 
   if (finalData) {
     live.finalize(finalData);
+    applyFrameDetail(finalData);
     if (finalData.vision_prompt || finalData.scene_description) {
       addDebugMessage('  [vision→Qwen] asked: "' + (finalData.vision_prompt || '') + '"', 'send');
       addDebugMessage('  [vision←Qwen] said: "' + (finalData.scene_description || '') + '"', 'recv');
@@ -981,10 +1003,13 @@ async function sendLiveFrame(video) {
   liveSending = true;
   const input = document.getElementById('prompt-input');
   const typedPrompt = input.value.trim();
+  // Autonomous ticks (no typed prompt) get the tighter LIVE_FRAME_DIM cap —
+  // unless the active step asked for a close look, in which case they need the
+  // full resolution too, since that IS the point of asking.
   // Autonomous ticks (no typed prompt) get the tighter LIVE_FRAME_DIM cap;
   // a typed question riding along with the frame is a real user turn where
   // detail can matter, so it keeps the full MAX_FRAME_DIM.
-  const frameDim = typedPrompt ? MAX_FRAME_DIM : LIVE_FRAME_DIM;
+  const frameDim = (typedPrompt || liveFrameDetail === 'fine') ? MAX_FRAME_DIM : LIVE_FRAME_DIM;
   const canvas = document.getElementById('capture-canvas');
   const { width, height } = scaledDims(video.videoWidth, video.videoHeight, frameDim);
   canvas.width = width;
@@ -1020,6 +1045,7 @@ async function sendLiveFrame(video) {
       }),
     });
     const data = await resp.json();
+    applyFrameDetail(data);
     // The Groq vision-only stage (hybrid backend) never reaches the client
     // as its own network call — it happens inside this single request,
     // server-side — so this is the only place its instruction/output are

@@ -89,6 +89,7 @@ class VisionBackend(ABC):
         self,
         image_base64: str,
         prompt: str = "Describe everything visible in this image in detail. Include: objects, people, actions, text, colours, spatial layout, and anything that might matter for helping someone understand this scene. Be factual and specific.",
+        max_tokens: int = 160,
     ) -> str:
         """Stage 1: Describe an image. Returns a text description.
 
