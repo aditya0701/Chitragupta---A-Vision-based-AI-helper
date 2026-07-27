@@ -133,9 +133,9 @@ Each of these cost a real debugging session. Details in `DECISIONS.md`.
 
 | Rule | Why |
 |---|---|
-| **Bump `CACHE_NAME` in `sw.js`** whenever `index.html`/`app.js`/`style.css` change | Cache-first SW otherwise serves a stale shell forever. Currently `v17`. §8.1 |
+| **Bump `CACHE_NAME` in `sw.js`** whenever `index.html`/`app.js`/`style.css` change | Cache-first SW otherwise serves a stale shell forever. Currently `v18`. §8.1 |
 | **Mirror changes across `_process_locked` and `_process_stream_locked`** | They duplicate tool availability, recovery and response shape. A fix in one is a bug in the other. §5.2 |
-| **Mirror `app.js` ↔ `debug.js`** | Camera and frame logic exist in both. §8.2 |
+| **Mirror `app.js` ↔ `debug.js`** | Camera, frame and vision-log logic exist in both. §8.3 |
 | **One flag, one consequence** | `found` drove three unrelated outcomes and broke the camera. §4.4 |
 | **Never add a pre-filter whose "no" looks like silence** | Cost a whole class of silently dropped frames. §6.2 |
 | **Don't add `check`/`start`/`look`/`find` to `_ACTION_CUE_RE`** | They appear inside the non-answers it exists to catch. §7.2 |
@@ -225,5 +225,7 @@ cooking-only wording, and `cancel_timer`.
 directly in `sendMessage`. Full list with rationale: `DECISIONS.md` §10.
 
 There is no automated test suite — verification is ad-hoc harnesses plus reading
-exported session wire logs. `DECISIONS.md` "Testing notes" explains why the wire
+exported sessions. An export now carries every Qwen prompt and answer, silent
+ticks included (`DECISIONS.md` §8.2), which is the highest-value artifact for
+judging a real run. `DECISIONS.md` "Testing notes" explains why the wire
 log is the highest-value artifact.

@@ -17,13 +17,30 @@ let transcriptLog = [];
 const CONVERSATION_KEY = 'chitragupt-conversation-v1';
 const CONVERSATION_MAX = 200;
 
+// Vision entries are persisted separately and far more shallowly than they are
+// held in memory: a full 600 of them is over a megabyte of prompt text, which
+// would crowd out the conversation itself. The export uses the in-memory log;
+// this is only so a reload mid-session doesn't lose the recent ones entirely.
+const VISION_KEY = 'chitragupt-vision-v1';
+const VISION_PERSIST_MAX = 60;
+
 function saveConversation() {
   try {
     localStorage.setItem(CONVERSATION_KEY, JSON.stringify(transcriptLog.slice(-CONVERSATION_MAX)));
   } catch { /* quota/serialize issue — non-fatal, just don't persist this turn */ }
+  // Its own try/catch: a vision log big enough to blow the quota must not stop
+  // the conversation itself from being saved.
+  try {
+    localStorage.setItem(VISION_KEY, JSON.stringify(visionLog.slice(-VISION_PERSIST_MAX)));
+  } catch { /* same — best effort */ }
 }
 
 function restoreConversation() {
+  try {
+    const v = JSON.parse(localStorage.getItem(VISION_KEY) || '[]');
+    if (Array.isArray(v)) visionLog = v;
+  } catch { /* ignore — a lost vision log must not block the chat restore */ }
+
   let saved;
   try {
     saved = JSON.parse(localStorage.getItem(CONVERSATION_KEY) || '[]');
@@ -46,9 +63,39 @@ function logTranscript(role, text, extras) {
     model: extras && extras.model,
     tool_calls: (extras && extras.tool_calls) || [],
     think_blocks: (extras && extras.think_blocks) || [],
+    vision_prompt: (extras && extras.vision_prompt) || null,
+    scene_description: (extras && extras.scene_description) || null,
     at: new Date().toISOString(),
   });
   saveConversation();
+}
+
+// Every vision round trip, including the ones no turn ever renders.
+//
+// This exists because the split-stage call is invisible three times over: it
+// never leaves the server as its own request, most live ticks answer [SILENT]
+// so no message is logged for them at all, and the wire log that did carry it
+// is capped at DEBUG_LOG_MAX and rolls off — which is exactly why a real
+// context-loss incident could not be diagnosed afterwards. What Qwen was asked
+// and what it answered is the single most useful record for judging whether the
+// pipeline is working, so it gets its own log with its own, larger bound.
+let visionLog = [];
+const VISION_LOG_MAX = 600;
+
+function logVision(prompt, description, meta) {
+  if (!prompt && !description) return;
+  visionLog.push({
+    at: new Date().toISOString(),
+    prompt: prompt || '',
+    description: description || '',
+    // Which kind of turn produced it, and whether the assistant said anything —
+    // a silent tick is normal, but a long run of them with descriptions that
+    // never change is the shape of a stuck watch loop.
+    source: (meta && meta.source) || 'turn',
+    spoke: !!(meta && meta.spoke),
+    frame: (meta && meta.frame) || null,
+  });
+  if (visionLog.length > VISION_LOG_MAX) visionLog.shift();
 }
 
 function exportConversation() {
@@ -63,8 +110,37 @@ function exportConversation() {
     entry.think_blocks.forEach((tb) => {
       lines.push(`\n<details><summary>Thinking</summary>\n\n${tb}\n\n</details>`);
     });
+    // The vision round trip that produced this turn, inline where it belongs.
+    // The reasoning model never saw the picture — it only ever saw the answer
+    // below — so a reply that looks wrong is usually explained here rather
+    // than in the reply itself.
+    if (entry.vision_prompt || entry.scene_description) {
+      lines.push(
+        `\n<details><summary>Vision stage (Qwen)</summary>\n\n` +
+        `**Asked:**\n\n\`\`\`\n${entry.vision_prompt || '(none)'}\n\`\`\`\n\n` +
+        `**Answered:**\n\n\`\`\`\n${entry.scene_description || '(none)'}\n\`\`\`\n\n</details>`
+      );
+    }
     lines.push('');
   });
+
+  // Every vision call in order, including the silent ticks that never produced
+  // a message. Reading these top to bottom is how you catch the failure modes
+  // that no single turn shows: descriptions contradicting each other frame to
+  // frame, or repeating identically while the scene actually moves.
+  if (visionLog.length) {
+    lines.push('## Vision stage (Qwen) — every call', '');
+    if (visionLog.length >= VISION_LOG_MAX) {
+      lines.push(`_Oldest entries dropped — capped at ${VISION_LOG_MAX}._`, '');
+    }
+    visionLog.forEach((v) => {
+      const tag = [v.source, v.frame ? `frame #${v.frame}` : null, v.spoke ? 'spoke' : 'silent']
+        .filter(Boolean).join(', ');
+      lines.push(`### ${v.at} (${tag})`, '');
+      lines.push('**Asked:**', '', '```', v.prompt || '(none)', '```', '');
+      lines.push('**Answered:**', '', '```', v.description || '(none)', '```', '');
+    });
+  }
 
   // The wire log — every POST, the split-stage vision prompt/description, each
   // tool_call_start/tool_result, and the final done event — captured in order.
@@ -498,7 +574,10 @@ function createLiveMessage() {
         model: data.model ? (data.provider || '') + '/' + data.model : null,
         tool_calls: data.tool_calls || [],
         think_blocks: data.think_blocks || [],
+        vision_prompt: data.vision_prompt,
+        scene_description: data.scene_description,
       });
+      logVision(data.vision_prompt, data.scene_description, { source: 'chat', spoke: !!data.text });
       speak(data.text); // read the finished answer aloud (once, not per delta)
     },
     fail(message) {
@@ -670,7 +749,12 @@ async function resetConversation() {
   await fetch('/v1/reset', { method: 'POST' });
   document.getElementById('messages').innerHTML = '';
   transcriptLog = [];
-  try { localStorage.removeItem(CONVERSATION_KEY); } catch { /* ignore */ }
+  visionLog = [];
+  debugLog = [];
+  try {
+    localStorage.removeItem(CONVERSATION_KEY);
+    localStorage.removeItem(VISION_KEY);
+  } catch { /* ignore */ }
   addMessage('assistant', 'Conversation reset. How can I help you?', {});
   toggleSidebar(false);
 }
@@ -1055,6 +1139,15 @@ async function sendLiveFrame(video) {
       addDebugMessage('  [vision→Qwen] asked: "' + (data.vision_prompt || '') + '"', 'send');
       addDebugMessage('  [vision←Qwen] said: "' + (data.scene_description || '') + '"', 'recv');
     }
+    // Logged before the branches below, so a [SILENT] tick — which renders no
+    // message and so would otherwise leave no trace anywhere durable — is
+    // still captured. On a watch session most ticks are silent, and those are
+    // precisely the frames worth reviewing afterwards.
+    logVision(data.vision_prompt, data.scene_description, {
+      source: 'live tick',
+      frame: framesSent,
+      spoke: !!(data.text && !data.scene_unchanged),
+    });
     if (data.rate_limited) {
       // The server deliberately skipped this tick rather than surfacing a
       // raw 429 — back the polling interval off for the provider's
@@ -1074,7 +1167,13 @@ async function sendLiveFrame(video) {
       if (data.think_blocks && data.think_blocks.length > 0) {
         displayText += '\n\n<details><summary>💭 Thinking</summary>\n' + data.think_blocks.join('\n') + '\n</details>';
       }
-      addMessage('assistant', displayText, { model: data.provider + '/' + data.model, tool_calls: data.tool_calls, think_blocks: data.think_blocks });
+      addMessage('assistant', displayText, {
+        model: data.provider + '/' + data.model,
+        tool_calls: data.tool_calls,
+        think_blocks: data.think_blocks,
+        vision_prompt: data.vision_prompt,
+        scene_description: data.scene_description,
+      });
       speak(data.text); // speak the reply, not displayText (which carries think-block HTML)
       updateActivityEntry(entry, 'replied', 'Frame #' + framesSent + ' — model replied');
       addDebugMessage(

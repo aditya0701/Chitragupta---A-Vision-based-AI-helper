@@ -161,6 +161,28 @@ function restoreConversation() {
   container.scrollTop = container.scrollHeight;
 }
 
+// Every vision round trip, including ones no turn ever renders. Mirrors
+// app.js. The per-turn raw dumps below already carry the vision debug step for
+// turns that produced a message — this exists for the ones that did not: a
+// [SILENT] live tick logs no message at all, and on a watch session most ticks
+// are silent. The wire log that used to be their only trace is capped at
+// DEBUG_LOG_MAX and rolls off.
+let visionLog = [];
+const VISION_LOG_MAX = 600;
+
+function logVision(prompt, description, meta) {
+  if (!prompt && !description) return;
+  visionLog.push({
+    at: new Date().toISOString(),
+    prompt: prompt || '',
+    description: description || '',
+    source: (meta && meta.source) || 'turn',
+    spoke: !!(meta && meta.spoke),
+    frame: (meta && meta.frame) || null,
+  });
+  if (visionLog.length > VISION_LOG_MAX) visionLog.shift();
+}
+
 function logTranscript(role, text, extras) {
   transcriptLog.push({
     role,
@@ -195,6 +217,23 @@ function exportConversation() {
   // The wire log in order — every POST, the split-stage vision prompt/desc,
   // each tool_call_start/tool_result, and the final done event. Complements
   // the per-turn raw debug dumps above with a flat, time-ordered trace.
+  // Every vision call in order, silent ticks included. Read top to bottom this
+  // catches what no single turn shows: descriptions contradicting each other
+  // frame to frame, or repeating identically while the scene actually moves.
+  if (visionLog.length) {
+    lines.push('## Vision stage (Qwen) — every call', '');
+    if (visionLog.length >= VISION_LOG_MAX) {
+      lines.push(`_Oldest entries dropped — capped at ${VISION_LOG_MAX}._`, '');
+    }
+    visionLog.forEach((v) => {
+      const tag = [v.source, v.frame ? `frame #${v.frame}` : null, v.spoke ? 'spoke' : 'silent']
+        .filter(Boolean).join(', ');
+      lines.push(`### ${v.at} (${tag})`, '');
+      lines.push('**Asked:**', '', '```', v.prompt || '(none)', '```', '');
+      lines.push('**Answered:**', '', '```', v.description || '(none)', '```', '');
+    });
+  }
+
   if (debugLog.length) {
     lines.push('## Pipeline / wire log', '', '```');
     debugLog.forEach((d) => lines.push(`[${d.at}] ${d.kind ? d.kind.toUpperCase() + ' ' : ''}${d.text}`));
@@ -571,6 +610,7 @@ function createLiveMessage() {
         think_blocks: data.think_blocks || [],
         rawData: data,
       });
+      logVision(data.vision_prompt, data.scene_description, { source: 'chat', spoke: !!data.text });
       speak(data.text); // read the finished answer aloud (once, not per delta)
       container.scrollTop = container.scrollHeight;
     },
@@ -732,6 +772,7 @@ async function resetConversation() {
   document.getElementById('messages').innerHTML = '';
   transcriptLog = [];
   debugLog = [];
+  visionLog = [];
   try { localStorage.removeItem(CONVERSATION_KEY); } catch { /* ignore */ }
   addMessage('assistant', 'Conversation reset. How can I help you?', {});
 }
@@ -1049,6 +1090,12 @@ async function sendLiveFrame(video) {
       addDebugMessage('  [vision→Qwen] asked: "' + (data.vision_prompt || '') + '"', 'send');
       addDebugMessage('  [vision←Qwen] said: "' + (data.scene_description || '') + '"', 'recv');
     }
+    // Before the branches below, so a [SILENT] tick still leaves a trace.
+    logVision(data.vision_prompt, data.scene_description, {
+      source: 'live tick',
+      frame: framesSent,
+      spoke: !!(data.text && !data.scene_unchanged),
+    });
     if (data.rate_limited) {
       const waitS = data.retry_after || 5;
       updateActivityEntry(entry, 'silent', 'Frame #' + framesSent + ' — rate limited, pausing ' + waitS.toFixed(1) + 's');

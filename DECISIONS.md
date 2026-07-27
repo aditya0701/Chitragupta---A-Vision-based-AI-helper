@@ -572,17 +572,44 @@ the stale shell through every deploy — voice input, camera toggle and more wer
 silently invisible **despite being correctly shipped**.
 
 > **Rule:** any change to `index.html` / `app.js` / `style.css` **must** bump
-> `CACHE_NAME`. Currently `v16`. Server-only changes don't need it.
+> `CACHE_NAME`. Currently `v18`. Server-only changes don't need it.
 
 `/v2` and `/live` are excluded from the SW entirely so iterating there never
 fights the cache.
 
-### 8.2 `debug.js` duplicates `app.js`
+### 8.2 The vision stage was invisible in exports
 
-Camera lifecycle, frame sizing and capture logic exist in both. Changes to one
+The Qwen round trip is the single most useful record for judging whether the
+pipeline is working — the reasoning model never sees the picture, only this
+answer, so a reply that looks wrong is usually explained here rather than in the
+reply. It was invisible three times over:
+
+- it never leaves the server as its own request, so it is not a network call you
+  can inspect;
+- most live ticks answer `[SILENT]`, and the client only logs a turn when there
+  is text to render — so on a watch session, the majority of frames left **no
+  trace at all**;
+- the wire log that did carry it is capped at `DEBUG_LOG_MAX = 400` and rolls
+  off. That is not hypothetical: it is exactly why the context-loss incident
+  (§7.7) could not be diagnosed — the window had already scrolled away.
+
+Now `visionLog` (own array, own larger bound) records every call with source,
+frame number, and whether the turn spoke. Exports carry it two ways: inline
+under the turn that produced it, and as a full chronological section. Reading
+that section top to bottom is how the flip-flops in §6.5 became obvious —
+no single turn shows them, only the sequence does.
+
+Persisted separately and far more shallowly than it is held in memory (60 vs
+600): the full log is over a megabyte of prompt text and would crowd the
+conversation out of localStorage. Its own try/catch, so a vision log big enough
+to blow the quota cannot stop the conversation itself being saved.
+
+### 8.3 `debug.js` duplicates `app.js`
+
+Camera lifecycle, frame sizing, capture logic and now the vision log exist in both. Changes to one
 almost always belong in the other.
 
-### 8.3 Windows `uvicorn --reload` serves stale bytecode
+### 8.4 Windows `uvicorn --reload` serves stale bytecode
 
 Observed repeatedly: WatchFiles logs a reload, old code keeps serving. **Restart
 manually** when iterating on `server/agent/*.py`. If behaviour doesn't match a
