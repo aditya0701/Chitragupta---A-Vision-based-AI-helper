@@ -91,6 +91,44 @@ def pop_completions() -> list[dict]:
     return completed
 
 
+def cancel_timer(ref: str) -> str:
+    """Cancel a timer by id or label (case-insensitive, exact then substring).
+
+    Deletes outright rather than marking it fired: a cancelled timer must not
+    produce a completion message, and mark_fired() is precisely what queues one
+    for delivery. Already-fired-but-undelivered timers are cancellable too —
+    "never mind" arriving a second before the poll picks it up should still
+    suppress it, which only works if pop_completions() can no longer see it.
+    """
+    data = _load()
+    ref_l = ref.strip().lower()
+    matches = [tid for tid in data if tid == ref.strip()]
+    if not matches:
+        matches = [tid for tid, t in data.items() if t["label"].strip().lower() == ref_l]
+    if not matches:
+        matches = [tid for tid, t in data.items() if ref_l in t["label"].strip().lower()]
+
+    if not matches:
+        if not data:
+            return "No timers are running, so there was nothing to cancel."
+        running = ", ".join(f"'{t['label']}'" for t in data.values())
+        return f"No timer matching '{ref}'. Currently running: {running}."
+    if len(matches) > 1:
+        # Ambiguous on purpose: cancelling the wrong timer is silent and
+        # unrecoverable (the user finds out when it never goes off), so ask
+        # rather than guess.
+        labels = ", ".join(f"'{data[t]['label']}'" for t in matches)
+        return (
+            f"'{ref}' matches more than one timer ({labels}) — ask the user which "
+            "one they mean, then call cancel_timer again with the exact label."
+        )
+
+    label = data[matches[0]]["label"]
+    del data[matches[0]]
+    _save(data)
+    return f"Cancelled the timer for '{label}'. It will not go off."
+
+
 def active_progress() -> list[dict]:
     """Pure-math progress snapshot for timers still running. No LLM cost."""
     data = _load()

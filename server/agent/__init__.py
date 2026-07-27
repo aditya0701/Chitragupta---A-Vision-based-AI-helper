@@ -169,8 +169,14 @@ def tool_start_timer(label: str, duration_seconds: int, context: str = "") -> st
     return f"Timer '{label}' started for {duration_str} (id: {timer_id})."
 
 
+def tool_cancel_timer(label: str) -> str:
+    """Cancel a running timer so it never fires."""
+    from . import timers
+    return timers.cancel_timer(label)
+
+
 def tool_update_task_list(title: str, items: list) -> str:
-    """Replace the current task/recipe document (like Claude Code's TodoWrite)."""
+    """Replace the current task document (like Claude Code's TodoWrite)."""
     from . import tasklist
     document = tasklist.set_document(title, items)
     counts: dict[str, int] = {}
@@ -234,7 +240,7 @@ def build_default_tools() -> ToolRegistry:
     ))
     registry.register(Tool(
         name="fetch_page",
-        description="Fetch a web page by URL and return its visible text content (e.g. to read a recipe list from a search result)",
+        description="Fetch a web page by URL and return its visible text content (e.g. to read the steps or details behind a search result)",
         fn=tool_fetch_page,
         parameters={"url": {"type": "string", "description": "The URL to fetch", "required": True}},
     ))
@@ -253,22 +259,38 @@ def build_default_tools() -> ToolRegistry:
     registry.register(Tool(
         name="start_timer",
         description=(
-            "Start a background timer for a cooking step or wait period (e.g. 'boil eggs 10 min'). "
+            "Start a background timer for any step or wait period (e.g. 'boil eggs 10 min', "
+            "'take the laundry out in 40 min', 'stand-up at 10:30'). "
             "Runs entirely server-side at no cost. When it completes, a follow-up message with the "
             "next step is generated automatically and delivered to the client — no need to check on it yourself."
         ),
         fn=tool_start_timer,
         parameters={
-            "label": {"type": "string", "description": "Short name for what's being timed, e.g. 'eggs' or 'cake'", "required": True},
+            "label": {"type": "string", "description": "Short name for what's being timed, e.g. 'eggs', 'laundry', 'call Sam'", "required": True},
             "duration_seconds": {"type": "integer", "description": "How many seconds to wait", "required": True},
-            "context": {"type": "string", "description": "Relevant recipe/task context to reference when the timer completes", "required": False},
+            "context": {"type": "string", "description": "Relevant task context to reference when the timer completes", "required": False},
+        },
+        needs_followup=False,
+    ))
+    registry.register(Tool(
+        name="cancel_timer",
+        description=(
+            "Cancel a running timer so it never goes off — for when the user says they don't "
+            "want it, changed their mind, finished early, or is abandoning the step. The running "
+            "timers are listed under [Timers] in your context; pass the label exactly as shown "
+            "there. If nothing matches, or the label is ambiguous, you'll be told rather than "
+            "having the wrong one cancelled — relay that and ask which they meant."
+        ),
+        fn=tool_cancel_timer,
+        parameters={
+            "label": {"type": "string", "description": "The timer's label exactly as shown in [Timers], or its id", "required": True},
         },
         needs_followup=False,
     ))
     registry.register(Tool(
         name="update_task_list",
         description=(
-            "Create or update the current task/recipe document — the persistent record of what "
+            "Create or update the current task document — the persistent record of what "
             "needs doing, what's done, and what's been substituted. Always send the FULL list of "
             "items every time, not just the one that changed (like rewriting a todo list in full "
             "on each edit) — items you omit are dropped. Statuses: 'pending' (not started), "
@@ -278,7 +300,7 @@ def build_default_tools() -> ToolRegistry:
         ),
         fn=tool_update_task_list,
         parameters={
-            "title": {"type": "string", "description": "Name of the overall task, e.g. 'Chicken Biryani'", "required": True},
+            "title": {"type": "string", "description": "Name of the overall task, e.g. 'Chicken Biryani', 'Replace laptop battery', 'Weekly shop'", "required": True},
             "items": {
                 "type": "array",
                 "description": "Full list of task items, sent in full every time — anything omitted is dropped.",
@@ -300,7 +322,7 @@ def build_default_tools() -> ToolRegistry:
                                 "is re-sent with every frame until you change it, so write it as the "
                                 "question you want answered continuously. "
                                 "You cannot see the camera yourself: a separate vision model looks on "
-                                "your behalf, and it knows nothing about the recipe, the conversation, "
+                                "your behalf, and it knows nothing about the task, the conversation, "
                                 "or what 'correct' looks like — it only reports what is literally in "
                                 "frame. So ask it for OBSERVATIONS, never for judgement. Ask 'how thick "
                                 "are the slices', not 'are they being cut properly'; it reports, you "
@@ -369,7 +391,7 @@ def build_default_tools() -> ToolRegistry:
             "help locating a specific physical object and a single frame "
             "won't be enough — they'll need to move the camera around "
             "while you keep checking. This ONLY watches for the named "
-            "target; do not use it for general cooking guidance, task "
+            "target; do not use it for general guidance, task "
             "tracking, or any other kind of ongoing help — that's not "
             "enabled through this tool. Once started, stay silent on "
             "frames that don't show the target (the live-frame protocol "

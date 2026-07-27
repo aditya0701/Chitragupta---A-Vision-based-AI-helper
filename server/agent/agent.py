@@ -50,7 +50,10 @@ _SILENCE_NARRATION_RE = re.compile(
 # vocabulary of talking ABOUT the plan's mechanics rather than voicing a step.
 _LIST_META_RE = re.compile(
     r"\bin[\s-]?progress\b"
-    r"|\btask ?list\b|\bcheck ?list\b|\bto-?do\b"
+    # "check the list" / "check your list" as well as "checklist" — telling a
+    # voice user to consult something they cannot see is the same non-answer
+    # whether or not there's an article in the way.
+    r"|\btask ?list\b|\bcheck (?:the |your )?list\b|\bto-?do\b"
     r"|\b(?:set[\s-]?up|updated|created|made|put together)\b[^.]{0,40}?\b(?:list|plan|checklist|steps)\b"
     r"|\bstart (?:with|by)\b[^.]{0,30}?\b(?:pending|in[\s-]?progress|item|step|task|list|one|next)\b"
     r"|\bnext\b[^.]{0,20}?\b(?:on|in)\b[^.]{0,10}?\blist\b"
@@ -61,15 +64,32 @@ _LIST_META_RE = re.compile(
     re.IGNORECASE,
 )
 
-# A reply containing a real cooking imperative is voicing a step, so it's NOT
+# A reply containing a real action imperative is voicing a step, so it's NOT
 # the empty "check the list" non-answer even if it also mentions the list in
 # passing ("updated the list — now heat the oil and add cumin"). Presence of
 # one of these suppresses the backstop, keeping it from re-prompting a reply
 # that already did its job.
+# Deliberately broad, and safe to keep widening: this regex only ever makes
+# _is_list_meta_nonanswer *less* likely to fire (a reply containing any
+# imperative is treated as a real answer), so a missing verb causes a needless
+# corrective call while an extra one costs nothing. Kept generic rather than
+# kitchen-only — the assistant guides any hands-on task, not just cooking.
 _ACTION_CUE_RE = re.compile(
     r"\b(?:heat|pre-?heat|add|chop|pour|stir|mix|cut|peel|mince|saut[eé]|fry|"
     r"boil|simmer|place|put|grab|take|turn|drain|soak|mash|whisk|blend|season|"
-    r"sprinkle|cover|reduce|flip|roast|grate|crush|knead|roll|bring|set the)\b",
+    r"sprinkle|cover|reduce|flip|roast|grate|crush|knead|roll|bring|set the|"
+    # Generic hands-on verbs. Every addition is checked against the list-meta
+    # phrasings above for collisions — "check", "start", "look", "find", "let",
+    # "keep", "move", "read" and friends are deliberately EXCLUDED because they
+    # occur inside the non-answers this is meant to catch ("check the list",
+    # "start with the in-progress item"), and matching one there would silently
+    # disable the correction.
+    r"open|close|lift|hold|press|push|pull|slide|attach|detach|connect|unplug|"
+    r"plug|screw|unscrew|tighten|loosen|align|insert|wipe|rinse|scrub|"
+    r"fold|hang|carry|rotate|unfold|unwrap|untie|fasten|clamp|drill|hammer|"
+    r"sand|paint|glue|tape|weigh|pour out|"
+    # Screen/desk work.
+    r"click|tap|double-click|paste|unzip|reboot|restart|scan)\b",
     re.IGNORECASE,
 )
 
@@ -1130,7 +1150,7 @@ class ChitraguptAgent:
         Narrower than _speak_alert on purpose. Requires both found=true AND the
         item actually being a "Find X" goal, mirroring the guard in
         tasklist.add_observation that decides whether to complete the item. A
-        found=true aimed at a cooking step now neither completes the step nor
+        found=true aimed at an ordinary step now neither completes the step nor
         closes the camera; it just gets spoken.
         """
         return any(
@@ -1184,12 +1204,14 @@ class ChitraguptAgent:
         # action itself.
         persona = (
             "You are Chitragupt, a hands-free voice assistant for someone whose "
-            "hands are busy — right now, helping them cook. They are listening to "
+            "hands are busy — cooking, repairing something, shopping, working "
+            "through any hands-on task. They are listening to "
             "you, not reading: every word is read aloud, so they cannot see any "
             "list, screen, or plan. Your job is to actively run the session for "
             "them — tell them the one thing to do right now in plain, concrete "
             "terms, then the next thing when they're ready, and keep track of "
-            "everything in flight (steps, substitutions, parallel dishes, timers) "
+            "everything in flight (steps, substitutions, things running in "
+            "parallel, timers) "
             "so they never have to hold it in their head or ask you to check. "
             "Take initiative and give the actual instruction. Never answer by "
             "pointing them at a list, telling them to check what's next, or "
@@ -1206,6 +1228,28 @@ class ChitraguptAgent:
             parts.append(
                 "\n[Camera feed attached]\nAn image is attached below — look at "
                 "it directly to answer, describing relevant details as needed."
+            )
+
+        # Running timers were previously invisible to the model — it started
+        # them and then never heard about them again, so it couldn't answer
+        # "how long left on the eggs?" and had no way to name one for
+        # cancel_timer. This is pure arithmetic (timers.active_progress), so
+        # it costs nothing per turn beyond the few tokens it renders to.
+        active_timers = timers.active_progress()
+        if active_timers:
+            lines = []
+            for t in active_timers:
+                remaining = t["remaining_seconds"]
+                mins, secs = divmod(remaining, 60)
+                left = f"{mins}m{secs:02d}s" if mins else f"{secs}s"
+                lines.append(f"- '{t['label']}' — {left} left ({t['percent_done']}% done)")
+            parts.append("\n[Timers]\n" + "\n".join(lines))
+            parts.append(
+                "These are running in the background right now. You'll be told "
+                "automatically when one finishes, so don't wait on them or ask "
+                "about them. If the user wants one stopped — they changed their "
+                "mind, finished early, or are dropping the step — call "
+                "cancel_timer with the label exactly as written above."
             )
 
         doc_summary = tasklist.render_summary(
@@ -1295,7 +1339,7 @@ class ChitraguptAgent:
                 "about it again yourself; completion is announced automatically. Then keep "
                 "helping with whatever's next.\n"
                 "- update_task_list: use whenever you're guiding a multi-step task (a "
-                "recipe, a shopping list, a project)."
+                "recipe, a repair, a shopping trip, a project)."
                 + (
                     " For a plain 'help me find X' with no other steps involved, use "
                     "request_live_search instead — it registers the goal for you."
@@ -1323,8 +1367,8 @@ class ChitraguptAgent:
                 "key 'content' for its text — not 'task' or 'label'."
                 + (
                     ' Example:\n```tool\n{"name": "update_task_list", "arguments": '
-                    '{"title": "Chicken Biryani", "items": [{"content": "Marinate '
-                    'chicken", "status": "in_progress"}, {"content": "Cook rice", '
+                    '{"title": "Replace laptop battery", "items": [{"content": "Undo '
+                    'the back panel screws", "status": "in_progress"}, {"content": "Unclip the old battery", '
                     '"status": "pending"}]}}\n```\n'
                     if not native else "\n"
                 )
@@ -1347,7 +1391,7 @@ class ChitraguptAgent:
                     "specific object and one frame won't be enough (they'll need to move "
                     "the camera around while you keep checking). This starts continuous "
                     "watching scoped only to that target — don't use it for general "
-                    "cooking help or anything else, that's not enabled through this tool.\n"
+                    "step-by-step help or anything else, that's not enabled through this tool.\n"
                     if offer_camera else ""
                 )
             )
@@ -1450,7 +1494,7 @@ class ChitraguptAgent:
            short; a reply that actually states a step + mentions the list in
            passing runs longer),
         2. uses list-mechanics vocabulary (_LIST_META_RE), and
-        3. contains NO cooking imperative (_ACTION_CUE_RE) — if it does, it's
+        3. contains NO action imperative (_ACTION_CUE_RE) — if it does, it's
            voicing a step and has done its job regardless of any list mention.
 
         Only ever consulted on non-live direct turns; a live tick is allowed to
@@ -1479,15 +1523,18 @@ class ChitraguptAgent:
         doc = tasklist.get_document()
         summary = tasklist.render_summary(doc, lean=False, observations=False) if doc else ""
         correct_prompt = (
-            "You are Chitragupt, a hands-free voice cooking assistant. Your last "
+            "You are Chitragupt, a hands-free voice assistant guiding someone "
+            "through a hands-on task. Your last "
             "reply pointed the user at the plan or its status instead of telling "
             "them what to do — but they can't see any list, it is read aloud to "
             "them. Here is the current plan for your reference only:\n\n"
             f"[Task list]\n{summary}\n\n"
             f"The user said: {prompt}\n\n"
             "Reply now in one or two short spoken sentences: the single concrete "
-            "action to do right this moment — the actual physical step (for "
-            "example 'Heat some oil in a pan and add a teaspoon of cumin seeds'). "
+            "action to do right this moment — the actual physical step, in the "
+            "terms of whatever they are doing (e.g. 'Heat some oil in a pan and "
+            "add a teaspoon of cumin seeds', or 'Undo the two screws on the back "
+            "panel and lift it straight off'). "
             "Do not mention the list, the steps, or their status. Do not say you "
             "have updated anything. Plain spoken text, no markdown."
         )
