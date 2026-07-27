@@ -384,7 +384,45 @@ full-res frame retained client-side, since the tick frame in hand is already
 downscaled. The standing-brief route covers the continuous case (shopping,
 inspection) and needs no new round trip, so it went first.
 
-### 6.5 Pipeline, end to end
+### 6.5 Flip-flops — independent calls with no continuity
+
+Consecutive frames of a scene that had barely changed came back described
+differently, and the reasoning model logged the contradictions as fact. Seconds
+apart on the same pan, from one real session:
+
+```
+"Cumin seeds and chopped red onions are sauteing"
+"Chopped onions and red chilies are being sauteed"      <- cumin gone
+"The cumin seeds ... have not yet been added"           <- explicitly denied
+"Cumin seeds or other spices are visible among the onions"  <- back
+```
+
+Two causes, so two rules, both appended after the branch that builds the prompt
+so every variant gets them.
+
+**Asserted absence.** The goal-aware prompt names the step's ingredients, which
+turns the job into a roll-call — and a roll-call over small ambiguous items
+(cumin among browned onions at 640px) produces confident false negatives. "Not
+yet added" is a claim about a negative that one frame usually cannot support.
+Absence is now only reportable when positively visible; otherwise say so.
+
+**No continuity.** Each vision call is independent: no memory, no shared
+attention. `FrameBuffer.last` already held the previous caption and the vision
+stage simply never used it. It is now passed back as text, with an instruction
+to describe change and not to contradict the previous frame about something no
+longer clearly visible. This is the v1 counterpart of what `live/vision.py`
+already does for v2 — the comparison baseline has to arrive in words, because
+hosted APIs cannot share attention state across calls.
+
+**Find-goals are exempt from both.** That branch has a strict one-line contract
+where `NOT FOUND` is the correct answer for "I can't see it" — the entire point
+of a search. The absence rule would fight it and the change rule would break
+"nothing else". Guarded by `strict_detection`.
+
+Grounding is also skipped for a one-off uploaded photo: the last caption there
+is a stale live tick about something else.
+
+### 6.6 Pipeline, end to end
 
 1. `startCameraStream()` — `getUserMedia`, waits for a decoded frame.
 2. `startLive()` — `setInterval(sampleLiveFrame, …)`, 2–15s (default 4s).
@@ -478,6 +516,44 @@ cancellable too, so a late "never mind" still suppresses it.
 Matching is id → exact label → substring, and **ambiguity refuses**: cancelling
 the wrong timer fails silently and the user only finds out when it never goes off.
 
+### 7.7 Context loss — unresolved, now instrumented
+
+Three consecutive turns with no memory at all. The user had just been given
+detailed instructions; 36 seconds later:
+
+> **user:** I have managed them now what should I do
+> **assistant:** You'll need to give me a bit more context — what is it that
+> you've managed? Are we working on a recipe, a project, a task list…?
+
+Then *"it seems the task list didn't carry over to this conversation"*. It
+recovered only once the user re-stated the dish, rebuilding the list from the
+last few messages.
+
+**Root cause is still unknown, and that is the finding.** Checked and ruled out:
+live ticks polluting memory (they are excluded), the assistant reply not being
+recorded (all paths record it), `/v1/reset` (it also clears `transcriptLog`, so
+the export would not contain the earlier turns — it does), and Render
+spin-down (the gap was 4 minutes, not 15). Both conversation memory *and* the
+task list were lost together, which points at a process restart on an ephemeral
+filesystem, but nothing confirms it.
+
+It could not be root-caused after the fact because **nothing recorded how much
+context a turn carried**. The only trace is the client wire log, bounded at
+`DEBUG_LOG_MAX = 400`, which had already rolled past the window. "The model
+ignored the task list" and "the task list was never in the prompt" are
+indistinguishable from the transcript, and they need completely different fixes.
+
+Both paths now log one line per turn:
+
+```
+turn context: history_turns=12 (sending 10) task_items=6
+              task_list_in_prompt=True prompt_chars=3184
+```
+
+Cheap, and it makes the next occurrence self-diagnosing rather than
+unfalsifiable. Deliberately not a speculative fix — guessing at a cause here
+would most likely have added machinery that addressed nothing.
+
 ### 7.6 Don't start a timer on a planning statement
 
 *"I want to boil eggs"* is not *"the eggs are on"*. Start one only once the step
@@ -544,15 +620,14 @@ Ordered by how much they hurt in real use.
 |---|---|---|
 | 1 | **Adaptive poll backoff** | Fixed 4s tick regardless of context. Nothing throttles a 20-minute simmer. Bound below Render's idle timeout. |
 | 2 | **The diff gate dies while walking** | Every frame differs, so it skips nothing. Shopping would burn TPD far faster than cooking. The cost model assumes a static scene. |
-| 3 | **Vision flip-flops** | Stale/contradictory frame descriptions surfaced as confident claims. A grounding problem, not a wiring bug. |
-| 4 | **Context loss** | ~3-turn amnesia observed. Unverified against code — could be history truncation or task-list crowding. |
-| 5 | **Attach the live frame in `sendMessage`** | §5.3. Removes the whole `request_camera` dance from the common case. |
-| 6 | **One-shot `inspect_detail`** | Close look with no standing goal. Needs a client-retained full-res frame + a round trip. §6.4. |
-| 7 | **Compound-item completion** | "Gather Ingredients" can be marked done from partial visual evidence. Needs sub-items. |
-| 8 | **No pruning of completed items' observations** | Grows unboundedly across a long session. |
-| 9 | **Render keep-alive pinger** | Only matters for unattended timers >15 min. |
-| 10 | **Multi-timer UI progress** | `active` is already returned by `/v1/timers/check`, just unrendered. |
-| 11 | **Egocentric fine-tuning** | Long-term. Identify real failure cases on real footage *first*, then fine-tune on those patterns only. Ego4D / Egocentric-1M / EPIC-Kitchens. |
+| 3 | **Context loss** | ~3-turn amnesia observed. Root cause still unknown — see §7.7. Diagnostics added; needs a recurrence to pin down. |
+| 4 | **Attach the live frame in `sendMessage`** | §5.3. Removes the whole `request_camera` dance from the common case. |
+| 5 | **One-shot `inspect_detail`** | Close look with no standing goal. Needs a client-retained full-res frame + a round trip. §6.4. |
+| 6 | **Compound-item completion** | "Gather Ingredients" can be marked done from partial visual evidence. Needs sub-items. |
+| 7 | **No pruning of completed items' observations** | Grows unboundedly across a long session. |
+| 8 | **Render keep-alive pinger** | Only matters for unattended timers >15 min. |
+| 9 | **Multi-timer UI progress** | `active` is already returned by `/v1/timers/check`, just unrendered. |
+| 10 | **Egocentric fine-tuning** | Long-term. Identify real failure cases on real footage *first*, then fine-tune on those patterns only. Ego4D / Egocentric-1M / EPIC-Kitchens. |
 
 ---
 

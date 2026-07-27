@@ -250,7 +250,13 @@ class ChitraguptAgent:
         goal_aware = False
         if split_stages:
             scene_description, vision_prompt, goal_aware = await self._run_vision_stage(
-                image_base64, debug_steps,
+                image_base64,
+                debug_steps,
+                # Only on a watch tick: the previous caption is a description of
+                # the same continuous scene seconds earlier, which is exactly
+                # what makes it useful grounding. For a one-off uploaded photo
+                # it would be stale and about something else entirely.
+                prev_caption=self.frame_buffer.last if is_live_frame else None,
             )
 
             # The word-overlap "has this changed" heuristic below is a poor
@@ -326,6 +332,25 @@ class ChitraguptAgent:
             if settings.TOOLS_ENABLED and self.backend.SUPPORTS_NATIVE_TOOLS
             else None
         )
+
+        # Context-loss diagnostics. A real session lost both the conversation
+        # and the task list for three turns ("it seems the task list didn't
+        # carry over"), and root-causing it afterwards proved impossible: the
+        # only record is the client-side wire log, which is bounded at
+        # DEBUG_LOG_MAX=400 entries and had already rolled past the window.
+        # Nothing anywhere recorded how much context a turn actually carried,
+        # so "the model ignored the task list" and "the task list was never in
+        # the prompt" are indistinguishable after the fact. They need very
+        # different fixes, so log the two numbers on every turn — one line,
+        # no cost, and it makes the next occurrence self-diagnosing.
+        if not is_live_frame:
+            logger.info(
+                f"turn context: history_turns={len(self.memory.get_history())} "
+                f"(sending {min(10, len(self.memory.get_history()))}) "
+                f"task_items={len((tasklist.get_document() or {}).get('items', []))} "
+                f"task_list_in_prompt={'[Task list]' in reason_prompt} "
+                f"prompt_chars={len(reason_prompt)}"
+            )
 
         # Live ticks aren't recorded to memory and gain nothing from the
         # last 10 chat turns — the [Task list] block already injected into
@@ -811,6 +836,16 @@ class ChitraguptAgent:
             is_live_frame=False, is_camera_followup=is_camera_followup,
         )
 
+        # Same context-loss diagnostics as _process_locked, and this is the path
+        # that matters more: typed turns are where amnesia is actually noticed.
+        logger.info(
+            f"turn context: history_turns={len(self.memory.get_history())} "
+            f"(sending {min(10, len(self.memory.get_history()))}) "
+            f"task_items={len((tasklist.get_document() or {}).get('items', []))} "
+            f"task_list_in_prompt={'[Task list]' in reason_prompt} "
+            f"prompt_chars={len(reason_prompt)}"
+        )
+
         # Was self.tools.to_openai_tools() — every tool, unconditionally — which
         # is why the stream path (typed chat) kept re-offering request_camera on
         # a camera followup and looped (needs_camera=true again and again, the
@@ -1084,7 +1119,7 @@ class ChitraguptAgent:
         )
 
     async def _run_vision_stage(
-        self, image_base64: str, debug_steps: list[dict],
+        self, image_base64: str, debug_steps: list[dict], prev_caption: Optional[str] = None,
     ) -> tuple[str, str, bool]:
         """Stage 1 for split backends: turn the frame into text.
 
@@ -1133,6 +1168,7 @@ class ChitraguptAgent:
         # full resolution.
         detail = tasklist.active_detail()
         vision_max_tokens = 160
+        strict_detection = False
         # The reasoning model's own brief to the vision stage, when it
         # wrote one (update_task_list's watch_for). Preferred over every
         # inference below, because those are guesses at intent from item
@@ -1217,6 +1253,12 @@ class ChitraguptAgent:
                 )
                 vision_max_tokens = 500
         elif find_targets:
+            # Exempt from the anti-flip-flop rules appended below. This branch
+            # has a strict one-line contract where "NOT FOUND" is the correct
+            # answer for "I can't see it" — the whole point of a search — so
+            # the "don't report absence you can't verify" rule would fight it,
+            # and the change-description rule would break "nothing else".
+            strict_detection = True
             goals_text = "; ".join(find_targets)
             # Object-detection directive, not a scene description. A strict,
             # tiny output format keeps this cheap and off the TPM cap;
@@ -1248,6 +1290,49 @@ class ChitraguptAgent:
                 "In 1-2 short sentences, state only the main objects and "
                 "what's happening in this image. No lists, no "
                 "colours/textures/layout detail, no advice."
+            )
+        # ── Anti-flip-flop rules, appended to every variant above ───────────
+        #
+        # Each vision call is independent — no memory, no shared attention —
+        # so consecutive frames of a scene that hasn't changed got described
+        # differently, and the reasoning model logged the contradictions as
+        # facts. From one real session, seconds apart on the same pan:
+        #
+        #   "Cumin seeds and chopped red onions are sautéing"
+        #   "Chopped onions and red chilies are being sautéed"
+        #   "The cumin seeds ... have not yet been added"
+        #   "Cumin seeds or other spices are visible among the onions"
+        #
+        # Two distinct causes, so two rules.
+        #
+        # 1. Asserted absence. The goal-aware prompt names the step's
+        #    ingredients, which turns the task into a roll-call — and a
+        #    roll-call over small ambiguous items (cumin in browned onions at
+        #    640px) produces confident false negatives. "Not yet added" is a
+        #    claim about a negative that a single frame usually cannot support.
+        #    Absence is only reportable when it is actually visible.
+        if not strict_detection:
+            vision_prompt += (
+                "\n\nOnly state that something is absent or has not been done yet "
+                "if you can positively see that — an empty pan, a bare surface. If "
+                "something is simply too small, blurred, or hidden to make out, say "
+                "you cannot tell rather than reporting it as missing."
+            )
+        # 2. No continuity. This is the v1 counterpart of what live/vision.py
+        #    already does for v2: hand back the previous caption so the model
+        #    describes this frame relative to it. It is the only continuity
+        #    available — hosted APIs cannot share attention state across calls,
+        #    so the comparison baseline has to arrive as text.
+        if prev_caption and not strict_detection:
+            vision_prompt += (
+                f"\n\nThe previous frame, a few seconds ago, was described as:\n"
+                f'"{prev_caption}"\n'
+                "That was the same scene slightly earlier, so treat it as what "
+                "you already know. Describe this frame consistently with it and "
+                "say what has CHANGED. Do not contradict it about something you "
+                "cannot clearly see now — if it said an ingredient was in the "
+                "pan and you cannot make it out any more, it is most likely "
+                "still there and simply harder to see."
             )
         scene_description = await self.backend.vision(
             image_base64=image_base64,

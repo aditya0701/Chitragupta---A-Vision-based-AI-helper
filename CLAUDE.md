@@ -101,7 +101,7 @@ model supplies the critique. See `DECISIONS.md` §6.3.
 resolution and lets the vision model read text — the only way label reading
 works, since resolution discarded in the browser can't be recovered later. It
 costs ~2.5x per frame, so it's opt-in and scoped to one in-progress item: when
-the step finishes, the cost stops. See `DECISIONS.md` §6.5.
+the step finishes, the cost stops. See `DECISIONS.md` §6.4.
 
 ---
 
@@ -118,10 +118,12 @@ main cost control.
 - **Silence protocol** — on a live tick with an active goal, if nothing is new the
   entire reply must be exactly `[SILENT]`, stripped server-side. Direct user turns
   are never allowed to go silent.
+- Each tick is given the **previous caption** as text, so it describes change
+  rather than contradicting itself frame to frame (`DECISIONS.md` §6.5).
 - `log_observation` runs on every relevant tick — text facts accumulate so "where
   is X" can be answered from history, not just the current frame.
 
-Full step-by-step pipeline: `DECISIONS.md` §6.5.
+Full step-by-step pipeline: `DECISIONS.md` §6.6.
 
 ---
 
