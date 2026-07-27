@@ -42,6 +42,37 @@ _SILENCE_NARRATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# The "pointed at the list instead of saying the step" non-answer, e.g.
+# "start with the in-progress item", "I've updated your task list — start with
+# the next pending step". This is the failure the user had to scold the model
+# out of. The persona + task-list guidance steer away from it; this regex is
+# the enforcement backstop (see _is_list_meta_nonanswer). It matches the
+# vocabulary of talking ABOUT the plan's mechanics rather than voicing a step.
+_LIST_META_RE = re.compile(
+    r"\bin[\s-]?progress\b"
+    r"|\btask ?list\b|\bcheck ?list\b|\bto-?do\b"
+    r"|\b(?:set[\s-]?up|updated|created|made|put together)\b[^.]{0,40}?\b(?:list|plan|checklist|steps)\b"
+    r"|\bstart (?:with|by)\b[^.]{0,30}?\b(?:pending|in[\s-]?progress|item|step|task|list|one|next)\b"
+    r"|\bnext\b[^.]{0,20}?\b(?:on|in)\b[^.]{0,10}?\blist\b"
+    r"|\bstep(?:s)?\b[^.]{0,15}?\b(?:done|left|completed|remaining|pending|in[\s-]?progress)\b"
+    r"|\bmarked\b[^.]{0,15}?\b(?:in[\s-]?progress|completed|pending)\b"
+    r"|\bon (?:the|your) list\b"
+    r"|\bwhat'?s next\b[^.]{0,15}?\blist\b",
+    re.IGNORECASE,
+)
+
+# A reply containing a real cooking imperative is voicing a step, so it's NOT
+# the empty "check the list" non-answer even if it also mentions the list in
+# passing ("updated the list — now heat the oil and add cumin"). Presence of
+# one of these suppresses the backstop, keeping it from re-prompting a reply
+# that already did its job.
+_ACTION_CUE_RE = re.compile(
+    r"\b(?:heat|pre-?heat|add|chop|pour|stir|mix|cut|peel|mince|saut[eé]|fry|"
+    r"boil|simmer|place|put|grab|take|turn|drain|soak|mash|whisk|blend|season|"
+    r"sprinkle|cover|reduce|flip|roast|grate|crush|knead|roll|bring|set the)\b",
+    re.IGNORECASE,
+)
+
 
 class FrameBuffer:
     """Rolling buffer of frame descriptions for change detection."""
@@ -667,6 +698,18 @@ class ChitraguptAgent:
         if is_live_frame and self._is_silent_live_reply(final_text):
             final_text = ""
 
+        # Enforcement backstop: on a direct turn, if the reply pointed at the
+        # list instead of voicing the step, force one corrective call that
+        # states the concrete next action. Persona + guidance steer away from
+        # this; this guarantees it for the specific failure the user had to
+        # scold the model out of.
+        if not is_live_frame and self._is_list_meta_nonanswer(final_text):
+            corrected = await self._voice_concrete_step(
+                prompt, debug_steps, "list-meta non-answer correction",
+            )
+            if corrected:
+                final_text = corrected
+
         # Fold in any timer that finished while we were talking, so a
         # completion surfaces immediately in this reply instead of waiting
         # for the next background /v1/timers/check poll tick.
@@ -940,6 +983,25 @@ class ChitraguptAgent:
         else:
             final_text = clean_text or full_text
 
+        # Enforcement backstop — same as the non-stream path (_process_locked):
+        # a reply that pointed at the list instead of voicing the step gets one
+        # corrective call. Gated to backends whose "stream" is really a single
+        # blocking call (no chat_stream — the active DeepSeek hybrid), so
+        # nothing was shown to the user incrementally yet and replacing the text
+        # is clean. A genuinely token-streaming backend (Groq) would have
+        # already surfaced the meta reply, so we don't retro-correct there and
+        # lean on the persona/guidance instead.
+        if (
+            not hasattr(self.backend, "chat_stream")
+            and self._is_list_meta_nonanswer(final_text)
+        ):
+            corrected = await self._voice_concrete_step(
+                prompt, debug_steps, "list-meta non-answer correction (stream)",
+            )
+            if corrected:
+                final_text = corrected
+                yield {"type": "content_delta", "text": corrected}
+
         timer_update = await self._check_timers_locked()
         if timer_update["completed"]:
             timer_lines = "\n".join(
@@ -996,10 +1058,30 @@ class ChitraguptAgent:
         strip_task_list: bool = False,
     ) -> str:
         """Build the prompt for the reasoning model."""
+        # Persona doubles as a role brief. The single most-reported live-testing
+        # failure was the model answering "what's next?" by pointing at the list
+        # ("start with the in-progress item") instead of directing the user — it
+        # only stopped once the user scolded it into understanding its job. That
+        # job is stated up front here so it doesn't need re-teaching every
+        # session: a hands-free voice guide whose output is heard, not read, and
+        # whose job is to actively run the session and give the concrete next
+        # action itself.
+        persona = (
+            "You are Chitragupt, a hands-free voice assistant for someone whose "
+            "hands are busy — right now, helping them cook. They are listening to "
+            "you, not reading: every word is read aloud, so they cannot see any "
+            "list, screen, or plan. Your job is to actively run the session for "
+            "them — tell them the one thing to do right now in plain, concrete "
+            "terms, then the next thing when they're ready, and keep track of "
+            "everything in flight (steps, substitutions, parallel dishes, timers) "
+            "so they never have to hold it in their head or ask you to check. "
+            "Take initiative and give the actual instruction. Never answer by "
+            "pointing them at a list, telling them to check what's next, or "
+            "saying you've updated something and stopping there — figuring out "
+            "and voicing the next step is your job, not theirs."
+        )
         parts = [
-            "You are Chitragupt, an all-seeing assistant."
-            if not settings.TOOLS_ENABLED
-            else "You are Chitragupt, an all-seeing assistant with access to tools.",
+            persona + (" You have tools to help you do this." if settings.TOOLS_ENABLED else "")
         ]
 
         if scene:
@@ -1021,6 +1103,23 @@ class ChitraguptAgent:
                 "these before answering instead of assuming only the current "
                 "frame/message is all you know."
             )
+            if not is_live_frame:
+                # The single most-reported failure in live testing: on a
+                # "what's next?" turn the model answered by pointing AT the
+                # list ("start with the in-progress item", "I've updated the
+                # list") instead of speaking the actual step. That's useless
+                # for a voice user who can't see the list — the reply is read
+                # aloud. Force the concrete step, spoken, every time.
+                parts.append(
+                    "This list is read aloud — the user cannot see it. When they "
+                    "ask what to do next (or what's happening now), do not refer to "
+                    "the list itself. Never reply with a meta-answer like \"start "
+                    "with the in-progress item\", \"check the list\", or \"I've "
+                    "updated the list\". Instead, say the one current step out loud "
+                    "in concrete, do-this-now terms — the actual action, not the "
+                    "list mechanics. Give just that single current step, not the "
+                    "whole plan."
+                )
 
         parts.append(f"\n[User]\n{prompt}")
 
@@ -1090,10 +1189,14 @@ class ChitraguptAgent:
                 "have a goal to check against. Always send the FULL item list, even items already "
                 "completed — anything you leave out is dropped. Mark finished items "
                 "'completed' rather than removing them, and use 'skipped' with a note for "
-                "substitutions. If a [Task list] is shown above, read it before updating "
-                "it, and don't just recite the whole plan back in your reply — the user "
-                "can already see it. Each item MUST use the exact key 'content' for its "
-                "text — not 'task' or 'label'."
+                "substitutions. Only call this tool when the list actually CHANGES — a new "
+                "task, a step you're starting or finishing, or a substitution. If the user "
+                "is only asking what to do next and nothing has changed, do NOT call it "
+                "again — just answer from the [Task list] shown above. Reading it back is "
+                "not a reason to call the tool. When you do reply, don't dump the whole "
+                "plan, but always speak the single current step in concrete terms (the "
+                "list is read aloud; the user can't see it). Each item MUST use the exact "
+                "key 'content' for its text — not 'task' or 'label'."
                 + (
                     ' Example:\n```tool\n{"name": "update_task_list", "arguments": '
                     '{"title": "Chicken Biryani", "items": [{"content": "Marinate '
@@ -1208,6 +1311,66 @@ class ChitraguptAgent:
         if len(stripped) <= 300 and _SILENCE_NARRATION_RE.search(stripped):
             return True
         return False
+
+    def _is_list_meta_nonanswer(self, text: str) -> bool:
+        """Whether a direct-turn reply pointed the user AT the task list or its
+        status ("start with the in-progress item", "I've updated the list")
+        instead of voicing the concrete next step.
+
+        Enforcement backstop for the top live-testing failure. Deliberately
+        conservative — three conditions must all hold, so a real answer is
+        never re-prompted:
+        1. short (the bare non-answers say nothing actionable, so they run
+           short; a reply that actually states a step + mentions the list in
+           passing runs longer),
+        2. uses list-mechanics vocabulary (_LIST_META_RE), and
+        3. contains NO cooking imperative (_ACTION_CUE_RE) — if it does, it's
+           voicing a step and has done its job regardless of any list mention.
+
+        Only ever consulted on non-live direct turns; a live tick is allowed to
+        be silent and a bare status note there is expected, not a failure.
+        """
+        stripped = text.strip()
+        if not stripped or len(stripped) > 240:
+            return False
+        if _ACTION_CUE_RE.search(stripped):
+            return False
+        return bool(_LIST_META_RE.search(stripped))
+
+    async def _voice_concrete_step(
+        self, prompt: str, debug_steps: list[dict], label: str,
+    ) -> Optional[str]:
+        """One corrective call that forces the concrete next step out loud.
+
+        Used by the enforcement backstop when a direct-turn reply was a
+        list-meta non-answer. Builds a small self-contained prompt (just the
+        current plan + a hard instruction) rather than replaying the full
+        reasoning prompt, and passes no tools — this turn's only job is to
+        speak the step, not to touch state again. Returns the corrected text,
+        or None if the model somehow produced nothing usable (caller keeps the
+        original reply in that case rather than blanking it).
+        """
+        doc = tasklist.get_document()
+        summary = tasklist.render_summary(doc, lean=False, observations=False) if doc else ""
+        correct_prompt = (
+            "You are Chitragupt, a hands-free voice cooking assistant. Your last "
+            "reply pointed the user at the plan or its status instead of telling "
+            "them what to do — but they can't see any list, it is read aloud to "
+            "them. Here is the current plan for your reference only:\n\n"
+            f"[Task list]\n{summary}\n\n"
+            f"The user said: {prompt}\n\n"
+            "Reply now in one or two short spoken sentences: the single concrete "
+            "action to do right this moment — the actual physical step (for "
+            "example 'Heat some oil in a pan and add a teaspoon of cumin seeds'). "
+            "Do not mention the list, the steps, or their status. Do not say you "
+            "have updated anything. Plain spoken text, no markdown."
+        )
+        correction = await self.backend.chat(
+            image_base64=None, prompt=correct_prompt, think=False,
+        )
+        self._record_debug_step(debug_steps, label, correct_prompt, False, False, None, correction)
+        corrected = self._strip_tool_blocks(correction.text).strip()
+        return corrected or None
 
     def _run_structured_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
         """Execute tool calls already parsed by a native-tool-calling backend
