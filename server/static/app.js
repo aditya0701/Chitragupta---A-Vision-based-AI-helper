@@ -790,6 +790,24 @@ function renderTaskList(doc) {
 // switch, so a request_camera/request_live_search just turns watching on
 // without ever changing screens.
 
+// Resolves once the <video> is actually producing decoded frames
+// (videoWidth > 0), not just as soon as the stream is attached. srcObject
+// wiring returns immediately, but the element reports 0x0 until the browser
+// decodes the first frame — so a captureCurrentFrame() right after turning
+// the camera on would grab nothing (the frameless request_camera followup
+// bug). Polls rather than trusting a single 'loadedmetadata'/'playing' event,
+// since browsers disagree on which one arrives with dimensions set; capped by
+// a timeout so a genuinely dead stream can't hang the caller forever.
+function waitForVideoReady(video, timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    if (video.videoWidth > 0) { resolve(true); return; }
+    let done = false;
+    const finish = (ok) => { if (done) return; done = true; clearInterval(poll); resolve(ok); };
+    const poll = setInterval(() => { if (video.videoWidth > 0) finish(true); }, 50);
+    setTimeout(() => finish(video.videoWidth > 0), timeoutMs);
+  });
+}
+
 // Raw camera stream lifecycle — just getUserMedia + wiring the <video>
 // element, no autonomous polling. Always paired with the polling loop by
 // startLive()/stopLive() below; not called on its own anymore.
@@ -811,6 +829,11 @@ async function startCameraStream() {
   const video = document.getElementById('camera-video');
   video.srcObject = liveStream;
   document.getElementById('live-preview').style.display = 'flex';
+  // Kick playback (autoplay can be blocked until the element is visible) and
+  // wait for a real frame before reporting the stream ready, so the first
+  // captureCurrentFrame() after this resolves gets actual pixels, not null.
+  try { await video.play(); } catch { /* autoplay may be blocked; the poll below still resolves once frames flow */ }
+  await waitForVideoReady(video);
   cameraStreamActive = true;
   updateCameraToggleBtn();
   return true;

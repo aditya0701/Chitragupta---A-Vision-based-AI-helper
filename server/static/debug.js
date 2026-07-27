@@ -833,6 +833,19 @@ function renderTaskList(doc) {
 // One unified screen — no Chat/Live tabs (mirrors app.js). Camera off = plain
 // chat; camera on = camera + hands-free watching together, in place.
 
+// Resolves once the <video> is actually producing decoded frames
+// (videoWidth > 0), not just once the stream is attached — mirrors app.js.
+// See the app.js copy for why a single event isn't trusted.
+function waitForVideoReady(video, timeoutMs = 3000) {
+  return new Promise((resolve) => {
+    if (video.videoWidth > 0) { resolve(true); return; }
+    let done = false;
+    const finish = (ok) => { if (done) return; done = true; clearInterval(poll); resolve(ok); };
+    const poll = setInterval(() => { if (video.videoWidth > 0) finish(true); }, 50);
+    setTimeout(() => finish(video.videoWidth > 0), timeoutMs);
+  });
+}
+
 async function startCameraStream() {
   if (cameraStreamActive) return true;
   if (!window.isSecureContext) {
@@ -851,6 +864,8 @@ async function startCameraStream() {
   const video = document.getElementById('camera-video');
   video.srcObject = liveStream;
   document.getElementById('live-preview').style.display = 'flex';
+  try { await video.play(); } catch { /* autoplay may be blocked; the poll below still resolves once frames flow */ }
+  await waitForVideoReady(video);
   cameraStreamActive = true;
   updateCameraToggleBtn();
   return true;
