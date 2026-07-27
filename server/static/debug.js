@@ -213,6 +213,10 @@ function exportConversation() {
 }
 
 const MAX_FRAME_DIM = 1024;
+// Tighter cap for the high-volume live-tick stream (mirrors app.js) — the
+// path that burns the Groq vision model's daily token budget. Gist-level
+// live judgments don't need 1024px; ~640 sends far less image per frame.
+const LIVE_FRAME_DIM = 640;
 
 function scaledDims(w, h, maxDim) {
   const scale = Math.min(1, maxDim / Math.max(w, h));
@@ -985,15 +989,18 @@ async function sampleLiveFrame() {
 
 async function sendLiveFrame(video) {
   liveSending = true;
+  const input = document.getElementById('prompt-input');
+  const typedPrompt = input.value.trim();
+  // Autonomous ticks get the tighter LIVE_FRAME_DIM; a typed question riding
+  // along keeps full resolution (mirrors app.js).
+  const frameDim = typedPrompt ? MAX_FRAME_DIM : LIVE_FRAME_DIM;
   const canvas = document.getElementById('capture-canvas');
-  const { width, height } = scaledDims(video.videoWidth, video.videoHeight, MAX_FRAME_DIM);
+  const { width, height } = scaledDims(video.videoWidth, video.videoHeight, frameDim);
   canvas.width = width;
   canvas.height = height;
   canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
   const imageBase64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
 
-  const input = document.getElementById('prompt-input');
-  const typedPrompt = input.value.trim();
   const prompt = typedPrompt || 'Watch tick — check the scene against the active task, if any; stay silent if nothing relevant changed.';
   if (typedPrompt) input.value = '';
 

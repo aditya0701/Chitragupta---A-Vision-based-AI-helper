@@ -87,10 +87,20 @@ function exportConversation() {
   URL.revokeObjectURL(url);
 }
 
-// Shared resolution cap for every image sent to the backend (upload, live
-// tick, or a one-off camera capture) — keeps vision-token cost down without
-// a visible quality hit, since JPEG quality stays high (see below).
+// Resolution cap for one-off images — an uploaded photo or a request_camera
+// single look — where detail can matter (reading a label, a specific object)
+// and the call happens rarely enough that its token cost isn't the concern.
 const MAX_FRAME_DIM = 1024;
+
+// Tighter cap for the continuous live-tick stream. This is the high-volume
+// path — the one that burns the Groq vision model's 200k tokens/day (image
+// tokens scale with resolution, and the image is essentially the entire cost
+// of a vision call). A gist / "where's the X" / "is the pan on" judgment does
+// not need 1024px, so live ticks send ~640px: roughly 2.5x less image area,
+// hence ~2.5x more frames per day before hitting the cap, with no meaningful
+// loss for scene-level understanding. Bump back toward 1024 if fine detail on
+// live frames ever matters more than daily frame budget.
+const LIVE_FRAME_DIM = 640;
 
 function scaledDims(w, h, maxDim) {
   const scale = Math.min(1, maxDim / Math.max(w, h));
@@ -969,15 +979,19 @@ async function sampleLiveFrame() {
 
 async function sendLiveFrame(video) {
   liveSending = true;
+  const input = document.getElementById('prompt-input');
+  const typedPrompt = input.value.trim();
+  // Autonomous ticks (no typed prompt) get the tighter LIVE_FRAME_DIM cap;
+  // a typed question riding along with the frame is a real user turn where
+  // detail can matter, so it keeps the full MAX_FRAME_DIM.
+  const frameDim = typedPrompt ? MAX_FRAME_DIM : LIVE_FRAME_DIM;
   const canvas = document.getElementById('capture-canvas');
-  const { width, height } = scaledDims(video.videoWidth, video.videoHeight, MAX_FRAME_DIM);
+  const { width, height } = scaledDims(video.videoWidth, video.videoHeight, frameDim);
   canvas.width = width;
   canvas.height = height;
   canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
   const imageBase64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
 
-  const input = document.getElementById('prompt-input');
-  const typedPrompt = input.value.trim();
   const prompt = typedPrompt || 'Watch tick — check the scene against the active task, if any; stay silent if nothing relevant changed.';
   if (typedPrompt) input.value = '';
 

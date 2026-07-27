@@ -79,6 +79,20 @@ class DeepSeekBackend(VisionBackend):
             # DeepSeek reasoning call instead).
             extra_body={"reasoning_effort": "none", "reasoning_format": "parsed"},
         )
+        # Log usage: in the hybrid split, Groq does vision ONLY, so these
+        # numbers ARE the entire Groq/qwen budget consumption — the thing that
+        # hits the 200k tokens/day (TPD) cap. prompt_tokens here is dominated by
+        # the image (the ~40-token text prompt is negligible), so watching it
+        # tells you directly how much the frame resolution is costing per tick
+        # and whether lowering it is buying what it should. Was previously
+        # unlogged, leaving per-frame image cost unmeasurable (see CLAUDE.md).
+        if getattr(resp, "usage", None):
+            logger.info(
+                f"Groq vision usage: prompt={resp.usage.prompt_tokens} "
+                f"completion={resp.usage.completion_tokens} "
+                f"total={resp.usage.total_tokens} "
+                f"finish_reason={resp.choices[0].finish_reason}"
+            )
         return (resp.choices[0].message.content or "").strip()
 
     # ── Stage 2: Reason (DeepSeek) ───────────────────────────────────────────
