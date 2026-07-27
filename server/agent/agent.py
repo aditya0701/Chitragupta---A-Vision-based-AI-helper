@@ -247,146 +247,11 @@ class ChitraguptAgent:
         # the single reasoning call below instead.
         scene_description = None
         vision_prompt = None
+        goal_aware = False
         if split_stages:
-            # Hand off the active goal to the vision stage instead of always
-            # asking for a generic full-scene description. Qwen can't see
-            # the task list — without this it wrote one paragraph of
-            # everything, every tick, and DeepSeek (which never sees the
-            # image at all — see the "image_base64=None" call below) had to
-            # comb through that prose afterward to spot relevance itself.
-            # DeepSeek already decided what to watch for when it called
-            # request_live_search/update_task_list; this reads that
-            # decision back out of the task-list state — rather than
-            # spending a live per-frame reasoning call just to ask DeepSeek
-            # what to look for, which would double the calls on every tick
-            # for something it already told us via the task list.
-            in_progress_items = [
-                i for i in (tasklist.get_document() or {}).get("items", [])
-                if i["status"] == "in_progress"
-            ]
-            in_progress = [i["content"] for i in in_progress_items]
-            goal_aware = bool(in_progress)
-            # The reasoning model's own brief to the vision stage, when it
-            # wrote one (update_task_list's watch_for). Preferred over every
-            # inference below, because those are guesses at intent from item
-            # text — which is exactly what the "Find " prefix check downstream
-            # exists to patch up. The model knows what it wants to know; this
-            # is it saying so instead of us deducing it.
-            #
-            # Note this stays ONE vision call per frame: the brief is standing
-            # state read back from the task list, not a per-tick round trip
-            # asking the reasoning model what to look for (which would double
-            # the calls on every frame — see the request_live_search notes).
-            watch_briefs = [
-                (i.get("watch_for") or "").strip()
-                for i in in_progress_items
-                if (i.get("watch_for") or "").strip()
-            ]
-            # An active "Find X" with no brief of its own still has to make it
-            # into the request, or it would silently stop being searched for the
-            # moment some *other* step got a watch_for. That's a live risk, not
-            # a hypothetical: set_document deliberately keeps an in_progress
-            # find-goal alive across full replaces that omit it, so one can
-            # outlast the turn that created it and be the thing the user is
-            # actually still waiting on.
-            if watch_briefs:
-                watch_briefs += [
-                    f"Is {i['content'][5:].strip()} visible in this frame? "
-                    f"If so, say where; if not, say what is in view instead."
-                    for i in in_progress_items
-                    if tasklist.is_find_goal_content(i["content"])
-                    and not (i.get("watch_for") or "").strip()
-                ]
-            # Only a "Find X" item (from request_live_search / start_find_task)
-            # is a visual SEARCH — those, and only those, become object-
-            # detection targets, with the "Find " prefix stripped to the bare
-            # object. Other in_progress items are cooking STEPS ("Soak the
-            # dal"), not things to locate; feeding a step to the detector as a
-            # target produced nonsense ("find: Soak urad and rajma dal").
-            find_targets = [c[5:].strip() for c in in_progress if c.lower().startswith("find ")]
-            if watch_briefs:
-                # Passed through close to verbatim. The wrapper bounds length
-                # (the vision call shares the 8K TPM cap), forbids guessing —
-                # an invented answer is worse than "can't tell", since the
-                # reasoning model has no pixels to check it against — and holds
-                # the stage boundary: this model reports, the reasoning model
-                # judges. It cannot know the recipe or what "correct" looks
-                # like, so an opinion from here is unanchored; measurements and
-                # proportions, on the other hand, are exactly what a critique
-                # downstream needs, so those are explicitly invited.
-                #
-                # Length scales with the brief rather than a flat cap: a
-                # multi-part brief ("thickness, evenness, how much is left")
-                # can't answer in two sentences, but a one-line brief
-                # shouldn't be padded out to four.
-                vision_prompt = (
-                    "You are the eyes of an assistant that cannot see this image. "
-                    "Answer ONLY the request(s) below, from what is actually "
-                    "visible in the frame. Give one short sentence per thing "
-                    "asked, four sentences maximum. If you cannot tell, say so "
-                    "plainly instead of guessing. Report what you observe — "
-                    "including rough measurements and proportions when asked — "
-                    "but do not judge whether it is being done well and do not "
-                    "give advice; that is the assistant's job, not yours.\n\n"
-                    + "\n".join(f"- {b}" for b in watch_briefs)
-                )
-            elif find_targets:
-                goals_text = "; ".join(find_targets)
-                # Object-detection directive, not a scene description. A strict,
-                # tiny output format keeps this cheap and off the TPM cap;
-                # anything beyond the format is wasted tokens the reasoning
-                # stage must re-parse.
-                vision_prompt = (
-                    f"OBJECT DETECTION. Target(s) to find: {goals_text}.\n"
-                    "Reply in EXACTLY one line, in one of these two forms and nothing else:\n"
-                    "FOUND: <a short phrase for where the target is in the frame>\n"
-                    "NOT FOUND: <a short phrase for what is in view instead>\n"
-                    "No preamble, no full-scene description, no colours/layout detail."
-                )
-            elif in_progress:
-                # Active step(s) but nothing to visually search for — describe
-                # the frame as it relates to the current step so the reasoning
-                # stage sees relevant progress, without treating the step
-                # itself as a detection target.
-                steps_text = "; ".join(in_progress)
-                vision_prompt = (
-                    f"The user is working on: {steps_text}. In 1-2 short "
-                    "sentences, describe only what in this image is relevant to "
-                    "that (progress, state, or a problem). No colours/layout "
-                    "detail, no advice."
-                )
-            else:
-                # No active task — a one-line gist is all the reasoning stage
-                # needs. Terse for the same TPM/latency reason as above.
-                vision_prompt = (
-                    "In 1-2 short sentences, state only the main objects and "
-                    "what's happening in this image. No lists, no "
-                    "colours/textures/layout detail, no advice."
-                )
-            scene_description = await self.backend.vision(
-                image_base64=image_base64,
-                prompt=vision_prompt,
+            scene_description, vision_prompt, goal_aware = await self._run_vision_stage(
+                image_base64, debug_steps,
             )
-            # Recorded separately from _record_debug_step (whose shape
-            # assumes a VisionResponse) since this stage only returns a
-            # plain string — without this, the debug UI showed nothing
-            # between "frame received" and the reasoning call, making it
-            # look like the reasoning backend (e.g. DeepSeek) had seen the
-            # image itself rather than a separate vision model (Groq/qwen)
-            # having described it first.
-            debug_steps.append({
-                "label": "vision" + (" (goal-aware)" if goal_aware else ""),
-                "prompt_sent": vision_prompt,
-                "has_image": True,
-                "think": False,
-                "tools_offered": [],
-                "response_text": scene_description,
-                "response_reasoning": "",
-                "truncated": False,
-                "tool_calls_raw": [],
-                "model": getattr(self.backend, "vision_model", "unknown"),
-                "provider": "groq",
-            })
 
             # The word-overlap "has this changed" heuristic below is a poor
             # fit once the vision answer is a short goal-aware yes/no
@@ -399,7 +264,19 @@ class ChitraguptAgent:
             # plus the model's own [SILENT] protocol do the throttling
             # instead — same reasoning CLAUDE.md documents for why the old
             # _is_relevant_tick() pre-filter was removed entirely.
-            if not goal_aware and not self.frame_buffer.has_changed(scene_description):
+            # is_live_frame gate: this short-circuit exists to keep an autonomous
+            # watch tick quiet, and answering "Scene unchanged — still
+            # monitoring" to a question someone actually typed is never right.
+            # It was reachable — typing while Live Watch runs posts to /v1/chat
+            # with an image and is_live_frame=false, so a question asked about a
+            # scene that hadn't moved since the last tick got the monitoring
+            # blurb instead of an answer. Same family as the streaming-vision
+            # bug: a user turn must always get a real reply.
+            if (
+                is_live_frame
+                and not goal_aware
+                and not self.frame_buffer.has_changed(scene_description)
+            ):
                 self.frame_buffer.add(scene_description)
                 return {
                     "text": "👁️ Scene unchanged — still monitoring.",
@@ -890,10 +767,42 @@ class ChitraguptAgent:
             self.memory.add("user", prompt)
 
         think = should_think(prompt)
-        has_image = bool(image_base64)
+        debug_steps: list[dict] = []
+
+        # Stage 1, same as _process_locked. Without this the image was passed
+        # raw to chat_stream() and dropped on the floor — the reasoning model in
+        # the hybrid is text-only and ignores the argument — so every typed turn
+        # carrying a frame (an upload, and every request_camera follow-up) was
+        # answered blind while the prompt claimed an image was attached. See
+        # _run_vision_stage for the full account.
+        #
+        # Deliberately NOT reusing _process_locked's "scene unchanged"
+        # short-circuit: that exists to keep an autonomous watch tick quiet, and
+        # a typed question must always get a real answer.
+        split_stages = bool(image_base64) and self.backend.SPLIT_VISION_REASONING
+        scene_description = None
+        vision_prompt = None
+        if split_stages:
+            scene_description, vision_prompt, _ = await self._run_vision_stage(
+                image_base64, debug_steps,
+            )
+            # Let the client log the vision round trip inline, the same way the
+            # non-streaming path does — otherwise the debug wire log jumps
+            # straight from the POST to the reasoning output and it looks like
+            # DeepSeek saw the picture itself.
+            yield {
+                "type": "vision",
+                "vision_prompt": vision_prompt,
+                "scene_description": scene_description,
+            }
+
+        # False once the frame has been converted to text: the reasoning model
+        # is receiving a description, not pixels, and telling it otherwise makes
+        # it answer as though it can see.
+        has_image = bool(image_base64) and not split_stages
 
         reason_prompt = self._build_reason_prompt(
-            prompt=prompt, scene=None, has_image=has_image, think=think,
+            prompt=prompt, scene=scene_description, has_image=has_image, think=think,
             is_live_frame=False, is_camera_followup=is_camera_followup,
         )
 
@@ -909,10 +818,13 @@ class ChitraguptAgent:
             else None
         )
 
-        debug_steps: list[dict] = []
-
         response: Optional[VisionResponse] = None
-        async for event in self._stream_backend_call(image_base64, reason_prompt, think, native_tools):
+        # image_base64=None once the vision stage has run: the frame is already
+        # in the prompt as text, and re-sending pixels to a text-only reasoning
+        # model is at best ignored (DeepSeek) and at worst double-billed.
+        async for event in self._stream_backend_call(
+            None if split_stages else image_base64, reason_prompt, think, native_tools,
+        ):
             if event["type"] == "done":
                 response = event["response"]
             else:
@@ -996,7 +908,8 @@ class ChitraguptAgent:
                     "provider": response.provider,
                     "tool_calls": tool_results,
                     "think_blocks": think_blocks,
-                    "scene_description": None,
+                    "scene_description": scene_description,
+                    "vision_prompt": vision_prompt,
                     "needs_camera": True,
                     "debug": {"steps": debug_steps},
                 },
@@ -1016,7 +929,8 @@ class ChitraguptAgent:
                     "provider": response.provider,
                     "tool_calls": tool_results,
                     "think_blocks": think_blocks,
-                    "scene_description": None,
+                    "scene_description": scene_description,
+                    "vision_prompt": vision_prompt,
                     "needs_live_search": True,
                     "search_target": target,
                     "debug": {"steps": debug_steps},
@@ -1113,7 +1027,8 @@ class ChitraguptAgent:
                 "provider": response.provider,
                 "tool_calls": tool_results or [],
                 "think_blocks": think_blocks,
-                "scene_description": None,
+                "scene_description": scene_description,
+                "vision_prompt": vision_prompt,
                 "goal_complete": goal_complete,
                 "debug": {"steps": debug_steps, "timer_completions": timer_update["completed"]},
             },
@@ -1159,6 +1074,172 @@ class ChitraguptAgent:
             and tasklist.is_find_goal(str(r["arguments"].get("item", "")))
             for r in tool_results
         )
+
+    async def _run_vision_stage(
+        self, image_base64: str, debug_steps: list[dict],
+    ) -> tuple[str, str, bool]:
+        """Stage 1 for split backends: turn the frame into text.
+
+        Extracted so the streaming path can run it too. It could not before,
+        and the consequence was severe: _process_stream_locked passed the raw
+        image_base64 straight to chat_stream(), but on the hybrid backend the
+        reasoning model is text-only and DeepSeekBackend.chat_stream ignores
+        the argument entirely. So on every typed turn carrying an image the
+        frame reached neither model — never described by Groq/qwen, never seen
+        by DeepSeek — while _build_reason_prompt was still told has_image=True.
+        The model answered confidently about a picture nobody had looked at.
+
+        That silently broke request_camera, whose entire purpose is delivering
+        a frame: the client captured and uploaded one on request and the server
+        binned it on arrival. Live ticks were unaffected (they run through
+        _process_locked, which always had this block), which is exactly why it
+        went unnoticed — watching worked, asking did not.
+
+        Returns (scene_description, vision_prompt, goal_aware). The caller owns
+        what happens next: _process_locked additionally runs its frame-buffer
+        'scene unchanged' short-circuit, which must NOT apply to a typed turn —
+        someone is waiting on an answer there and silence is never correct.
+        """
+        # Hand off the active goal to the vision stage instead of always
+        # asking for a generic full-scene description. Qwen can't see
+        # the task list — without this it wrote one paragraph of
+        # everything, every tick, and DeepSeek (which never sees the
+        # image at all — see the "image_base64=None" call below) had to
+        # comb through that prose afterward to spot relevance itself.
+        # DeepSeek already decided what to watch for when it called
+        # request_live_search/update_task_list; this reads that
+        # decision back out of the task-list state — rather than
+        # spending a live per-frame reasoning call just to ask DeepSeek
+        # what to look for, which would double the calls on every tick
+        # for something it already told us via the task list.
+        in_progress_items = [
+            i for i in (tasklist.get_document() or {}).get("items", [])
+            if i["status"] == "in_progress"
+        ]
+        in_progress = [i["content"] for i in in_progress_items]
+        goal_aware = bool(in_progress)
+        # The reasoning model's own brief to the vision stage, when it
+        # wrote one (update_task_list's watch_for). Preferred over every
+        # inference below, because those are guesses at intent from item
+        # text — which is exactly what the "Find " prefix check downstream
+        # exists to patch up. The model knows what it wants to know; this
+        # is it saying so instead of us deducing it.
+        #
+        # Note this stays ONE vision call per frame: the brief is standing
+        # state read back from the task list, not a per-tick round trip
+        # asking the reasoning model what to look for (which would double
+        # the calls on every frame — see the request_live_search notes).
+        watch_briefs = [
+            (i.get("watch_for") or "").strip()
+            for i in in_progress_items
+            if (i.get("watch_for") or "").strip()
+        ]
+        # An active "Find X" with no brief of its own still has to make it
+        # into the request, or it would silently stop being searched for the
+        # moment some *other* step got a watch_for. That's a live risk, not
+        # a hypothetical: set_document deliberately keeps an in_progress
+        # find-goal alive across full replaces that omit it, so one can
+        # outlast the turn that created it and be the thing the user is
+        # actually still waiting on.
+        if watch_briefs:
+            watch_briefs += [
+                f"Is {i['content'][5:].strip()} visible in this frame? "
+                f"If so, say where; if not, say what is in view instead."
+                for i in in_progress_items
+                if tasklist.is_find_goal_content(i["content"])
+                and not (i.get("watch_for") or "").strip()
+            ]
+        # Only a "Find X" item (from request_live_search / start_find_task)
+        # is a visual SEARCH — those, and only those, become object-
+        # detection targets, with the "Find " prefix stripped to the bare
+        # object. Other in_progress items are cooking STEPS ("Soak the
+        # dal"), not things to locate; feeding a step to the detector as a
+        # target produced nonsense ("find: Soak urad and rajma dal").
+        find_targets = [c[5:].strip() for c in in_progress if c.lower().startswith("find ")]
+        if watch_briefs:
+            # Passed through close to verbatim. The wrapper bounds length
+            # (the vision call shares the 8K TPM cap), forbids guessing —
+            # an invented answer is worse than "can't tell", since the
+            # reasoning model has no pixels to check it against — and holds
+            # the stage boundary: this model reports, the reasoning model
+            # judges. It cannot know the recipe or what "correct" looks
+            # like, so an opinion from here is unanchored; measurements and
+            # proportions, on the other hand, are exactly what a critique
+            # downstream needs, so those are explicitly invited.
+            #
+            # Length scales with the brief rather than a flat cap: a
+            # multi-part brief ("thickness, evenness, how much is left")
+            # can't answer in two sentences, but a one-line brief
+            # shouldn't be padded out to four.
+            vision_prompt = (
+                "You are the eyes of an assistant that cannot see this image. "
+                "Answer ONLY the request(s) below, from what is actually "
+                "visible in the frame. Give one short sentence per thing "
+                "asked, four sentences maximum. If you cannot tell, say so "
+                "plainly instead of guessing. Report what you observe — "
+                "including rough measurements and proportions when asked — "
+                "but do not judge whether it is being done well and do not "
+                "give advice; that is the assistant's job, not yours.\n\n"
+                + "\n".join(f"- {b}" for b in watch_briefs)
+            )
+        elif find_targets:
+            goals_text = "; ".join(find_targets)
+            # Object-detection directive, not a scene description. A strict,
+            # tiny output format keeps this cheap and off the TPM cap;
+            # anything beyond the format is wasted tokens the reasoning
+            # stage must re-parse.
+            vision_prompt = (
+                f"OBJECT DETECTION. Target(s) to find: {goals_text}.\n"
+                "Reply in EXACTLY one line, in one of these two forms and nothing else:\n"
+                "FOUND: <a short phrase for where the target is in the frame>\n"
+                "NOT FOUND: <a short phrase for what is in view instead>\n"
+                "No preamble, no full-scene description, no colours/layout detail."
+            )
+        elif in_progress:
+            # Active step(s) but nothing to visually search for — describe
+            # the frame as it relates to the current step so the reasoning
+            # stage sees relevant progress, without treating the step
+            # itself as a detection target.
+            steps_text = "; ".join(in_progress)
+            vision_prompt = (
+                f"The user is working on: {steps_text}. In 1-2 short "
+                "sentences, describe only what in this image is relevant to "
+                "that (progress, state, or a problem). No colours/layout "
+                "detail, no advice."
+            )
+        else:
+            # No active task — a one-line gist is all the reasoning stage
+            # needs. Terse for the same TPM/latency reason as above.
+            vision_prompt = (
+                "In 1-2 short sentences, state only the main objects and "
+                "what's happening in this image. No lists, no "
+                "colours/textures/layout detail, no advice."
+            )
+        scene_description = await self.backend.vision(
+            image_base64=image_base64,
+            prompt=vision_prompt,
+        )
+        # Recorded separately from _record_debug_step (whose shape
+        # assumes a VisionResponse) since this stage only returns a
+        # plain string — without this, the debug UI showed nothing
+        # between "frame received" and the reasoning call, making it
+        # look like the reasoning backend (e.g. DeepSeek) had seen the
+        # image itself rather than a separate vision model (Groq/qwen)
+        # having described it first.
+        debug_steps.append({
+            "label": "vision" + (" (goal-aware)" if goal_aware else ""),
+            "prompt_sent": vision_prompt,
+            "has_image": True,
+            "think": False,
+            "tools_offered": [],
+            "response_text": scene_description,
+            "response_reasoning": "",
+            "truncated": False,
+            "tool_calls_raw": [],
+            "model": getattr(self.backend, "vision_model", "unknown"),
+            "provider": "groq",
+        })
+        return scene_description, vision_prompt, goal_aware
 
     def _available_tools(
         self, has_image: bool, is_live_frame: bool, is_camera_followup: bool = False,
