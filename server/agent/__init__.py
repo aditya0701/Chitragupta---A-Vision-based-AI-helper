@@ -296,16 +296,24 @@ def build_default_tools() -> ToolRegistry:
                         "watch_for": {
                             "type": "string",
                             "description": (
-                                "Optional. Your standing instruction to the camera for this step. "
-                                "You cannot see the camera yourself — a separate vision model looks "
-                                "for you and can only report what you ask it for, so write this as a "
-                                "brief for someone looking on your behalf: state exactly what to "
-                                "check or read, and what would count as a problem. "
-                                "e.g. 'Read the ingredient list on the package the user is holding; "
-                                "flag it if it contains beef, pork, lard, gelatin, or animal rennet.' "
-                                "or 'Say whether the onions have turned golden brown yet, or are "
-                                "starting to burn.' Set it on the item that is in_progress; it stays "
-                                "in effect for every frame until you change it."
+                                "Optional. Your standing instruction to the camera for this step. It "
+                                "is re-sent with every frame until you change it, so write it as the "
+                                "question you want answered continuously. "
+                                "You cannot see the camera yourself: a separate vision model looks on "
+                                "your behalf, and it knows nothing about the recipe, the conversation, "
+                                "or what 'correct' looks like — it only reports what is literally in "
+                                "frame. So ask it for OBSERVATIONS, never for judgement. Ask 'how thick "
+                                "are the slices', not 'are they being cut properly'; it reports, you "
+                                "supply the critique and the advice from what it reports back. "
+                                "Ask for everything the step needs in one brief — usually what is "
+                                "happening, how far along it is, and how you will know it is done. "
+                                "e.g. 'Describe how the onion is being cut: slice thickness, how even "
+                                "the slices are, and roughly what fraction is still uncut. Say plainly "
+                                "when the whole onion is chopped.' or 'Read the ingredient list on the "
+                                "package the user is holding and list any of: beef, pork, lard, "
+                                "gelatin, animal rennet.' "
+                                "Set it on the item that is in_progress, and rewrite it when the step "
+                                "changes."
                             ),
                         },
                     },

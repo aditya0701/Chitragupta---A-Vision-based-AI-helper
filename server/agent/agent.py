@@ -285,16 +285,29 @@ class ChitraguptAgent:
             # target produced nonsense ("find: Soak urad and rajma dal").
             find_targets = [c[5:].strip() for c in in_progress if c.lower().startswith("find ")]
             if watch_briefs:
-                # Passed through close to verbatim. The wrapper only bounds
-                # length (the vision call shares the 8K TPM cap) and forbids
-                # guessing — an invented answer is worse than "can't tell",
-                # since the reasoning model has no pixels to check it against.
+                # Passed through close to verbatim. The wrapper bounds length
+                # (the vision call shares the 8K TPM cap), forbids guessing —
+                # an invented answer is worse than "can't tell", since the
+                # reasoning model has no pixels to check it against — and holds
+                # the stage boundary: this model reports, the reasoning model
+                # judges. It cannot know the recipe or what "correct" looks
+                # like, so an opinion from here is unanchored; measurements and
+                # proportions, on the other hand, are exactly what a critique
+                # downstream needs, so those are explicitly invited.
+                #
+                # Length scales with the brief rather than a flat cap: a
+                # multi-part brief ("thickness, evenness, how much is left")
+                # can't answer in two sentences, but a one-line brief
+                # shouldn't be padded out to four.
                 vision_prompt = (
                     "You are the eyes of an assistant that cannot see this image. "
                     "Answer ONLY the request(s) below, from what is actually "
-                    "visible in the frame. At most 2 short sentences. If you "
-                    "cannot tell, say so plainly instead of guessing. Factual "
-                    "only — no advice, no full-scene description.\n\n"
+                    "visible in the frame. Give one short sentence per thing "
+                    "asked, four sentences maximum. If you cannot tell, say so "
+                    "plainly instead of guessing. Report what you observe — "
+                    "including rough measurements and proportions when asked — "
+                    "but do not judge whether it is being done well and do not "
+                    "give advice; that is the assistant's job, not yours.\n\n"
                     + "\n".join(f"- {b}" for b in watch_briefs)
                 )
             elif find_targets:
