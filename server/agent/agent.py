@@ -362,10 +362,11 @@ class ChitraguptAgent:
             has_image=has_image,
             think=think,
             is_live_frame=is_live_frame,
+            is_camera_followup=is_camera_followup,
         )
 
         native_tools = (
-            [t.to_openai_tool() for t in self._available_tools(has_image, is_live_frame)]
+            [t.to_openai_tool() for t in self._available_tools(has_image, is_live_frame, is_camera_followup)]
             if settings.TOOLS_ENABLED and self.backend.SUPPORTS_NATIVE_TOOLS
             else None
         )
@@ -409,6 +410,7 @@ class ChitraguptAgent:
                 reason_prompt = self._build_reason_prompt(
                     prompt=prompt, scene=scene_description, has_image=has_image,
                     think=think, is_live_frame=is_live_frame, strip_task_list=True,
+                    is_camera_followup=is_camera_followup,
                 )
                 response = await self.backend.chat(
                     image_base64=None if split_stages else image_base64,
@@ -494,6 +496,7 @@ class ChitraguptAgent:
                 reason_prompt = self._build_reason_prompt(
                     prompt=prompt, scene=scene_description, has_image=has_image,
                     think=think, is_live_frame=is_live_frame,
+                    is_camera_followup=is_camera_followup,
                 )
                 response = await self.backend.chat(
                     image_base64=None if split_stages else image_base64,
@@ -805,11 +808,18 @@ class ChitraguptAgent:
         has_image = bool(image_base64)
 
         reason_prompt = self._build_reason_prompt(
-            prompt=prompt, scene=None, has_image=has_image, think=think, is_live_frame=False,
+            prompt=prompt, scene=None, has_image=has_image, think=think,
+            is_live_frame=False, is_camera_followup=is_camera_followup,
         )
 
+        # Was self.tools.to_openai_tools() — every tool, unconditionally — which
+        # is why the stream path (typed chat) kept re-offering request_camera on
+        # a camera followup and looped (needs_camera=true again and again, the
+        # bug the wire log shows). Mirror the non-stream path: filter through
+        # _available_tools so request_camera/request_live_search drop out once
+        # this turn already has an image or IS the followup to a camera request.
         native_tools = (
-            self.tools.to_openai_tools()
+            [t.to_openai_tool() for t in self._available_tools(has_image, False, is_camera_followup)]
             if settings.TOOLS_ENABLED and self.backend.SUPPORTS_NATIVE_TOOLS
             else None
         )
@@ -854,7 +864,8 @@ class ChitraguptAgent:
                 )
                 think = False
                 reason_prompt = self._build_reason_prompt(
-                    prompt=prompt, scene=None, has_image=has_image, think=think, is_live_frame=False,
+                    prompt=prompt, scene=None, has_image=has_image, think=think,
+                    is_live_frame=False, is_camera_followup=is_camera_followup,
                 )
                 response = await self.backend.chat(
                     image_base64=image_base64, prompt=reason_prompt,
@@ -1036,15 +1047,26 @@ class ChitraguptAgent:
         match = re.search(r"try again in ([\d.]+)s", str(e))
         return float(match.group(1)) if match else default
 
-    def _available_tools(self, has_image: bool, is_live_frame: bool) -> list:
+    def _available_tools(
+        self, has_image: bool, is_live_frame: bool, is_camera_followup: bool = False,
+    ) -> list:
         """Tools worth offering for this turn — excludes request_camera/
         request_live_search once there's already an image to look at (a
         live tick or an image-attached message). Shared by both the native
         tool-calling path (native_tools) and the prose tool-list built into
         the prompt for non-native backends, so the two can't drift apart —
         see CLAUDE.md's "second-opinion review" notes on this exact gap.
+
+        is_camera_followup also suppresses them: this turn IS the response to a
+        prior request_camera, so re-offering the tool just lets the model ask
+        for a frame again instead of answering — the double-fire loop seen in
+        real transcripts (Phase B kept coming back needs_camera=true because it
+        arrived with no image attached and request_camera was still on offer).
+        Suppressing on the followup breaks that loop regardless of whether the
+        frame actually made it: with no image, the model answers with what it
+        has (or says it couldn't see) rather than looping.
         """
-        offer_camera = not has_image and not is_live_frame
+        offer_camera = not has_image and not is_live_frame and not is_camera_followup
         camera_tool_names = {"request_camera", "request_live_search"}
         return [t for t in self.tools.list_tools() if t.name not in camera_tool_names or offer_camera]
 
@@ -1056,6 +1078,7 @@ class ChitraguptAgent:
         think: bool = True,
         is_live_frame: bool = False,
         strip_task_list: bool = False,
+        is_camera_followup: bool = False,
     ) -> str:
         """Build the prompt for the reasoning model."""
         # Persona doubles as a role brief. The single most-reported live-testing
@@ -1131,8 +1154,8 @@ class ChitraguptAgent:
             # tool there just invites the model to ask for something it
             # already has (or, for request_live_search, to re-start watching
             # that's already running).
-            offer_camera = not has_image and not is_live_frame
-            tools = self._available_tools(has_image, is_live_frame)
+            offer_camera = not has_image and not is_live_frame and not is_camera_followup
+            tools = self._available_tools(has_image, is_live_frame, is_camera_followup)
             tool_list = "\n".join(
                 f"- {t.name}({', '.join(t.parameters)}): {t.description}"
                 for t in tools
