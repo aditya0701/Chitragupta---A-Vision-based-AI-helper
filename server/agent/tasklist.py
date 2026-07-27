@@ -66,6 +66,16 @@ def set_document(title: str, items: list[dict]) -> dict:
             # the item list on every update_task_list call but doesn't know
             # about (and shouldn't have to resend) prior observations.
             "observations": (existing_item or {}).get("observations", []),
+            # The reasoning model's own brief to the vision stage for this
+            # item — "read the ingredient list, flag any gelatin". Unlike
+            # observations this IS the model's to set, so an incoming value
+            # wins; absent one we preserve what was already there rather
+            # than dropping the standing query on every unrelated full
+            # replace. See agent.py's vision-prompt construction, which
+            # prefers this over inferring intent from the item text.
+            "watch_for": (item.get("watch_for") or "").strip()
+            or (existing_item or {}).get("watch_for")
+            or None,
         })
 
     if items and not normalized and existing.get("items"):
@@ -97,7 +107,7 @@ def set_document(title: str, items: list[dict]) -> dict:
     for item in existing.get("items", []):
         if (
             item.get("status") == "in_progress"
-            and item.get("content", "").lower().startswith("find ")
+            and is_find_goal_content(item.get("content", ""))
             and item.get("content", "").lower() not in new_contents
         ):
             document["items"].append(item)
@@ -136,6 +146,32 @@ def start_find_task(target: str) -> dict:
 
 MAX_OBSERVATIONS_PER_ITEM = 5
 
+FIND_GOAL_PREFIX = "find "
+
+
+def is_find_goal_content(content: str) -> bool:
+    return content.strip().lower().startswith(FIND_GOAL_PREFIX)
+
+
+def is_find_goal(item_ref: str) -> bool:
+    """True if `item_ref` names a live-search find-goal — a "Find X" item, the
+    only kind that can be *completed* by spotting something.
+
+    Read by agent.py to decide whether a log_observation(found=True) should
+    also close the camera (goal_complete). Matching is on the item's text,
+    which never changes, so this answers the same before and after
+    add_observation flips the status.
+    """
+    document = get_document()
+    if not document:
+        return False
+    ref = item_ref.strip().lower()
+    return any(
+        (i["id"] == item_ref or i["content"].lower() == ref)
+        and is_find_goal_content(i["content"])
+        for i in document.get("items", [])
+    )
+
 
 def add_observation(item_ref: str, note: str, found: bool = False) -> str:
     """Append a short note to whichever task-list item `item_ref` matches
@@ -143,11 +179,18 @@ def add_observation(item_ref: str, note: str, found: bool = False) -> str:
     prompt injection in render_summary stays small regardless of session
     length — older notes are dropped, not the whole log.
 
-    `found=True` also marks the matched item "completed" — a find-task
-    (registered by request_live_search/start_find_task as "in_progress") is
-    by definition done once the target's been spotted, so this is what lets
-    agent.py detect "the active goal just finished" from task-list state
-    alone, without a separate signal threaded through just for this.
+    `found=True` marks the matched item "completed" — but ONLY for a
+    "Find X" item (registered by request_live_search/start_find_task), which
+    is by definition done once the target's been spotted.
+
+    That guard is the fix for a real failure: `found` is documented to the
+    model as "important enough to guarantee they're told", so it reasonably
+    set it on ordinary progress notes. On a cooking STEP that silently
+    completed the step — one real session marked "Prepare tadka" done off a
+    note reading "oil poured into empty pan, no ingredients added yet", and
+    (via agent.py's goal_complete) closed the camera too. A step is finished
+    when the work is finished, never because a frame was worth mentioning;
+    only "speak this out loud" is now carried by the separate `alert` flag.
     """
     document = get_document()
     if not document or not document.get("items"):
@@ -166,10 +209,26 @@ def add_observation(item_ref: str, note: str, found: bool = False) -> str:
     if len(obs) > MAX_OBSERVATIONS_PER_ITEM:
         del obs[: len(obs) - MAX_OBSERVATIONS_PER_ITEM]
 
-    if found:
+    completed = False
+    if found and is_find_goal_content(match["content"]):
         match["status"] = "completed"
+        completed = True
 
     DOCUMENT_FILE.write_text(json.dumps(document, indent=2))
+    if found and not completed:
+        # Tell the model plainly rather than failing silently — it asked to
+        # end something that isn't a search, and needs to know the step is
+        # still open so it doesn't move on.
+        logger.info(
+            f"add_observation: ignored found=True on non-find item "
+            f"{match['content']!r} — logged as a plain observation."
+        )
+        return (
+            f"Logged observation for '{match['content']}'. Note: found=true only "
+            "applies to a 'Find X' search goal, so this step was NOT marked "
+            "completed and is still in progress. To say something out loud, use "
+            "alert=true; to finish a step, use update_task_list."
+        )
     return f"Logged observation for '{match['content']}'."
 
 
@@ -200,6 +259,13 @@ def render_summary(document: Optional[dict], lean: bool = False, observations: b
         if item.get("note"):
             line += f"  ({item['note']})"
         lines.append(line)
+        # Only for the step actually underway: this is the standing brief the
+        # vision stage is running right now, so it's shown so the model can
+        # see what it previously asked for and revise it. On a pending or
+        # finished item it isn't driving anything, and would just be prompt
+        # bulk on every future turn.
+        if item["status"] == "in_progress" and item.get("watch_for"):
+            lines.append(f"    watching for: {item['watch_for']}")
         if not observations or (lean and item["status"] in ("completed", "skipped")):
             continue
         for obs in item.get("observations", []):

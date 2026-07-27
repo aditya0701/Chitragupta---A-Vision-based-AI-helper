@@ -180,21 +180,26 @@ def tool_update_task_list(title: str, items: list) -> str:
     return f"Task list '{title}' updated ({summary})."
 
 
-def tool_log_observation(item: str, note: str, found: bool = False) -> str:
+def tool_log_observation(item: str, note: str, found: bool = False, alert: bool = False) -> str:
     """Silently record a short fact against a task-list item — the substitute
     for re-describing the whole scene every turn: write the fact once, read
     it back later instead of needing the original image again.
 
-    `found` doesn't change what's stored — it's read back by agent.py to
-    decide whether this observation needs a guaranteed spoken alert (see the
-    found_alert check in _process_locked). Tool-calling models frequently
-    return an empty `content` alongside a tool call in the same completion
-    (the API accepts text+tool_calls together, but this model reliably
-    produces neither), so a live tick where the model just called
-    log_observation with nothing else previously went completely silent even
-    when the note said the target was found. `found=True` routes that case
-    through the existing tool-result follow-up call instead of relying on
-    the model to also write visible text in the same turn."""
+    `alert` and `found` are two different things, and conflating them was a
+    real bug (see tasklist.add_observation):
+
+      alert=True  "say this out loud this turn." Pure delivery, no state
+                  change. Exists because tool-calling models routinely
+                  return an empty `content` alongside a tool call, so a tick
+                  that only called log_observation went silent even when the
+                  note mattered. agent.py routes this through the normal
+                  tool-result follow-up call instead of trusting the model
+                  to also write visible text in the same completion.
+      found=True  "the thing being searched for is now on screen." Ends a
+                  "Find X" goal: completes the item and (via agent.py's
+                  goal_complete) closes the camera. Implies alert.
+
+    Anything that is merely worth mentioning is `alert`, not `found`."""
     from . import tasklist
     return tasklist.add_observation(item, note, found=found)
 
@@ -288,6 +293,21 @@ def build_default_tools() -> ToolRegistry:
                         "content": {"type": "string", "description": "The item's text — always use this exact key, never 'task' or 'label'"},
                         "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "skipped"]},
                         "note": {"type": "string", "description": "Optional, e.g. reason for a substitution"},
+                        "watch_for": {
+                            "type": "string",
+                            "description": (
+                                "Optional. Your standing instruction to the camera for this step. "
+                                "You cannot see the camera yourself — a separate vision model looks "
+                                "for you and can only report what you ask it for, so write this as a "
+                                "brief for someone looking on your behalf: state exactly what to "
+                                "check or read, and what would count as a problem. "
+                                "e.g. 'Read the ingredient list on the package the user is holding; "
+                                "flag it if it contains beef, pork, lard, gelatin, or animal rennet.' "
+                                "or 'Say whether the onions have turned golden brown yet, or are "
+                                "starting to burn.' Set it on the item that is in_progress; it stays "
+                                "in effect for every frame until you change it."
+                            ),
+                        },
                     },
                     "required": ["content", "status"],
                 },
@@ -302,17 +322,19 @@ def build_default_tools() -> ToolRegistry:
             "e.g. what you just saw relevant to it. Does not produce a reply "
             "to the user by itself; call this on every frame that's relevant "
             "to an active item, whether or not you also decide to say "
-            "something out loud this turn. Set found=true if this note means "
-            "you found the thing the user is looking for (or another change "
-            "important enough to guarantee they're told) — this triggers a "
-            "spoken alert on its own, so the user is notified even if you "
-            "don't separately write visible text this turn."
+            "something out loud this turn. Use alert=true when the note is "
+            "worth telling the user right now — that guarantees they hear it "
+            "even if you write no visible text this turn. Use found=true ONLY "
+            "to end a 'Find X' search because the target is now on screen; it "
+            "completes that item and turns the camera off, so never use it for "
+            "ordinary progress on a step."
         ),
         fn=tool_log_observation,
         parameters={
             "item": {"type": "string", "description": "The exact task-list item content (or its id) this observation is about", "required": True},
             "note": {"type": "string", "description": "Short factual note, e.g. 'freezer drawer open, chicken tenders visible, no ice cream'", "required": True},
-            "found": {"type": "boolean", "description": "True if this note means the target was found or something important changed — guarantees a spoken alert", "required": False},
+            "alert": {"type": "boolean", "description": "True to say this note out loud to the user this turn. Use for anything noteworthy — progress, a problem, something they should know. Changes nothing in the task list.", "required": False},
+            "found": {"type": "boolean", "description": "True ONLY if this is a 'Find X' item and the target is now visible. Marks that search complete and closes the camera. Never use it to report progress on a step — use alert instead.", "required": False},
         },
         needs_followup=False,
     ))

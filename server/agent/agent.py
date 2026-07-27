@@ -240,11 +240,43 @@ class ChitraguptAgent:
             # spending a live per-frame reasoning call just to ask DeepSeek
             # what to look for, which would double the calls on every tick
             # for something it already told us via the task list.
-            in_progress = [
-                i["content"] for i in (tasklist.get_document() or {}).get("items", [])
+            in_progress_items = [
+                i for i in (tasklist.get_document() or {}).get("items", [])
                 if i["status"] == "in_progress"
             ]
+            in_progress = [i["content"] for i in in_progress_items]
             goal_aware = bool(in_progress)
+            # The reasoning model's own brief to the vision stage, when it
+            # wrote one (update_task_list's watch_for). Preferred over every
+            # inference below, because those are guesses at intent from item
+            # text — which is exactly what the "Find " prefix check downstream
+            # exists to patch up. The model knows what it wants to know; this
+            # is it saying so instead of us deducing it.
+            #
+            # Note this stays ONE vision call per frame: the brief is standing
+            # state read back from the task list, not a per-tick round trip
+            # asking the reasoning model what to look for (which would double
+            # the calls on every frame — see the request_live_search notes).
+            watch_briefs = [
+                (i.get("watch_for") or "").strip()
+                for i in in_progress_items
+                if (i.get("watch_for") or "").strip()
+            ]
+            # An active "Find X" with no brief of its own still has to make it
+            # into the request, or it would silently stop being searched for the
+            # moment some *other* step got a watch_for. That's a live risk, not
+            # a hypothetical: set_document deliberately keeps an in_progress
+            # find-goal alive across full replaces that omit it, so one can
+            # outlast the turn that created it and be the thing the user is
+            # actually still waiting on.
+            if watch_briefs:
+                watch_briefs += [
+                    f"Is {i['content'][5:].strip()} visible in this frame? "
+                    f"If so, say where; if not, say what is in view instead."
+                    for i in in_progress_items
+                    if tasklist.is_find_goal_content(i["content"])
+                    and not (i.get("watch_for") or "").strip()
+                ]
             # Only a "Find X" item (from request_live_search / start_find_task)
             # is a visual SEARCH — those, and only those, become object-
             # detection targets, with the "Find " prefix stripped to the bare
@@ -252,7 +284,20 @@ class ChitraguptAgent:
             # dal"), not things to locate; feeding a step to the detector as a
             # target produced nonsense ("find: Soak urad and rajma dal").
             find_targets = [c[5:].strip() for c in in_progress if c.lower().startswith("find ")]
-            if find_targets:
+            if watch_briefs:
+                # Passed through close to verbatim. The wrapper only bounds
+                # length (the vision call shares the 8K TPM cap) and forbids
+                # guessing — an invented answer is worse than "can't tell",
+                # since the reasoning model has no pixels to check it against.
+                vision_prompt = (
+                    "You are the eyes of an assistant that cannot see this image. "
+                    "Answer ONLY the request(s) below, from what is actually "
+                    "visible in the frame. At most 2 short sentences. If you "
+                    "cannot tell, say so plainly instead of guessing. Factual "
+                    "only — no advice, no full-scene description.\n\n"
+                    + "\n".join(f"- {b}" for b in watch_briefs)
+                )
+            elif find_targets:
                 goals_text = "; ".join(find_targets)
                 # Object-detection directive, not a scene description. A strict,
                 # tiny output format keeps this cheap and off the TPM cap;
@@ -599,18 +644,23 @@ class ChitraguptAgent:
             }
 
         # log_observation defaults to needs_followup=False (it's a silent
-        # side effect on most ticks), but a call with found=True means this
-        # note is the thing the user is waiting to hear about — force the
-        # same follow-up call the needs_followup tools get rather than
-        # trusting the model to also have written visible text in the same
-        # completion. That trust was the actual bug: tool-calling models
-        # routinely return an empty content field alongside a tool call, so
-        # a found-it tick that only called log_observation went completely
-        # silent even though the note itself said the target was found.
-        found_alert = any(
-            r["tool"] == "log_observation" and r["arguments"].get("found")
-            for r in tool_results
-        )
+        # side effect on most ticks), but a call asking to be heard means this
+        # note is the thing the user is waiting for — force the same follow-up
+        # call the needs_followup tools get rather than trusting the model to
+        # also have written visible text in the same completion. That trust was
+        # the actual bug: tool-calling models routinely return an empty content
+        # field alongside a tool call, so a noteworthy tick that only called
+        # log_observation went completely silent.
+        found_alert = self._speak_alert(tool_results)
+        # Deliberately NOT the same condition as found_alert. "Worth saying out
+        # loud" and "the search is over, shut the camera off" are unrelated, and
+        # wiring them to one flag is what made the camera unusable: found was
+        # documented as "important enough to guarantee they're told", so the
+        # model set it on ordinary progress notes and the camera closed itself
+        # mid-session. Closing only ever follows an actual "Find X" goal being
+        # satisfied — tasklist.is_find_goal is the same check that guards the
+        # item-completion half in add_observation.
+        goal_complete = self._goal_complete(tool_results)
         # A side-effect tool (update_task_list, start_timer) ran but the model
         # wrote no visible text with it — on a direct user turn that leaves the
         # user with a bare "⚡ Used tool" blob and no spoken reply (the "it made
@@ -738,7 +788,9 @@ class ChitraguptAgent:
             # Watch and close the camera — the find-goal that started this
             # session of continuous polling just got marked "completed" in
             # the task list (see tasklist.add_observation's found= handling).
-            "goal_complete": found_alert,
+            # Only a real search satisfies this; a merely noteworthy frame
+            # sets found_alert instead and leaves the camera running.
+            "goal_complete": goal_complete,
             "debug": {"steps": debug_steps, "timer_completions": timer_update["completed"]},
         }
 
@@ -939,16 +991,13 @@ class ChitraguptAgent:
             }
             return
 
-        # A log_observation(found=true) means the find-goal that started this
-        # Live Watch session is done — the client uses goal_complete (in the
-        # done event below) to auto-close the camera. Computed the same way as
-        # the non-streaming path (_process_locked); it was missing here, which
-        # is why a find-goal completing on a typed turn (rendered via this
-        # stream path) never closed the camera.
-        found_alert = any(
-            r["tool"] == "log_observation" and r["arguments"].get("found")
-            for r in tool_results
-        )
+        # Same two signals as the non-streaming path (_process_locked), kept
+        # deliberately separate: "say this out loud" vs "the search is over,
+        # close the camera". A find-goal can complete on a typed turn too (the
+        # user asks "is it this one?" while watching), which is rendered through
+        # this path.
+        found_alert = self._speak_alert(tool_results)
+        goal_complete = self._goal_complete(tool_results)
         # Same "side-effect tool ran but the model said nothing" recovery as
         # the non-stream path (_process_locked): a typed turn that only calls
         # update_task_list / start_timer and writes no visible text would
@@ -1032,7 +1081,7 @@ class ChitraguptAgent:
                 "tool_calls": tool_results or [],
                 "think_blocks": think_blocks,
                 "scene_description": None,
-                "goal_complete": found_alert,
+                "goal_complete": goal_complete,
                 "debug": {"steps": debug_steps, "timer_completions": timer_update["completed"]},
             },
         }
@@ -1046,6 +1095,37 @@ class ChitraguptAgent:
         """
         match = re.search(r"try again in ([\d.]+)s", str(e))
         return float(match.group(1)) if match else default
+
+    @staticmethod
+    def _speak_alert(tool_results: list[dict]) -> bool:
+        """Did an observation this turn ask to be said out loud?
+
+        alert=true is the plain "tell them this now" flag. found=true implies
+        it — spotting the thing being searched for is always worth saying —
+        so a model that only sets found still gets a spoken reply.
+        """
+        return any(
+            r["tool"] == "log_observation"
+            and (r["arguments"].get("alert") or r["arguments"].get("found"))
+            for r in tool_results
+        )
+
+    @staticmethod
+    def _goal_complete(tool_results: list[dict]) -> bool:
+        """Did a *search* finish this turn — i.e. is it safe to close the camera?
+
+        Narrower than _speak_alert on purpose. Requires both found=true AND the
+        item actually being a "Find X" goal, mirroring the guard in
+        tasklist.add_observation that decides whether to complete the item. A
+        found=true aimed at a cooking step now neither completes the step nor
+        closes the camera; it just gets spoken.
+        """
+        return any(
+            r["tool"] == "log_observation"
+            and r["arguments"].get("found")
+            and tasklist.is_find_goal(str(r["arguments"].get("item", "")))
+            for r in tool_results
+        )
 
     def _available_tools(
         self, has_image: bool, is_live_frame: bool, is_camera_followup: bool = False,
@@ -1216,7 +1296,15 @@ class ChitraguptAgent:
                 "task, a step you're starting or finishing, or a substitution. If the user "
                 "is only asking what to do next and nothing has changed, do NOT call it "
                 "again — just answer from the [Task list] shown above. Reading it back is "
-                "not a reason to call the tool. When you do reply, don't dump the whole "
+                "not a reason to call the tool. Set 'watch_for' on whichever item is "
+                "in_progress to tell the camera what to check: you do not see the "
+                "camera yourself — a separate vision model looks for you and reports "
+                "back only what you asked for, so write it as a brief for someone "
+                "looking on your behalf ('read the ingredient list and flag any "
+                "gelatin', 'tell me when the onions are golden'). Without it that "
+                "model only gets a generic description request and won't read labels "
+                "or watch for your specific condition. Update it whenever the step "
+                "changes. When you do reply, don't dump the whole "
                 "plan, but always speak the single current step in concrete terms (the "
                 "list is read aloud; the user can't see it). Each item MUST use the exact "
                 "key 'content' for its text — not 'task' or 'label'."
@@ -1260,10 +1348,12 @@ class ChitraguptAgent:
             parts.append(
                 f"\nCheck the current frame against the [Task list] item(s) above and "
                 f"their logged observations. Always call log_observation with what this "
-                f"frame shows relevant to an in-progress item — if this frame shows the "
-                f"thing the user is looking for, or another change important enough to "
-                f"tell them about right now, pass found=true on that call (this "
-                f"guarantees they're told even if you don't write anything else this turn)."
+                f"frame shows relevant to an in-progress item. If it's something to tell "
+                f"the user about right now — progress, a problem, anything noteworthy — "
+                f"pass alert=true on that call (this guarantees they're told even if you "
+                f"don't write anything else this turn). Pass found=true ONLY on a 'Find X' "
+                f"item whose target is now visible: that ends the search and switches the "
+                f"camera off, so it is never the right flag for progress on a step."
             )
             if is_live_frame:
                 # The silence protocol stays scoped to live ticks specifically —
