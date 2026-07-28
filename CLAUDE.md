@@ -8,6 +8,9 @@ It watches through a phone camera, reasons about what it sees, tracks everything
 in flight (steps, substitutions, parallel work, timers), and speaks back. The
 user is **listening, not reading** — that constraint drives most design choices.
 
+> **`HANDOFF.md` is where to start** — current status, what's confirmed against
+> live traffic, and what to do next.
+>
 > **`DECISIONS.md` holds the failure log and the reasoning behind every design
 > choice here.** Read the relevant section before changing an area — most of the
 > non-obvious code is scar tissue from a specific bug.
@@ -123,7 +126,7 @@ main cost control.
 - `log_observation` runs on every relevant tick — text facts accumulate so "where
   is X" can be answered from history, not just the current frame.
 
-Full step-by-step pipeline: `DECISIONS.md` §6.6.
+Full step-by-step pipeline: `DECISIONS.md` §6.7.
 
 ---
 
@@ -160,6 +163,7 @@ Each of these cost a real debugging session. Details in `DECISIONS.md`.
 
 ```
 CLAUDE.md          this file — working reference
+HANDOFF.md         current status + what to do next
 DECISIONS.md       failure log + design reasoning
 render.yaml
 server/

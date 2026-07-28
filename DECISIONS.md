@@ -373,6 +373,19 @@ Task items carry `detail: "coarse" | "fine"`. When any in-progress item asks for
 All three have to move together. Full-res pixels with a gist prompt and a 160-token
 cap buys nothing.
 
+**Confirmed working, and confirmed too expensive (2026-07-28).** The model set
+`detail: "fine"` unprompted for a label-reading step, the client switched to
+1024px, and Qwen read a real ingredient list off a package. It also never set it
+back — the step stayed `in_progress` for the rest of the session, so every later
+tick ran at full resolution and the session died at 198,310/200,000 TPD. A fine
+frame measured `Requested 3424` tokens against roughly 1400 coarse, matching the
+~2.4x estimate.
+
+**The lesson: a cost control that depends on the model's judgement does not
+hold.** The schema tells it to revert to `coarse` when the close look is done;
+it didn't. Scope-bounding needs a hard bound beside it — a per-item fine-frame
+counter, or a session budget. Open, see `HANDOFF.md`.
+
 **Cost is bounded by scope, not by a counter.** `fine` costs roughly 2.5x per
 frame, and it is tied to one `in_progress` item — completing the step ends the
 cost. A `pending` item asking for `fine` deliberately does *not* raise it, or
@@ -422,7 +435,33 @@ of a search. The absence rule would fight it and the change rule would break
 Grounding is also skipped for a one-off uploaded photo: the last caption there
 is a stale live tick about something else.
 
-### 6.6 Pipeline, end to end
+### 6.6 Corrections don't retract observations
+
+Found live on 2026-07-28, and the worst behaviour in that session. A design gap,
+not a bug — nothing is doing the wrong thing, the capability simply doesn't
+exist.
+
+The model logged `found:true` for "toor dal" in a plastic bag. The user
+corrected it: *"the thing in the plastic bag is black eyed beans not toor dal"*.
+Nothing retracted the observation, `Find toor dal` stayed `completed`, and the
+wrong note kept riding along in `[Task list]` on every later turn. The model
+then confabulated for four turns — *"the toor dal bag is on an upper shelf,
+open and upright, with a black loaf pan sitting behind it"* — was challenged
+twice, apologised, and repeated the claim.
+
+`log_observation` is append-only (capped at 5, oldest dropped). There is no
+`retract_observation` and no way to move a wrongly-`completed` item back to
+`in_progress`. **A false observation that survives an explicit correction is
+worse than no observation at all**, because it is indistinguishable from a
+verified one once it is in the log.
+
+Note the interaction with §6.5: the previous-caption grounding tells the model
+not to contradict the prior frame about something it can no longer see clearly.
+That is right for a scene going out of focus and wrong once the user has said
+the caption was mistaken. Whatever fixes this should probably carry an "…unless
+the user corrected you" clause.
+
+### 6.7 Pipeline, end to end
 
 1. `startCameraStream()` — `getUserMedia`, waits for a decoded frame.
 2. `startLive()` — `setInterval(sampleLiveFrame, …)`, 2–15s (default 4s).
@@ -516,6 +555,11 @@ cancellable too, so a late "never mind" still suppresses it.
 Matching is id → exact label → substring, and **ambiguity refuses**: cancelling
 the wrong timer fails silently and the user only finds out when it never goes off.
 
+### 7.6 Don't start a timer on a planning statement
+
+*"I want to boil eggs"* is not *"the eggs are on"*. Start one only once the step
+has genuinely begun — user-confirmed or camera-visible.
+
 ### 7.7 Context loss — unresolved, now instrumented
 
 Three consecutive turns with no memory at all. The user had just been given
@@ -554,10 +598,24 @@ Cheap, and it makes the next occurrence self-diagnosing rather than
 unfalsifiable. Deliberately not a speculative fix — guessing at a cause here
 would most likely have added machinery that addressed nothing.
 
-### 7.6 Don't start a timer on a planning statement
+### 7.8 Silence narration still leaks on near-variants
 
-*"I want to boil eggs"* is not *"the eggs are on"*. Start one only once the step
-has genuinely begun — user-confirmed or camera-visible.
+`_SILENCE_NARRATION_RE` catches a model that narrates its own silence instead of
+emitting `[SILENT]`. On 2026-07-28 one reply got through and was spoken aloud:
+
+> *"Nothing has visibly changed… I'll stay quiet until there's something new to
+> report."*
+
+Two near-misses, both one word off the existing patterns:
+
+- `"stay quiet"` — the pattern covers `stay|remain|keep|be` followed by
+  **silent**, not *quiet*.
+- `"Nothing has visibly changed"` — the pattern covers `nothing` followed by
+  `relevant|new|of note|worth …`, not `nothing has … changed`.
+
+Length was ~281 chars, inside the 300 cap, so only the regex failed. One
+occurrence in 42 ticks. Widen carefully — §7.2 is the standing warning about
+what these regexes cost when they over-match.
 
 ---
 
