@@ -704,6 +704,13 @@ async function sendMessage() {
   const prompt = input.value.trim();
   if (!prompt && !currentImageBase64) return;
 
+  // Live Watch running and no separately-attached image: send WITH a frame via
+  // the live path rather than answering a camera question blind. Mirrors app.js.
+  if (liveActive && !currentImageBase64) {
+    queueLivePrompt(prompt);
+    return;
+  }
+
   setSending(true);
   addMessage('user', prompt || '(image uploaded)', {});
   input.value = '';
@@ -1015,6 +1022,12 @@ function meanGrayscaleDelta(a, b) {
 
 let pendingLiveFrame = null;
 
+// A question the user has actually COMMITTED (Send / Enter) while Live Watch is
+// running. Mirrors app.js — the interval used to read #prompt-input directly,
+// so a tick landing mid-word sent a half-typed question and cleared the box.
+// **The interval must never read or clear #prompt-input.**
+let queuedLivePrompt = null;
+
 async function sampleLiveFrame() {
   if (!liveActive) return;
   const video = document.getElementById('camera-video');
@@ -1023,7 +1036,7 @@ async function sampleLiveFrame() {
   framesWatched += 1;
   const sample = captureDiffSample(video);
 
-  const hasTypedPrompt = !!document.getElementById('prompt-input').value.trim();
+  const hasTypedPrompt = !!queuedLivePrompt;
 
   if (!hasTypedPrompt && lastSentDiffData) {
     const threshold = THRESHOLD_LEVELS[document.getElementById('threshold-slider').value];
@@ -1046,10 +1059,30 @@ async function sampleLiveFrame() {
   await sendLiveFrame(video);
 }
 
+// Commit a typed question into the live path. Clears the textarea HERE, at the
+// moment the user asked for it. Mirrors app.js.
+function queueLivePrompt(prompt) {
+  const input = document.getElementById('prompt-input');
+  addMessage('user', prompt, {});
+  input.value = '';
+  queuedLivePrompt = prompt;
+
+  const video = document.getElementById('camera-video');
+  if (!liveSending && video && video.videoWidth) {
+    framesSent += 1;
+    updateLiveStats();
+    sendLiveFrame(video);
+  } else {
+    setActivityStatus('📤 Queued — sending with the next frame…');
+  }
+}
+
 async function sendLiveFrame(video) {
   liveSending = true;
-  const input = document.getElementById('prompt-input');
-  const typedPrompt = input.value.trim();
+  // Consumed, not peeked, so a retry or later tick can't resend it. Never read
+  // from #prompt-input — see queuedLivePrompt.
+  const typedPrompt = queuedLivePrompt || '';
+  queuedLivePrompt = null;
   // Autonomous ticks get the tighter LIVE_FRAME_DIM; a typed question riding
   // along keeps full resolution (mirrors app.js).
   const frameDim = (typedPrompt || liveFrameDetail === 'fine') ? MAX_FRAME_DIM : LIVE_FRAME_DIM;
@@ -1061,7 +1094,6 @@ async function sendLiveFrame(video) {
   const imageBase64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
 
   const prompt = typedPrompt || 'Watch tick — check the scene against the active task, if any; stay silent if nothing relevant changed.';
-  if (typedPrompt) input.value = '';
 
   flashCameraFrame();
   setActivityStatus('📤 Sent frame #' + framesSent + ' — awaiting response…');
@@ -1141,13 +1173,15 @@ async function sendLiveFrame(video) {
   } finally {
     liveSending = false;
     refreshTaskList(); // a live tick may have logged an observation / found the goal
-    if (pendingLiveFrame && liveActive) {
-      const frame = pendingLiveFrame;
-      pendingLiveFrame = null;
-      sendLiveFrame(frame);
-    } else {
-      pendingLiveFrame = null;
-      if (liveActive) setActivityStatus('👁 Watching for changes…');
+    // A question committed while this request was in flight goes out now, not
+    // on the next tick. Mirrors app.js.
+    const flushFrame = pendingLiveFrame
+      || (queuedLivePrompt ? document.getElementById('camera-video') : null);
+    pendingLiveFrame = null;
+    if (flushFrame && liveActive && flushFrame.videoWidth) {
+      sendLiveFrame(flushFrame);
+    } else if (liveActive) {
+      setActivityStatus('👁 Watching for changes…');
     }
   }
 }

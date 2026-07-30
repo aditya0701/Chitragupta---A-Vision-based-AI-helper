@@ -1,0 +1,554 @@
+<title>Chitragupta — how it works</title>
+
+<style>
+  :root {
+    --ground:        #EDEFF2;
+    --ground-raised: #FFFFFF;
+    --ink:           #171B21;
+    --ink-soft:      #4A5462;
+    --muted:         #6E7986;
+    --rule:          #D3D8DE;
+    --reason:        #A8631A;
+    --reason-dim:    #A8631A26;
+    --vision:        #3E6E8C;
+    --vision-dim:    #3E6E8C1F;
+    --warn:          #9A3B2E;
+
+    --panel-bg:      #10151B;
+    --panel-ink:     #DDE3EA;
+    --panel-muted:   #7C8794;
+    --panel-rule:    #232B35;
+    --panel-reason:  #E0972F;
+    --panel-vision:  #7FB0CC;
+
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --sans:  system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono:  ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+
+    --measure: 64ch;
+    --step--1: clamp(.78rem, .76rem + .1vw, .84rem);
+    --step-0:  clamp(1rem, .97rem + .16vw, 1.09rem);
+    --step-1:  clamp(1.24rem, 1.16rem + .38vw, 1.48rem);
+    --step-2:  clamp(1.6rem, 1.42rem + .84vw, 2.15rem);
+    --step-3:  clamp(2.1rem, 1.7rem + 1.9vw, 3.4rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:        #0E1218;
+      --ground-raised: #151B23;
+      --ink:           #E4E8ED;
+      --ink-soft:      #A9B3BF;
+      --muted:         #7C8794;
+      --rule:          #242C36;
+      --reason:        #E0972F;
+      --reason-dim:    #E0972F1F;
+      --vision:        #7FB0CC;
+      --vision-dim:    #7FB0CC1A;
+      --warn:          #D97361;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:        #0E1218;
+    --ground-raised: #151B23;
+    --ink:           #E4E8ED;
+    --ink-soft:      #A9B3BF;
+    --muted:         #7C8794;
+    --rule:          #242C36;
+    --reason:        #E0972F;
+    --reason-dim:    #E0972F1F;
+    --vision:        #7FB0CC;
+    --vision-dim:    #7FB0CC1A;
+    --warn:          #D97361;
+  }
+  :root[data-theme="light"] {
+    --ground:        #EDEFF2;
+    --ground-raised: #FFFFFF;
+    --ink:           #171B21;
+    --ink-soft:      #4A5462;
+    --muted:         #6E7986;
+    --rule:          #D3D8DE;
+    --reason:        #A8631A;
+    --reason-dim:    #A8631A26;
+    --vision:        #3E6E8C;
+    --vision-dim:    #3E6E8C1F;
+    --warn:          #9A3B2E;
+  }
+
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--step-0);
+    line-height: 1.62;
+    margin: 0;
+  }
+  .wrap {
+    max-width: 74ch;
+    margin: 0 auto;
+    padding: clamp(1.6rem, 4vw, 2.4rem) clamp(1.1rem, 4vw, 2rem) 5rem;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(3rem, 7vw, 4.5rem);
+  }
+  section { display: flex; flex-direction: column; gap: 1.15rem; }
+
+  h1, h2, h3 { font-family: var(--serif); font-weight: 600; text-wrap: balance; margin: 0; line-height: 1.16; }
+  h1 { font-size: var(--step-3); letter-spacing: -.015em; max-width: 20ch; }
+  h2 { font-size: var(--step-2); letter-spacing: -.01em; }
+  h3 { font-size: var(--step-1); }
+  p  { margin: 0; max-width: var(--measure); }
+  a  { color: inherit; text-underline-offset: .18em; text-decoration-thickness: 1px; }
+  a:focus-visible { outline: 2px solid var(--reason); outline-offset: 3px; border-radius: 2px; }
+
+  .eyebrow {
+    font-family: var(--mono); font-size: var(--step--1);
+    letter-spacing: .13em; text-transform: uppercase; color: var(--muted);
+  }
+  .lede { font-size: var(--step-1); line-height: 1.5; color: var(--ink-soft); font-family: var(--serif); max-width: 52ch; }
+  .note { font-size: var(--step--1); color: var(--muted); max-width: var(--measure); }
+  strong { font-weight: 650; color: var(--ink); }
+  code, em.q { font-family: var(--mono); font-size: .9em; font-style: normal; color: var(--ink-soft); }
+
+  /* ── Site nav ─────────────────────────────────────────── */
+  .nav {
+    display: flex; flex-wrap: wrap; gap: 0 1.4rem; align-items: baseline;
+    font-family: var(--mono); font-size: .76rem; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid var(--rule); padding-bottom: .9rem;
+  }
+  .nav a { text-decoration: none; color: var(--muted); }
+  .nav a:hover { color: var(--ink); }
+  .nav a[aria-current="page"] { color: var(--reason); }
+  .nav .home { margin-right: auto; color: var(--ink-soft); }
+
+  /* ── Figures ──────────────────────────────────────────── */
+  figure { margin: 0; display: flex; flex-direction: column; gap: .7rem; }
+  .canvas {
+    background: var(--ground-raised);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    padding: 1.1rem .9rem;
+    overflow-x: auto;
+  }
+  .canvas svg { display: block; width: 100%; min-width: 30rem; height: auto; }
+  figcaption { font-size: var(--step--1); color: var(--muted); max-width: var(--measure); }
+  figcaption b { color: var(--ink-soft); font-weight: 600; }
+
+  .dtitle { font-family: var(--mono); font-size: 11.5px; letter-spacing: .09em; text-transform: uppercase; }
+  .dsub   { font-family: var(--mono); font-size: 10.5px; }
+  .dlabel { font-family: var(--sans); font-size: 11px; font-style: italic; }
+  .dbig   { font-family: var(--serif); font-size: 15px; }
+
+  /* ── Ledger (cost) ────────────────────────────────────── */
+  .ledger {
+    border: 1px solid var(--rule); border-radius: 3px;
+    background: var(--ground-raised);
+    font-family: var(--mono); font-size: var(--step--1);
+  }
+  .lrow {
+    display: grid; grid-template-columns: 10.5rem 1fr 6rem;
+    align-items: center; gap: .8rem;
+    padding: .6rem .95rem; border-bottom: 1px solid var(--rule);
+  }
+  .lrow:last-child { border-bottom: none; }
+  .lrow .k { color: var(--ink-soft); }
+  .lrow .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--ink); }
+  .bar { height: 9px; border-radius: 1px; background: var(--vision-dim); position: relative; }
+  .bar i { position: absolute; inset: 0 auto 0 0; display: block; border-radius: 1px; background: var(--vision); }
+  .bar.fine i { background: var(--reason); }
+  .lrow.total { background: var(--reason-dim); }
+  .lrow.total .n { color: var(--reason); font-weight: 600; }
+  @media (max-width: 34rem) {
+    .lrow { grid-template-columns: 1fr 5rem; }
+    .lrow .bar { grid-column: 1 / -1; }
+  }
+
+  /* ── Prompt stack ─────────────────────────────────────── */
+  .stack { display: flex; flex-direction: column; gap: 2px; }
+  .slab {
+    display: grid; grid-template-columns: 11rem 1fr; gap: .3rem 1.1rem;
+    background: var(--ground-raised);
+    border: 1px solid var(--rule); border-left: 3px solid var(--reason);
+    padding: .7rem .95rem;
+  }
+  .slab .s-k { font-family: var(--mono); font-size: var(--step--1); color: var(--reason); }
+  .slab .s-v { font-size: .88rem; color: var(--ink-soft); line-height: 1.5; }
+  .slab.free { border-left-color: var(--vision); }
+  .slab.free .s-k { color: var(--vision); }
+  @media (max-width: 36rem) { .slab { grid-template-columns: 1fr; } }
+
+  /* ── Tables ───────────────────────────────────────────── */
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: var(--step--1); min-width: 32rem; }
+  th, td { text-align: left; padding: .62rem .8rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-family: var(--mono); font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+  td:first-child { font-family: var(--mono); color: var(--ink); white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: none; }
+
+  /* ── Terminal snippet ─────────────────────────────────── */
+  .term {
+    background: var(--panel-bg); color: var(--panel-ink);
+    border: 1px solid var(--panel-rule); border-radius: 3px;
+    font-family: var(--mono); font-size: var(--step--1); line-height: 1.6;
+    padding: .95rem 1.05rem; overflow-x: auto; white-space: pre;
+  }
+  .term .c { color: var(--panel-muted); }
+  .term .a { color: var(--panel-reason); }
+  .term .v { color: var(--panel-vision); }
+
+  .pull {
+    font-family: var(--serif); font-size: var(--step-1); line-height: 1.45;
+    color: var(--ink-soft); border-left: 2px solid var(--reason);
+    padding-left: 1.1rem; max-width: 52ch;
+  }
+
+  hr { border: none; border-top: 1px solid var(--rule); margin: 0; }
+  .next { display: flex; flex-wrap: wrap; gap: .6rem 1.4rem; align-items: baseline; }
+  .next a { font-family: var(--serif); font-size: var(--step-1); text-decoration-color: var(--reason); }
+</style>
+
+<div class="wrap">
+
+  <nav class="nav">
+    <a class="home" href="https://claude.ai/code/artifact/ae560c47-fc8e-4d87-b88d-8816f4641a12">Chitragupta</a>
+    <a href="https://claude.ai/code/artifact/ae560c47-fc8e-4d87-b88d-8816f4641a12">Overview</a>
+    <a href="#" aria-current="page">How it works</a>
+    <a href="https://claude.ai/code/artifact/380bc49a-c712-454d-84a8-0fe882781ca8">What broke</a>
+  </nav>
+
+  <!-- ── HERO ────────────────────────────────────────────── -->
+  <section>
+    <div class="eyebrow">How it works · page 2 of 3</div>
+    <h1>Two models, one wall, and a written brief across it</h1>
+    <p class="lede">
+      Every diagram on this page exists because of a number. The shape of the system is
+      not a preference — it is what fits inside 200,000 vision tokens a day.
+    </p>
+  </section>
+
+  <!-- ── DIAGRAM A: the pipeline ─────────────────────────── -->
+  <section>
+    <div class="eyebrow">The path of one frame</div>
+    <h2>Pixels travel exactly one hop, then become words</h2>
+    <p>
+      A camera frame never reaches the model that answers you. It is converted to a short
+      paragraph of text by a separate model, and the pixels are discarded at that line.
+      Everything downstream — the reasoning, the tools, the memory — is text.
+    </p>
+
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 720 580" role="img"
+             aria-label="Vertical pipeline: phone capture, browser diff gate, vision model, a boundary where pixels stop, then the reasoning model with tools and disk state attached, ending in speech.">
+          <defs>
+            <marker id="a1" viewBox="0 0 10 10" refX="9.5" refY="5"
+                    markerWidth="5.5" markerHeight="5.5" orient="auto-start-reverse">
+              <path d="M0 0 L10 5 L0 10 z" fill="var(--muted)"/>
+            </marker>
+          </defs>
+
+          <!-- 1 capture -->
+          <rect x="210" y="14" width="300" height="54" rx="2"
+                fill="var(--ground-raised)" stroke="var(--rule)"/>
+          <text class="dtitle" x="360" y="38" text-anchor="middle" fill="var(--ink)">Phone camera</text>
+          <text class="dsub" x="360" y="55" text-anchor="middle" fill="var(--muted)">a frame every 4 seconds</text>
+
+          <line x1="360" y1="68" x2="360" y2="100" stroke="var(--rule)" stroke-width="1.5" marker-end="url(#a1)"/>
+
+          <!-- 2 gate -->
+          <rect x="210" y="102" width="300" height="66" rx="2"
+                fill="var(--ground-raised)" stroke="var(--rule)"/>
+          <text class="dtitle" x="360" y="126" text-anchor="middle" fill="var(--ink)">Diff gate</text>
+          <text class="dsub" x="360" y="143" text-anchor="middle" fill="var(--muted)">still in the browser</text>
+          <text class="dsub" x="360" y="159" text-anchor="middle" fill="var(--muted)">mean grayscale delta</text>
+
+          <!-- discard branch -->
+          <line x1="510" y1="135" x2="596" y2="135" stroke="var(--rule)" stroke-width="1.5"
+                stroke-dasharray="3 3" marker-end="url(#a1)"/>
+          <text class="dlabel" x="602" y="131" fill="var(--muted)">scene unchanged</text>
+          <text class="dlabel" x="602" y="146" fill="var(--muted)">— dropped</text>
+
+          <line x1="360" y1="168" x2="360" y2="204" stroke="var(--rule)" stroke-width="1.5" marker-end="url(#a1)"/>
+          <text class="dsub" x="370" y="191" fill="var(--vision)">640 px JPEG</text>
+
+          <!-- 3 vision -->
+          <rect x="210" y="206" width="300" height="80" rx="2"
+                fill="var(--vision-dim)" stroke="var(--vision)" stroke-width="1.4"/>
+          <text class="dsub" x="360" y="228" text-anchor="middle" fill="var(--vision)">GROQ</text>
+          <text class="dbig" x="360" y="252" text-anchor="middle" fill="var(--ink)">Qwen3.6-27B</text>
+          <text class="dsub" x="360" y="272" text-anchor="middle" fill="var(--muted)">vision only · no conversation · no tools</text>
+
+          <line x1="360" y1="286" x2="360" y2="330" stroke="var(--rule)" stroke-width="1.5" marker-end="url(#a1)"/>
+          <text class="dsub" x="370" y="312" fill="var(--vision)">≈40 words of plain text</text>
+
+          <!-- boundary -->
+          <line x1="8" y1="344" x2="712" y2="344" stroke="var(--warn)"
+                stroke-width="1" stroke-dasharray="5 4" opacity=".75"/>
+          <text class="dlabel" x="8" y="338" fill="var(--warn)">the pixels stop here — nothing below this line has ever seen an image</text>
+
+          <!-- 4 reasoning + wings -->
+          <rect x="210" y="360" width="300" height="80" rx="2"
+                fill="var(--reason-dim)" stroke="var(--reason)" stroke-width="1.4"/>
+          <text class="dsub" x="360" y="382" text-anchor="middle" fill="var(--reason)">DEEPSEEK</text>
+          <text class="dbig" x="360" y="406" text-anchor="middle" fill="var(--ink)">v4-flash</text>
+          <text class="dsub" x="360" y="426" text-anchor="middle" fill="var(--muted)">all reasoning · all tool calls</text>
+
+          <rect x="8" y="366" width="168" height="68" rx="2"
+                fill="var(--ground-raised)" stroke="var(--rule)"/>
+          <text class="dtitle" x="92" y="390" text-anchor="middle" fill="var(--ink)">10 tools</text>
+          <text class="dsub" x="92" y="407" text-anchor="middle" fill="var(--muted)">timers · search</text>
+          <text class="dsub" x="92" y="422" text-anchor="middle" fill="var(--muted)">tasks · camera</text>
+          <line x1="176" y1="400" x2="208" y2="400" stroke="var(--rule)" stroke-width="1.5"
+                marker-start="url(#a1)" marker-end="url(#a1)"/>
+
+          <rect x="544" y="366" width="168" height="68" rx="2"
+                fill="var(--ground-raised)" stroke="var(--rule)"/>
+          <text class="dtitle" x="628" y="390" text-anchor="middle" fill="var(--ink)">State on disk</text>
+          <text class="dsub" x="628" y="407" text-anchor="middle" fill="var(--muted)">document.json</text>
+          <text class="dsub" x="628" y="422" text-anchor="middle" fill="var(--muted)">timers.json</text>
+          <line x1="512" y1="400" x2="542" y2="400" stroke="var(--rule)" stroke-width="1.5"
+                marker-start="url(#a1)" marker-end="url(#a1)"/>
+
+          <line x1="360" y1="440" x2="360" y2="486" stroke="var(--rule)" stroke-width="1.5" marker-end="url(#a1)"/>
+          <text class="dsub" x="370" y="468" fill="var(--reason)">a reply — or exactly [SILENT]</text>
+
+          <!-- 5 speech -->
+          <rect x="210" y="488" width="300" height="54" rx="2"
+                fill="var(--ground-raised)" stroke="var(--rule)"/>
+          <text class="dtitle" x="360" y="512" text-anchor="middle" fill="var(--ink)">Spoken aloud</text>
+          <text class="dsub" x="360" y="529" text-anchor="middle" fill="var(--muted)">on-device speech synthesis · free</text>
+
+          <line x1="196" y1="515" x2="120" y2="515" stroke="var(--rule)" stroke-width="1.5"
+                stroke-dasharray="3 3" marker-end="url(#a1)"/>
+          <text class="dlabel" x="114" y="511" text-anchor="end" fill="var(--muted)">[SILENT]</text>
+          <text class="dlabel" x="114" y="526" text-anchor="end" fill="var(--muted)">→ nothing happens</text>
+        </svg>
+      </div>
+      <figcaption>
+        <b>Two decisions are made before any money is spent.</b> The diff gate runs in the browser,
+        so an unchanged scene never becomes a network request at all — it is the single largest cost
+        control in the system. And a tick that has nothing to say returns the literal string
+        <code>[SILENT]</code>, which is stripped server-side, so a watching assistant is quiet by
+        default rather than narrating.
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- ── DIAGRAM B: the brief ────────────────────────────── -->
+  <section>
+    <div class="eyebrow">The protocol</div>
+    <h2>One model is blind; the other knows nothing. So they write to each other.</h2>
+    <p>
+      This is the part I would defend hardest in an interview. The reasoning model holds the entire
+      conversation but cannot see. The vision model is looking straight at the answer but has no idea
+      what anyone asked. Neither can be fixed by a better prompt to one of them.
+    </p>
+
+    <figure>
+      <div class="canvas">
+        <svg viewBox="0 0 720 300" role="img"
+             aria-label="The reasoning model sends a written brief to the vision model, which returns an observation.">
+          <defs>
+            <marker id="a2" viewBox="0 0 10 10" refX="9.5" refY="5"
+                    markerWidth="6" markerHeight="6" orient="auto">
+              <path d="M0 0 L10 5 L0 10 z" fill="var(--muted)"/>
+            </marker>
+          </defs>
+
+          <rect x="6" y="56" width="252" height="184" rx="2"
+                fill="var(--reason-dim)" stroke="var(--reason)" stroke-width="1.4"/>
+          <text class="dtitle" x="132" y="84" text-anchor="middle" fill="var(--reason)">Reasoning</text>
+          <text class="dsub" x="132" y="112" text-anchor="middle" fill="var(--ink)">has the conversation</text>
+          <text class="dsub" x="132" y="132" text-anchor="middle" fill="var(--ink)">has the task list</text>
+          <text class="dsub" x="132" y="152" text-anchor="middle" fill="var(--ink)">has the user's words</text>
+          <line x1="46" y1="170" x2="218" y2="170" stroke="var(--reason)" opacity=".35"/>
+          <text class="dbig" x="132" y="200" text-anchor="middle" fill="var(--warn)">cannot see</text>
+
+          <rect x="462" y="56" width="252" height="184" rx="2"
+                fill="var(--vision-dim)" stroke="var(--vision)" stroke-width="1.4"/>
+          <text class="dtitle" x="588" y="84" text-anchor="middle" fill="var(--vision)">Vision</text>
+          <text class="dsub" x="588" y="112" text-anchor="middle" fill="var(--ink)">has the pixels</text>
+          <text class="dsub" x="588" y="132" text-anchor="middle" fill="var(--ink)">has one frame</text>
+          <text class="dsub" x="588" y="152" text-anchor="middle" fill="var(--ink)">has no history</text>
+          <line x1="502" y1="170" x2="674" y2="170" stroke="var(--vision)" opacity=".35"/>
+          <text class="dbig" x="588" y="200" text-anchor="middle" fill="var(--warn)">knows nothing else</text>
+
+          <path d="M258 104 C 316 52, 404 52, 460 104" fill="none"
+                stroke="var(--reason)" stroke-width="1.5" marker-end="url(#a2)"/>
+          <text class="dsub" x="360" y="42" text-anchor="middle" fill="var(--reason)">watch_for — a brief it writes itself</text>
+
+          <path d="M460 192 C 404 248, 316 248, 258 192" fill="none"
+                stroke="var(--vision)" stroke-width="1.5" marker-end="url(#a2)"/>
+          <text class="dsub" x="360" y="272" text-anchor="middle" fill="var(--vision)">observations only — never a verdict</text>
+        </svg>
+      </div>
+      <figcaption>
+        <b>The brief is written by the model, not by me.</b> An earlier version inferred what to look
+        for from the task text, which meant the system could only ever look for things I had
+        anticipated. Now the reasoning model states its own question — and the traffic below is what
+        it produced, unprompted, when the user said their German was bad.
+      </figcaption>
+    </figure>
+
+    <div class="term"><span class="c">→ brief written by the reasoning model</span>
+<span class="a">Read every German label clearly. Report the product name and all
+ingredients. Flag if you see: Rindfleisch, Rind, Rinder-, Kalb, Kalbs-,
+or any other beef-related word. Also check for gelatin (Gelatine).</span>
+
+<span class="c">← answer from the vision model</span>
+<span class="v">The product is identified as Surimi containing "Fish Meat" as the
+primary ingredient. There is no presence of beef, Rind, Gelatine, or
+any related terms in the visible ingredients list.</span></div>
+
+    <p class="note">
+      Note what the brief does <em>not</em> ask: whether the food is safe. Briefs request
+      observations, never judgement — a vision model asked for a verdict will give you one whether or
+      not the frame supports it. The reasoning model owns the conclusion, because it is the one that
+      knows the user does not eat beef.
+    </p>
+  </section>
+
+  <!-- ── DIAGRAM C: cost ─────────────────────────────────── -->
+  <section>
+    <div class="eyebrow">The budget</div>
+    <h2>What one minute of watching actually costs</h2>
+    <p>
+      The free tier allows 200,000 vision tokens per day, total. In this architecture the vision
+      model does nothing but look at pictures, so <strong>image tokens are the entire
+      budget</strong> — and image cost scales with resolution, not with file size. Compressing the
+      JPEG harder buys nothing at all.
+    </p>
+
+    <div class="ledger">
+      <div class="lrow"><span class="k">ticks fired</span><span class="bar"><i style="width:100%"></i></span><span class="n">15</span></div>
+      <div class="lrow"><span class="k">gate dropped</span><span class="bar"><i style="width:53%"></i></span><span class="n">− 8</span></div>
+      <div class="lrow"><span class="k">frames sent</span><span class="bar"><i style="width:47%"></i></span><span class="n">7</span></div>
+      <div class="lrow total"><span class="k">at 640 px</span><span class="bar"><i style="width:29%"></i></span><span class="n">9,800</span></div>
+      <div class="lrow total"><span class="k">at 1,024 px</span><span class="bar fine"><i style="width:70%"></i></span><span class="n">23,968</span></div>
+    </div>
+    <p class="note">
+      Per-frame cost measured from the provider's own usage numbers: ~1,400 tokens coarse,
+      3,424 fine. At the coarse rate a day's budget is roughly two and a half hours of continuous
+      watching. At the fine rate it is under one.
+    </p>
+
+    <p>
+      So close-up mode is <strong>opt-in, per step</strong>. The reasoning model turns it on when it
+      needs to read something small, and the resolution change has to reach the browser before the
+      next capture — resolution thrown away on the client can never be recovered on the server.
+    </p>
+
+    <div class="term"><span class="c">server →</span>  frame_detail: <span class="a">"fine"</span>
+<span class="c">client ←</span>  🔍 frame detail → fine (live ticks now 1024px)
+<span class="c">groq   ←</span>  Groq vision usage: <span class="v">Requested 3424</span></div>
+
+    <p class="pull">
+      That number is also how a session died: the model switched close-up mode on, never switched it
+      back, and hit the ceiling at 198,310 of 200,000 tokens.
+    </p>
+    <p class="note">
+      Which produced the rule the failure log leads with — <em class="q">a cost control that depends
+      on the model's judgement does not hold</em>. It needs a hard bound underneath it.
+    </p>
+  </section>
+
+  <!-- ── DIAGRAM D: prompt assembly ──────────────────────── -->
+  <section>
+    <div class="eyebrow">State</div>
+    <h2>Everything the model needs is already in front of it</h2>
+    <p>
+      There is no retrieval step and no memory tool. Each reasoning call is assembled from blocks
+      that are always present, because a model that has to <em>ask</em> for its state will reliably
+      forget to ask.
+    </p>
+
+    <div class="stack">
+      <div class="slab">
+        <span class="s-k">[Camera feed]</span>
+        <span class="s-v">The vision model's caption for this frame, as text. The only trace a picture leaves.</span>
+      </div>
+      <div class="slab free">
+        <span class="s-k">[Timers]</span>
+        <span class="s-v">Each running timer and its remaining time. Computed by subtracting two wall-clock numbers — no model is involved, so this block is free.</span>
+      </div>
+      <div class="slab">
+        <span class="s-k">[Task list]</span>
+        <span class="s-v">Every item with its status, its note, up to five observations, and its standing <code>watch_for</code> brief. Persisted to disk, so it survives a server restart.</span>
+      </div>
+      <div class="slab">
+        <span class="s-k">[Silence rule]</span>
+        <span class="s-v">Added only on a camera tick with an active goal: if nothing is new, reply with exactly <code>[SILENT]</code>. Never applied to something the user actually said.</span>
+      </div>
+      <div class="slab">
+        <span class="s-k">history</span>
+        <span class="s-v">The last ten turns. Camera ticks are excluded — 42 machine observations would otherwise crowd out the conversation.</span>
+      </div>
+    </div>
+
+    <p>
+      Timers store a start time and a duration rather than sleeping, so a restart loses nothing and
+      checking them costs no inference. The task list is written by the model as a full-list
+      replace — it rewrites the whole document each time, which removes an entire class of
+      partial-update bugs at the price of a slightly larger payload.
+    </p>
+  </section>
+
+  <!-- ── TOOLS ───────────────────────────────────────────── -->
+  <section>
+    <div class="eyebrow">Tools</div>
+    <h2>Ten functions, and one design rule learned the hard way</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Tool</th><th>What it does</th></tr></thead>
+        <tbody>
+          <tr><td>update_task_list</td><td>Replaces the whole document — items, statuses, notes, briefs, detail tier</td></tr>
+          <tr><td>log_observation</td><td>Appends a fact to an item. Two separate flags decide whether it interrupts the user and whether it ends a goal</td></tr>
+          <tr><td>request_camera</td><td>Asks for a frame when none is attached</td></tr>
+          <tr><td>request_live_search</td><td>Registers a "find X" goal and starts watching for it</td></tr>
+          <tr><td>start_timer · cancel_timer</td><td>Wall-clock, persisted; cancelling deletes rather than marking fired, so it does not announce the timer you just cancelled</td></tr>
+          <tr><td>web_search · fetch_page</td><td>A provider chain, because a single scraped endpoint fails in ways that look like success</td></tr>
+          <tr><td>calculate · get_time</td><td>The cheap deterministic things a language model should not be doing in its head</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="pull">One flag, one consequence.</p>
+    <p>
+      A single boolean on <code>log_observation</code> once did three unrelated jobs at once: it
+      guaranteed the user was told, it marked the step complete, and it switched the camera off. The
+      model set it on ordinary progress notes — correctly, by the description it had been given — and
+      the camera kept shutting off mid-task for reasons nobody could see. Splitting it into two flags
+      with one effect each fixed it permanently.
+    </p>
+  </section>
+
+  <!-- ── WHY NOT ─────────────────────────────────────────── -->
+  <section>
+    <div class="eyebrow">Roads not taken</div>
+    <h2>Three designs I rejected, and why</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Considered</th><th>Rejected because</th></tr></thead>
+        <tbody>
+          <tr><td>An orchestrator</td><td>A controller routing between specialists has to anticipate every situation in advance. Letting the model reason and call tools in one chain means the thinking <em>is</em> the routing</td></tr>
+          <tr><td>Multiple agents</td><td>Every check-in would pay for a coordination call to achieve what one model reading a shared document already does</td></tr>
+          <tr><td>A cheap relevance pre-filter</td><td>A yes/no call before the real one, to skip irrelevant frames. Its "no" was indistinguishable from legitimate silence, so a frame showing the thing you asked for could vanish leaving no trace. Removed with no replacement</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      That last one is the rule I reach for most often outside this project: never add a filter whose
+      rejection is indistinguishable from a normal quiet outcome. Failures have to be visible or they
+      are not failures, they are behaviour.
+    </p>
+  </section>
+
+  <hr>
+
+  <section class="next">
+    <span class="eyebrow">Next</span>
+    <a href="https://claude.ai/code/artifact/380bc49a-c712-454d-84a8-0fe882781ca8">What broke, and what each break taught →</a>
+  </section>
+
+</div>

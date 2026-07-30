@@ -1,0 +1,722 @@
+<title>Chitragupta — a camera assistant built for a cost ceiling</title>
+
+<style>
+  :root {
+    --ground:        #EDEFF2;
+    --ground-raised: #FFFFFF;
+    --ink:           #171B21;
+    --ink-soft:      #4A5462;
+    --muted:         #6E7986;
+    --rule:          #D3D8DE;
+    --reason:        #A8631A;
+    --reason-dim:    #A8631A26;
+    --vision:        #3E6E8C;
+    --vision-dim:    #3E6E8C1F;
+    --warn:          #9A3B2E;
+
+    --panel-bg:      #10151B;
+    --panel-ink:     #DDE3EA;
+    --panel-muted:   #7C8794;
+    --panel-rule:    #232B35;
+    --panel-reason:  #E0972F;
+    --panel-vision:  #7FB0CC;
+
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --sans:  system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono:  ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+
+    --measure: 64ch;
+    --step--1: clamp(.78rem, .76rem + .1vw, .84rem);
+    --step-0:  clamp(1rem, .97rem + .16vw, 1.09rem);
+    --step-1:  clamp(1.24rem, 1.16rem + .38vw, 1.48rem);
+    --step-2:  clamp(1.6rem, 1.42rem + .84vw, 2.15rem);
+    --step-3:  clamp(2.1rem, 1.7rem + 1.9vw, 3.4rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:        #0E1218;
+      --ground-raised: #151B23;
+      --ink:           #E4E8ED;
+      --ink-soft:      #A9B3BF;
+      --muted:         #7C8794;
+      --rule:          #242C36;
+      --reason:        #E0972F;
+      --reason-dim:    #E0972F1F;
+      --vision:        #7FB0CC;
+      --vision-dim:    #7FB0CC1A;
+      --warn:          #D9736180;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:        #0E1218;
+    --ground-raised: #151B23;
+    --ink:           #E4E8ED;
+    --ink-soft:      #A9B3BF;
+    --muted:         #7C8794;
+    --rule:          #242C36;
+    --reason:        #E0972F;
+    --reason-dim:    #E0972F1F;
+    --vision:        #7FB0CC;
+    --vision-dim:    #7FB0CC1A;
+    --warn:          #D97361;
+  }
+  :root[data-theme="light"] {
+    --ground:        #EDEFF2;
+    --ground-raised: #FFFFFF;
+    --ink:           #171B21;
+    --ink-soft:      #4A5462;
+    --muted:         #6E7986;
+    --rule:          #D3D8DE;
+    --reason:        #A8631A;
+    --reason-dim:    #A8631A26;
+    --vision:        #3E6E8C;
+    --vision-dim:    #3E6E8C1F;
+    --warn:          #9A3B2E;
+  }
+
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: var(--step-0);
+    line-height: 1.62;
+    margin: 0;
+  }
+  .wrap {
+    max-width: 74ch;
+    margin: 0 auto;
+    padding: clamp(2.5rem, 6vw, 5rem) clamp(1.1rem, 4vw, 2rem) 5rem;
+    display: flex;
+    flex-direction: column;
+    gap: clamp(3rem, 7vw, 5rem);
+  }
+  section { display: flex; flex-direction: column; gap: 1.15rem; }
+
+  h1, h2, h3 { font-family: var(--serif); font-weight: 600; text-wrap: balance; margin: 0; line-height: 1.16; }
+  h1 { font-size: var(--step-3); letter-spacing: -.015em; }
+  h2 { font-size: var(--step-2); letter-spacing: -.01em; }
+  h3 { font-size: var(--step-1); }
+  p  { margin: 0; max-width: var(--measure); }
+  a  { color: inherit; text-underline-offset: .18em; text-decoration-thickness: 1px; }
+  a:focus-visible, button:focus-visible {
+    outline: 2px solid var(--reason); outline-offset: 3px; border-radius: 2px;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .lede { font-size: var(--step-1); line-height: 1.5; color: var(--ink-soft); font-family: var(--serif); }
+  .note { font-size: var(--step--1); color: var(--muted); max-width: var(--measure); }
+  strong { font-weight: 650; color: var(--ink); }
+  em.q { font-style: normal; font-family: var(--mono); font-size: .92em; color: var(--ink-soft); }
+
+  /* ── Site nav ─────────────────────────────────────────── */
+  .nav {
+    display: flex; flex-wrap: wrap; gap: 0 1.4rem; align-items: baseline;
+    font-family: var(--mono); font-size: .76rem; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid var(--rule); padding-bottom: .9rem;
+  }
+  .nav a { text-decoration: none; color: var(--muted); }
+  .nav a:hover { color: var(--ink); }
+  .nav a[aria-current="page"] { color: var(--reason); }
+  .nav .home { margin-right: auto; color: var(--ink-soft); }
+
+  .next { display: flex; flex-direction: column; gap: .55rem; }
+  .next a { font-family: var(--serif); font-size: var(--step-1); text-decoration-color: var(--reason); }
+
+  /* ── Hero ─────────────────────────────────────────────── */
+  .hero { gap: 1.4rem; }
+  .hero h1 { max-width: 20ch; }
+  .claim {
+    font-family: var(--serif);
+    font-size: var(--step-1);
+    line-height: 1.45;
+    color: var(--ink-soft);
+    border-left: 2px solid var(--reason);
+    padding-left: 1.1rem;
+    max-width: 54ch;
+  }
+
+  /* ── Replay panel ─────────────────────────────────────── */
+  .panel {
+    background: var(--panel-bg);
+    color: var(--panel-ink);
+    border: 1px solid var(--panel-rule);
+    border-radius: 3px;
+    overflow: hidden;
+    font-family: var(--mono);
+    font-size: var(--step--1);
+    line-height: 1.55;
+  }
+  .panel-head {
+    display: flex; align-items: center; gap: .8rem; flex-wrap: wrap;
+    padding: .7rem 1rem;
+    border-bottom: 1px solid var(--panel-rule);
+    color: var(--panel-muted);
+    letter-spacing: .08em; text-transform: uppercase; font-size: .74rem;
+  }
+  .lamp {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--panel-reason); flex: none;
+  }
+  .panel-head .spacer { margin-left: auto; }
+
+  /* Channel selector — the same instrument, three recordings. */
+  .tabs {
+    display: flex; gap: 0; flex-wrap: wrap;
+    border-bottom: 1px solid var(--panel-rule);
+  }
+  .tabs button {
+    font: inherit; font-size: .76rem; letter-spacing: .05em;
+    background: transparent; color: var(--panel-muted);
+    border: none; border-bottom: 2px solid transparent;
+    padding: .6rem .95rem; cursor: pointer; white-space: nowrap;
+    transition: color .15s, border-color .15s;
+  }
+  .tabs button:hover { color: var(--panel-ink); }
+  .tabs button[aria-selected="true"] {
+    color: var(--panel-reason);
+    border-bottom-color: var(--panel-reason);
+  }
+  .tabs .idx {
+    font-variant-numeric: tabular-nums;
+    opacity: .5; margin-right: .45rem;
+  }
+
+  .stage { padding: 1rem; display: flex; flex-direction: column; gap: .55rem; min-height: 22rem; }
+  @media (max-width: 34rem) { .stage { min-height: 26rem; } }
+
+  .beat {
+    display: grid;
+    grid-template-columns: 8.5rem 1fr;
+    gap: .1rem .9rem;
+    padding: .6rem .75rem;
+    border-left: 2px solid transparent;
+    background: transparent;
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity .32s ease, transform .32s ease;
+  }
+  .beat.on { opacity: 1; transform: none; }
+  .beat.past { opacity: .38; }
+  @media (max-width: 40rem) { .beat { grid-template-columns: 1fr; gap: .3rem; } }
+  @media (prefers-reduced-motion: reduce) {
+    .beat { transition: none; transform: none; }
+  }
+
+  .who { letter-spacing: .1em; text-transform: uppercase; font-size: .7rem; white-space: nowrap; }
+  .said { color: var(--panel-ink); white-space: pre-wrap; }
+  .beat .said::selection { background: var(--panel-reason); color: #10151B; }
+
+  .beat[data-who="user"]   { border-left-color: var(--panel-muted); }
+  .beat[data-who="user"] .who { color: var(--panel-muted); }
+  .beat[data-who="reason"] { border-left-color: var(--panel-reason); background: #E0972F0D; }
+  .beat[data-who="reason"] .who { color: var(--panel-reason); }
+  .beat[data-who="vision"] { border-left-color: var(--panel-vision); background: #7FB0CC0D; }
+  .beat[data-who="vision"] .who { color: var(--panel-vision); }
+  .beat[data-who="client"] { border-left-color: var(--panel-rule); }
+  .beat[data-who="client"] .who { color: var(--panel-muted); }
+  .beat[data-who="vision"].refused { border-left-color: #D97361; }
+  .beat[data-who="vision"].refused .who { color: #D97361; }
+
+  .gloss {
+    grid-column: 2; font-family: var(--sans); font-size: .8rem;
+    color: var(--panel-muted); line-height: 1.5; margin-top: .35rem;
+    font-style: italic;
+  }
+  @media (max-width: 40rem) { .gloss { grid-column: 1; } }
+
+  .controls {
+    display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+    padding: .7rem 1rem; border-top: 1px solid var(--panel-rule);
+  }
+  .controls button {
+    font: inherit; font-size: .78rem; letter-spacing: .06em; text-transform: uppercase;
+    background: transparent; color: var(--panel-ink);
+    border: 1px solid var(--panel-rule); border-radius: 2px;
+    padding: .34rem .8rem; cursor: pointer;
+    transition: border-color .15s, color .15s;
+  }
+  .controls button:hover:not(:disabled) { border-color: var(--panel-reason); color: var(--panel-reason); }
+  .controls button:disabled { opacity: .3; cursor: default; }
+  .ticks { display: flex; gap: 3px; margin-left: auto; }
+  .tick { width: 14px; height: 3px; background: var(--panel-rule); border-radius: 1px; }
+  .tick.done { background: var(--panel-reason); }
+
+  /* ── Tables ───────────────────────────────────────────── */
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: var(--step--1); min-width: 34rem; }
+  th, td { text-align: left; padding: .68rem .85rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th {
+    font-family: var(--mono); font-size: .72rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--muted); font-weight: 500;
+    border-bottom-width: 1px;
+  }
+  td:first-child { color: var(--ink-soft); }
+  td.did { color: var(--ink); }
+  tbody tr:last-child td { border-bottom: none; }
+
+  /* ── Metrics ──────────────────────────────────────────── */
+  .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  .metric { background: var(--ground-raised); padding: 1.05rem 1.1rem; display: flex; flex-direction: column; gap: .18rem; }
+  .metric .n {
+    font-family: var(--mono); font-size: var(--step-1); font-variant-numeric: tabular-nums;
+    letter-spacing: -.02em; color: var(--reason);
+  }
+  .metric .k { font-size: .78rem; color: var(--muted); line-height: 1.4; }
+
+  /* ── Skills ───────────────────────────────────────────── */
+  .skills { display: flex; flex-wrap: wrap; gap: .4rem; }
+  .skills span {
+    font-family: var(--mono); font-size: .74rem; letter-spacing: .04em;
+    border: 1px solid var(--rule); border-radius: 2px;
+    padding: .3rem .6rem; color: var(--ink-soft);
+  }
+
+  /* ── Status ───────────────────────────────────────────── */
+  .status { display: grid; grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); gap: 1.5rem; }
+  .status h3 { font-size: 1rem; display: flex; align-items: baseline; gap: .5rem; }
+  .status ul { margin: .5rem 0 0; padding-left: 1.05rem; display: flex; flex-direction: column; gap: .3rem; }
+  .status li { font-size: .9rem; color: var(--ink-soft); }
+  .status .mark { font-family: var(--mono); font-size: .74rem; letter-spacing: .1em; text-transform: uppercase; }
+  .proven .mark   { color: var(--reason); }
+  .unproven .mark { color: var(--muted); }
+
+  hr { border: none; border-top: 1px solid var(--rule); margin: 0; }
+</style>
+
+<div class="wrap">
+
+  <nav class="nav">
+    <span class="home">Chitragupta</span>
+    <a href="#" aria-current="page">Overview</a>
+    <a href="https://claude.ai/code/artifact/da2da195-f987-4f01-b88b-d3ccaeba0363">How it works</a>
+    <a href="https://claude.ai/code/artifact/380bc49a-c712-454d-84a8-0fe882781ca8">What broke</a>
+  </nav>
+
+  <!-- ── HERO ────────────────────────────────────────────── -->
+  <section class="hero">
+    <div class="eyebrow">Chitragupta · applied research project · 2026</div>
+    <h1>The model that reads the label can’t reason. The one that reasons never sees.</h1>
+    <p class="claim">
+      So one writes instructions for the other’s eyes. Watch a real session decide,
+      mid-conversation, that it needs to look closer — and pay for it.
+    </p>
+  </section>
+
+  <!-- ── REPLAY ──────────────────────────────────────────── -->
+  <section>
+    <div class="panel">
+      <div class="panel-head">
+        <span class="lamp" aria-hidden="true"></span>
+        <span id="scene-name">Reading a foreign-language label</span>
+        <span class="spacer"></span>
+        <span>captured 2026‑07‑28 · verbatim</span>
+      </div>
+
+      <div class="tabs" id="tabs" role="tablist" aria-label="Session excerpts"></div>
+
+      <div class="stage" id="stage" role="tabpanel" aria-live="polite"></div>
+
+      <div class="controls">
+        <button id="playBtn" type="button">Pause</button>
+        <button id="prevBtn" type="button">Prev</button>
+        <button id="nextBtn" type="button">Next</button>
+        <button id="restartBtn" type="button">Restart</button>
+        <div class="ticks" id="ticks" aria-hidden="true"></div>
+      </div>
+    </div>
+    <p class="note">
+      Three excerpts from one 40-minute session. Every line is copied out of the export — the
+      user’s words, both models’ traffic, the client’s resolution switch, and one wrong answer left
+      in. Camera frames are excluded for privacy; the text pipeline is the point.
+    </p>
+  </section>
+
+  <!-- ── WHAT ────────────────────────────────────────────── -->
+  <section>
+    <div class="eyebrow">What it is</div>
+    <h2>A hands-free camera assistant for when your hands are busy</h2>
+    <p>
+      It watches through a phone camera, tracks what’s in flight — steps, substitutions, timers —
+      and talks back. The user is <strong>listening, not reading</strong>, which turns out to drive
+      almost every design decision in the system.
+    </p>
+    <p>
+      The category isn’t new. Ray-Ban Meta and Gemini Live got here first, with budgets to match.
+      The approach is: <strong>two models that cannot see what the other sees, and a protocol
+      between them designed so this runs continuously on a hard cost ceiling</strong> instead of
+      always-on inference.
+    </p>
+  </section>
+
+  <!-- ── PROVENANCE ──────────────────────────────────────── -->
+  <section>
+    <div class="eyebrow">Where it comes from</div>
+    <h2>A paper I couldn’t implement, and what I did instead</h2>
+    <p>
+      The design started from <strong>VideoLLM-online</strong>, which I presented for my master’s
+      seminar. It solves streaming video dialogue — crucially, <em>when a model should speak and
+      when it should stay quiet</em> — using a cached frame history and a trained per-frame decision.
+    </p>
+    <p>
+      Almost none of that survives contact with a hosted API. So the interesting work was
+      re-deriving the same behaviours without the mechanisms that produce them.
+    </p>
+    <div class="scroll">
+      <table>
+        <thead>
+          <tr><th>The paper does</th><th>Why I can’t</th><th>What I do instead</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>KV-cached frame history</td>
+            <td>Hosted APIs can’t reuse image tokens across calls</td>
+            <td class="did">Convert each frame to one short text fact, discard the pixels, accumulate only the text</td>
+          </tr>
+          <tr>
+            <td>Trained speak / stay-silent decision</td>
+            <td>No training budget</td>
+            <td class="did">A silence protocol at prompt level, plus triggers that are pure arithmetic and cost nothing</td>
+          </tr>
+          <tr>
+            <td>Inference on every frame</td>
+            <td>200,000 tokens per day, total</td>
+            <td class="did">A perceptual diff gate in the browser — an unchanged scene never becomes a request at all</td>
+          </tr>
+          <tr>
+            <td>DeepStack fine-detail attention</td>
+            <td>Fixed resolution per call</td>
+            <td class="did">A coarse/fine tier the reasoning model opts into per step, when it needs to read something small</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      Qwen3-VL is the natural next step — a model built for exactly this — and is the planned
+      extension rather than a shipped feature.
+    </p>
+  </section>
+
+  <!-- ── CONSTRAINT ──────────────────────────────────────── -->
+  <section>
+    <div class="eyebrow">The constraint</div>
+    <h2>Every architectural decision here traces back to a number</h2>
+    <div class="metrics">
+      <div class="metric"><span class="n">$0</span><span class="k">infrastructure cost per month</span></div>
+      <div class="metric"><span class="n">200,000</span><span class="k">vision tokens per day — the entire budget</span></div>
+      <div class="metric"><span class="n">2.4×</span><span class="k">measured cost of a close-up frame vs a normal one</span></div>
+      <div class="metric"><span class="n">21 / 42</span><span class="k">camera ticks that correctly said nothing</span></div>
+    </div>
+    <p>
+      A two-model split exists because one provider’s per-minute cap made a single-model design
+      impossible. Live frames are downscaled because image cost scales with resolution, not file
+      size. The close-up tier is opt-in because it costs 2.4× — a figure I could only quote after
+      building the instrumentation to measure it.
+    </p>
+    <p>
+      That last number also ended a session: the model turned close-up mode on, never turned it
+      back off, and hit the daily ceiling at <strong>198,310 of 200,000 tokens</strong>. The lesson
+      is in the failure log — <em class="q">a cost control that depends on the model’s judgement
+      does not hold</em>.
+    </p>
+  </section>
+
+  <!-- ── SKILLS ──────────────────────────────────────────── -->
+  <section>
+    <div class="eyebrow">What this demonstrates</div>
+    <div class="skills">
+      <span>multi-model pipeline design</span>
+      <span>LLM cost engineering</span>
+      <span>agent tool-calling &amp; state</span>
+      <span>prompt engineering from failure data</span>
+      <span>observability for non-deterministic systems</span>
+      <span>debugging silent cross-service failures</span>
+      <span>hallucination mitigation</span>
+      <span>research → production translation</span>
+      <span>Python · FastAPI · async</span>
+      <span>vision-language models</span>
+    </div>
+    <p class="note">
+      The one I’d point at first: I once spent a session unable to explain why the assistant lost
+      its memory — so I shipped instrumentation instead of a fix, because <em class="q">“the model
+      ignored the task list”</em> and <em class="q">“the task list never reached the prompt”</em>
+      look identical from a transcript and need opposite repairs.
+    </p>
+  </section>
+
+  <!-- ── STATUS ──────────────────────────────────────────── -->
+  <section>
+    <div class="eyebrow">Honest status</div>
+    <h2>Early, and specific about it</h2>
+    <div class="status">
+      <div class="proven">
+        <h3><span class="mark">Proven</span> in live sessions</h3>
+        <ul>
+          <li>The two-model pipeline end to end</li>
+          <li>Reading a foreign-language ingredient list on demand</li>
+          <li>Refusing to answer off a frame too blurred to read</li>
+          <li>Staying silent when nothing changed</li>
+        </ul>
+      </div>
+      <div class="unproven">
+        <h3><span class="mark">Not proven</span></h3>
+        <ul>
+          <li>Timers and scheduling — never exercised in a real run</li>
+          <li>A second architecture that passes a 27-check smoke test but has never seen live traffic</li>
+          <li>No automated test suite; verification is harnesses plus reading session exports</li>
+        </ul>
+      </div>
+    </div>
+    <p>
+      The second architecture is deliberately not deployed. Running two unproven systems at once
+      makes it impossible to tell which one is lying to you — so it waits until the first is
+      genuinely trustworthy.
+    </p>
+  </section>
+
+  <hr>
+
+  <section>
+    <div class="eyebrow">Keep reading</div>
+    <div class="next">
+      <a href="https://claude.ai/code/artifact/da2da195-f987-4f01-b88b-d3ccaeba0363">How it works — the pipeline, the brief, and the budget →</a>
+      <a href="https://claude.ai/code/artifact/380bc49a-c712-454d-84a8-0fe882781ca8">What broke — eight failures and the rule each one left →</a>
+    </div>
+    <p class="note">
+      Both are drawn from the project’s own failure log, which records every bug that shaped the
+      system — the symptom, the investigation, the root cause, and the rule it produced.
+    </p>
+  </section>
+
+</div>
+
+<script>
+  const SCENES = [
+    {
+      name: "Reading a foreign-language label",
+      beats: [
+        { who: "user", label: "User",
+          text: "every label here that you are going to see is in German but my German is bad… I don't eat beef so here it is called rainflyish or something like that so you should help check things" },
+
+        { who: "reason", label: "Reasoning",
+          text: "\"Rainflyish\" is Rindfleisch — that's German for beef, so that's the one thing you need to avoid.",
+          gloss: "Decodes a phonetic guess into the correct German term before anything else happens." },
+
+        { who: "reason", label: "Reasoning → brief",
+          text: "watch_for: \"Read every German label clearly. Report the product name and all ingredients. Flag if you see: Rindfleisch, Rind, Rinder-, Kalb, Kalbs-, or any other beef-related word. Also check for gelatin (Gelatine).\"",
+          gloss: "This is the whole idea. The reasoning model cannot see the camera, so it writes a brief for the model that can — expanded into every morphological variant, because the vision model knows nothing about the conversation." },
+
+        { who: "reason", label: "Reasoning → cost",
+          text: "detail: \"fine\"",
+          gloss: "A spending decision, made mid-conversation. Small print needs resolution that a normal frame doesn't carry." },
+
+        { who: "client", label: "Camera",
+          text: "frame detail → fine · live ticks now 1024px",
+          gloss: "The decision has to reach the browser before capture. Resolution thrown away on the client can never be recovered on the server." },
+
+        { who: "vision", label: "Vision", refused: true,
+          text: "This frame is significantly more blurred and shaky… Because no words are legible, I cannot verify the presence of beef terms (\"Rindfleisch\") or gelatin (\"Gelatine\"). Consequently, I cannot assign a safe or unsafe verdict to any items in this shot.",
+          gloss: "It refuses. On a dietary restriction, a confident guess is the dangerous answer — so the prompt forbids reporting absence it cannot actually see." },
+
+        { who: "vision", label: "Vision",
+          text: "The image is now sharply in focus… The product is identified as Surimi containing \"Fish Meat\" as the primary ingredient. There is no presence of beef, Rind, Gelatine, or any related terms in the visible ingredients list.",
+          gloss: "Next frame, refocused. It reads the actual packaging." },
+
+        { who: "reason", label: "Reasoning",
+          text: "Hey! That surimi package you're looking at — it's all fish meat, no beef or Rindfleisch in sight, so you're totally safe.",
+          gloss: "Spoken aloud by a model that never saw the picture." }
+      ]
+    },
+
+    {
+      name: "Finding something in the room",
+      tab: "Searching for an object",
+      beats: [
+        { who: "user", label: "User", text: "help me find the dal please" },
+
+        { who: "reason", label: "Reasoning",
+          text: "Let me start looking for it. Point your camera around your kitchen and I'll tell you when I see the toor dal.\n\n→ request_live_search(target: \"toor dal\")",
+          gloss: "The model turns the camera on itself. Nobody pressed a button." },
+
+        { who: "reason", label: "Reasoning → brief",
+          text: "OBJECT DETECTION. Target(s) to find: toor dal.\nReply in EXACTLY one line, in one of these two forms and nothing else:\nFOUND: <where the target is in the frame>\nNOT FOUND: <what is in view instead>",
+          gloss: "A different brief shape from the label scene — a rigid one-line contract instead of an open question. Searching runs on every frame, so the reply has to stay small enough to be cheap." },
+
+        { who: "vision", label: "Vision", text: "FOUND: in a plastic bag on the counter" },
+
+        { who: "reason", label: "Reasoning → memory",
+          text: "log_observation(note: \"something in a plastic bag on the counter — could be the toor dal\", alert: false)",
+          gloss: "Written down, not spoken. Two separate flags decide whether a note is worth interrupting the user for — conflating them once turned the camera off mid-recipe." },
+
+        { who: "reason", label: "Reasoning",
+          text: "Hey, I see the toor dal — it's right there in the clear plastic bag on the counter.\n\n→ found: true · camera closes",
+          gloss: "Confident enough now to speak, and to end the search." },
+
+        { who: "user", label: "User",
+          text: "the thing in the plastic bag is black eyed beans not tor dal",
+          gloss: "It was wrong. The detector reports where something is, not what it is — and nothing in the system retracts a wrong find, so the mistake outlived the correction. That gap is the top item in the failure log, and it is the reason this section says early." }
+      ]
+    },
+
+    {
+      name: "Choosing tools, with nothing useful in frame",
+      tab: "When the camera sees nothing",
+      beats: [
+        { who: "user", label: "User",
+          text: "can you help me with this process I am using a pressure cooker or a bowl for cleaning… which one is better can you help me choose the utensils for this" },
+
+        { who: "reason", label: "Reasoning → brief",
+          text: "watch_for: \"Show me the cup they are using to measure. Tell me how they are scooping and if water is running clear during rinsing.\"",
+          gloss: "Three observations requested, none of them judgements. The vision model reports; the reasoning model decides what it means." },
+
+        { who: "vision", label: "Vision", refused: true,
+          text: "A measuring cup is not visible in the frame. I cannot tell how anything is being scooped. I cannot tell if water is running or its clarity. No rinsing action is currently visible.",
+          gloss: "Four honest negatives. The easy failure here is inventing a plausible kitchen — this is the behaviour the prompt is built to protect." },
+
+        { who: "reason", label: "Reasoning",
+          text: "A regular vegetable colander with big holes won't work for lentils since they'll fall through — so stick with the bowl or a fine strainer. A pressure cooker is actually perfect for toor dal.",
+          gloss: "The camera gave it nothing, so it answers from knowledge and never claims to have seen anything. Being useful and being honest are not in tension here." },
+
+        { who: "user", label: "User", text: "What is a colander?" },
+
+        { who: "reason", label: "Reasoning",
+          text: "A colander is just a bowl with small holes in it — you use it to drain water away from food while keeping the food inside. But like I said, a regular bowl works too.",
+          gloss: "It used a word the user didn't have, noticed, and backed up without restarting the task." },
+
+        { who: "user", label: "User", text: "why does my cooker foam up like that" },
+
+        { who: "reason", label: "Reasoning → state",
+          text: "note: \"Soaking now, will cook after 3:00 PM. Add 1 tsp oil/ghee before pressurizing to prevent foam eruption.\"",
+          gloss: "The answer to a side question, but it wasn't only spoken — it was written onto a step hours away, where it will be read back at the moment it matters. State lives in a file on disk, not in the conversation." }
+      ]
+    }
+  ];
+
+  const stage    = document.getElementById('stage');
+  const tabsEl   = document.getElementById('tabs');
+  const nameEl   = document.getElementById('scene-name');
+  const ticksEl  = document.getElementById('ticks');
+  const playBtn  = document.getElementById('playBtn');
+  const prevBtn  = document.getElementById('prevBtn');
+  const nextBtn  = document.getElementById('nextBtn');
+  const restart  = document.getElementById('restartBtn');
+
+  const VISIBLE = 4;                 // how many beats stay on screen at once
+  let scene = 0;
+  let beats = SCENES[0].beats;
+  let tickEls = [];
+  let idx = -1;
+  let playing = true;
+  let timer = null;
+
+  const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  SCENES.forEach((s, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', String(i === 0));
+    b.innerHTML = '<span class="idx">' + (i + 1) + '</span>';
+    b.append(s.tab || s.name);
+    b.addEventListener('click', () => selectScene(i));
+    tabsEl.appendChild(b);
+  });
+  const tabEls = [...tabsEl.children];
+
+  function buildTicks() {
+    ticksEl.replaceChildren();
+    beats.forEach(() => {
+      const t = document.createElement('span');
+      t.className = 'tick';
+      ticksEl.appendChild(t);
+    });
+    tickEls = [...ticksEl.children];
+  }
+
+  function selectScene(i) {
+    scene = i;
+    beats = SCENES[i].beats;
+    nameEl.textContent = SCENES[i].name;
+    tabEls.forEach((t, n) => t.setAttribute('aria-selected', String(n === i)));
+    buildTicks();
+    idx = -1;
+    setPlaying(true);
+  }
+
+  function dwell(b) {
+    // Long lines need longer on screen; the brief and the refusal are the ones
+    // worth pausing on, so length is a reasonable proxy for importance here.
+    return Math.min(7800, 2300 + b.text.length * 26);
+  }
+
+  function render() {
+    const start = Math.max(0, idx - VISIBLE + 1);
+    stage.replaceChildren();
+    for (let i = start; i <= idx; i++) {
+      const b = beats[i];
+      const el = document.createElement('div');
+      el.className = 'beat' + (i < idx ? ' past' : '') + (b.refused ? ' refused' : '');
+      el.dataset.who = b.who;
+
+      const who = document.createElement('div');
+      who.className = 'who';
+      who.textContent = b.label;
+
+      const said = document.createElement('div');
+      said.className = 'said';
+      said.textContent = b.text;
+
+      el.append(who, said);
+
+      if (b.gloss && i === idx) {
+        const g = document.createElement('div');
+        g.className = 'gloss';
+        g.textContent = b.gloss;
+        el.appendChild(g);
+      }
+      stage.appendChild(el);
+      requestAnimationFrame(() => el.classList.add('on'));
+    }
+    tickEls.forEach((t, i) => t.classList.toggle('done', i <= idx));
+    prevBtn.disabled = idx <= 0;
+    nextBtn.disabled = idx >= beats.length - 1;
+  }
+
+  function step(n) {
+    idx = Math.max(0, Math.min(beats.length - 1, n));
+    render();
+    clearTimeout(timer);
+    if (playing && idx < beats.length - 1) {
+      timer = setTimeout(() => step(idx + 1), reduced ? 4200 : dwell(beats[idx]));
+    } else if (idx >= beats.length - 1) {
+      playing = false;
+      playBtn.textContent = 'Replay';
+    }
+  }
+
+  function setPlaying(on) {
+    playing = on;
+    playBtn.textContent = on ? 'Pause' : 'Play';
+    clearTimeout(timer);
+    if (on) step(idx >= beats.length - 1 ? 0 : idx + 1);
+  }
+
+  playBtn.addEventListener('click', () => {
+    if (idx >= beats.length - 1) { idx = -1; setPlaying(true); }
+    else setPlaying(!playing);
+  });
+  prevBtn.addEventListener('click', () => { setPlaying(false); step(idx - 1); });
+  nextBtn.addEventListener('click', () => { setPlaying(false); step(idx + 1); });
+  restart.addEventListener('click', () => { idx = -1; setPlaying(true); });
+
+  buildTicks();
+  step(0);
+</script>

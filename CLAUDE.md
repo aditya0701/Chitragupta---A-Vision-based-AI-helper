@@ -46,7 +46,8 @@ Phone/browser ──► /v1/chat  or  /v1/chat/stream  (FastAPI)
                       │
                       ├─► [Tools] native function calling
                       │   start_timer · cancel_timer · update_task_list
-                      │   log_observation · request_camera · request_live_search
+                      │   log_observation · retract_observation · request_camera
+                      │   request_live_search
                       │   web_search · fetch_page · calculate · get_time
                       │
                       └─► text (+ think_blocks, tool_calls, goal_complete)
@@ -91,7 +92,9 @@ model acts on them without being reminded.
   "note": "used tofu instead of paneer",        // substitutions
   "observations": ["..."],                      // max 5, oldest dropped
   "watch_for": "Read the ingredient list and list any of: beef, gelatin, lard.",
-  "detail": "fine"                              // coarse (default) | fine
+  "detail": "fine",                             // coarse (default) | fine
+  "fine_frames_used": 3,                        // server-managed, see below
+  "fine_budget_spent": false                    // server-managed
 }
 ```
 
@@ -104,7 +107,20 @@ model supplies the critique. See `DECISIONS.md` §6.3.
 resolution and lets the vision model read text — the only way label reading
 works, since resolution discarded in the browser can't be recovered later. It
 costs ~2.5x per frame, so it's opt-in and scoped to one in-progress item: when
-the step finishes, the cost stops. See `DECISIONS.md` §6.4.
+the step finishes, the cost stops.
+
+Scope alone didn't hold (the model set `fine` once and never reverted it, and
+the session hit the daily cap), so there is also a hard bound:
+**`MAX_FINE_FRAMES_PER_ITEM = 8`**, charged per item and persisted on it. On
+exhaustion the item is forced back to `coarse` and marked `fine_budget_spent`;
+only the model explicitly sending `detail: "coarse"` re-arms it. Both fields are
+server-managed — don't set them from the model. See `DECISIONS.md` §6.4.
+
+**Corrections are retractable.** `log_observation` is append-only, but
+`retract_observation(item, note_match, reopen)` removes a wrong note and can
+re-open an item completed because of it. Logged notes are re-injected into every
+prompt, so an uncorrected one gets repeated indefinitely — this is what stops
+that. See `DECISIONS.md` §6.6.
 
 ---
 
@@ -136,7 +152,8 @@ Each of these cost a real debugging session. Details in `DECISIONS.md`.
 
 | Rule | Why |
 |---|---|
-| **Bump `CACHE_NAME` in `sw.js`** whenever `index.html`/`app.js`/`style.css` change | Cache-first SW otherwise serves a stale shell forever. Currently `v18`. §8.1 |
+| **Bump `CACHE_NAME` in `sw.js`** whenever `index.html`/`app.js`/`style.css` change | Cache-first SW otherwise serves a stale shell forever. Currently `v19`. §8.1 |
+| **The live interval must never read `#prompt-input`** | It sent half-typed questions and cleared the box mid-keystroke. Commit via `queuedLivePrompt`. §8.5 |
 | **Mirror changes across `_process_locked` and `_process_stream_locked`** | They duplicate tool availability, recovery and response shape. A fix in one is a bug in the other. §5.2 |
 | **Mirror `app.js` ↔ `debug.js`** | Camera, frame and vision-log logic exist in both. §8.3 |
 | **One flag, one consequence** | `found` drove three unrelated outcomes and broke the camera. §4.4 |
@@ -144,6 +161,8 @@ Each of these cost a real debugging session. Details in `DECISIONS.md`.
 | **Don't add `check`/`start`/`look`/`find` to `_ACTION_CUE_RE`** | They appear inside the non-answers it exists to catch. §7.2 |
 | **Use `_locked` variants internally** | `_lock` is not reentrant. §4.3 |
 | **Image cost scales with resolution, not JPEG quality** | Quality is not a lever. §1.2 |
+| **A failed tool must never render like an empty result** | DDG's CAPTCHA is HTTP 202, so a block was reported to the model as "nothing found". §3.6 |
+| **Flag network tools `blocking=True`** | They run on the event loop otherwise and stall every live tick. §3.7 |
 
 ---
 
@@ -156,6 +175,20 @@ Each of these cost a real debugging session. Details in `DECISIONS.md`.
 - **Render sleeps after ~15 min** with no *inbound* traffic. Frontend polling keeps
   it warm during use; a timer firing while the phone is closed is delayed.
 - **`TOOLS_ENABLED` defaults to `false`.** Nothing above works until it's `true`.
+- **`DEFAULT_TIMEZONE` defaults to `Europe/Berlin`** — what `get_time` answers in
+  when the model names no zone. Must be an IANA name, never an abbreviation:
+  `Europe/Berlin` handles the CET/CEST switch, `CEST` is wrong half the year.
+  Needs `tzdata` (pinned) since `zoneinfo` otherwise falls back to UTC on hosts
+  with no system tz database. Per-user preference is the eventual shape.
+- **`web_search` has no hard dependency on a key**, but every keyless provider in
+  its chain is scraping on sufferance, and Render's datacenter IP gets bot-
+  challenged far harder than a home connection. Set `BRAVE_API_KEY` (2,000/month
+  free) to front the chain with a real API. `DECISIONS.md` §3.6.
+- **`SEARCH_EXCLUDED_DOMAINS` defaults to `wikipedia.org`** — dropped from search
+  results and refused by `fetch_page`. Set it to an empty string to allow
+  everything. Note this leaves the DuckDuckGo Instant Answer rung mostly empty
+  (5/5 of its abstracts were Wikipedia); the primary provider is unaffected.
+  `DECISIONS.md` §3.8.
 
 ---
 

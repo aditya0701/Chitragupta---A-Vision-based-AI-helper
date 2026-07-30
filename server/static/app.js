@@ -673,6 +673,17 @@ async function sendMessage() {
   const prompt = input.value.trim();
   if (!prompt && !currentImageBase64) return;
 
+  // Live Watch is running and there's no separately-attached image: hand the
+  // question to the live path so it goes out WITH a frame. Asking "is this
+  // done?" while the camera is watching and answering it blind is the wrong
+  // reading of the question — and this was already how a typed prompt reached
+  // the model, just by being scraped off the textarea on a tick instead of
+  // being sent when the user asked. An explicit commit replaces that.
+  if (liveActive && !currentImageBase64) {
+    queueLivePrompt(prompt);
+    return;
+  }
+
   setSending(true);
   addMessage('user', prompt || '(image uploaded)', {});
   input.value = '';
@@ -1043,6 +1054,19 @@ function meanGrayscaleDelta(a, b) {
 
 let pendingLiveFrame = null; // latest frame captured while a request was in flight
 
+// A question the user has actually COMMITTED (Send / Enter) while Live Watch is
+// running, waiting to ride along with the next frame.
+//
+// This exists because the interval used to read #prompt-input itself. Live
+// Watch fires every few seconds regardless of what the user is doing, so a tick
+// landing mid-word grabbed a half-typed question ("how much sal"), sent it as
+// though it were finished, and cleared the box out from under them. Diagnosed
+// 2026-07-13, and it gets worse the more Live Watch is used.
+//
+// **The interval must never read or clear #prompt-input.** The textarea belongs
+// to the user until they commit; only sendMessage() may take from it.
+let queuedLivePrompt = null;
+
 async function sampleLiveFrame() {
   if (!liveActive) return;
   const video = document.getElementById('camera-video');
@@ -1056,7 +1080,7 @@ async function sampleLiveFrame() {
   // reason to sit on their message until the next tick happens to clear
   // the threshold (previously this was only checked inside sendLiveFrame,
   // which the diff-gate return below never let it reach).
-  const hasTypedPrompt = !!document.getElementById('prompt-input').value.trim();
+  const hasTypedPrompt = !!queuedLivePrompt;
 
   if (!hasTypedPrompt && lastSentDiffData) {
     const threshold = THRESHOLD_LEVELS[document.getElementById('threshold-slider').value];
@@ -1083,10 +1107,36 @@ async function sampleLiveFrame() {
   await sendLiveFrame(video);
 }
 
+// Commit a typed question into the live path. Clears the textarea HERE — at the
+// moment the user asked for it — which is the whole point: the interval no
+// longer does it behind their back.
+function queueLivePrompt(prompt) {
+  const input = document.getElementById('prompt-input');
+  addMessage('user', prompt, {});
+  input.value = '';
+  queuedLivePrompt = prompt;
+
+  // Flush now rather than waiting out the rest of the interval — someone is
+  // waiting on an answer, and up to a full poll period of silence reads as the
+  // app having ignored them. If a request is already in flight, the finally
+  // block below picks it up the moment that one lands.
+  const video = document.getElementById('camera-video');
+  if (!liveSending && video && video.videoWidth) {
+    framesSent += 1;
+    updateLiveStats();
+    sendLiveFrame(video);
+  } else {
+    setActivityStatus('📤 Queued — sending with the next frame…', true);
+  }
+}
+
 async function sendLiveFrame(video) {
   liveSending = true;
-  const input = document.getElementById('prompt-input');
-  const typedPrompt = input.value.trim();
+  // Consumed, not peeked: taking it here means a retry or a later tick can't
+  // send the same question twice. Never read from #prompt-input — see
+  // queuedLivePrompt.
+  const typedPrompt = queuedLivePrompt || '';
+  queuedLivePrompt = null;
   // Autonomous ticks (no typed prompt) get the tighter LIVE_FRAME_DIM cap —
   // unless the active step asked for a close look, in which case they need the
   // full resolution too, since that IS the point of asking.
@@ -1102,7 +1152,6 @@ async function sendLiveFrame(video) {
   const imageBase64 = canvas.toDataURL('image/jpeg', 0.85).split(',')[1];
 
   const prompt = typedPrompt || 'Watch tick — check the scene against the active task, if any; stay silent if nothing relevant changed.';
-  if (typedPrompt) input.value = '';
 
   // This is the actual "notify me when a frame is sent" moment — fires the
   // instant the request goes out, not when the response comes back, and
@@ -1205,13 +1254,17 @@ async function sendLiveFrame(video) {
   } finally {
     liveSending = false;
     refreshTaskList(); // a live tick may have logged an observation / found the goal
-    if (pendingLiveFrame && liveActive) {
-      const frame = pendingLiveFrame;
-      pendingLiveFrame = null;
-      sendLiveFrame(frame); // flush immediately rather than waiting for the next interval tick
-    } else {
-      pendingLiveFrame = null;
-      if (liveActive) setActivityStatus('👁 Watching for changes…', false);
+    // A question committed while this request was in flight must go out now,
+    // not sit until the next tick — even if no frame was buffered, since the
+    // user is waiting on it. Falls back to the live video element, which is
+    // what sampleLiveFrame would have passed anyway.
+    const flushFrame = pendingLiveFrame
+      || (queuedLivePrompt ? document.getElementById('camera-video') : null);
+    pendingLiveFrame = null;
+    if (flushFrame && liveActive && flushFrame.videoWidth) {
+      sendLiveFrame(flushFrame); // flush immediately rather than waiting for the next interval tick
+    } else if (liveActive) {
+      setActivityStatus('👁 Watching for changes…', false);
     }
   }
 }

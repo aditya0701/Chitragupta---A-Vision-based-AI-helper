@@ -16,11 +16,26 @@ class Tool:
         fn: Callable[..., str],
         parameters: dict[str, dict],
         needs_followup: bool = True,
+        blocking: bool = False,
     ):
         self.name = name
         self.description = description
         self.fn = fn
         self.parameters = parameters
+        # True for tools that make a synchronous network call. Every tool runs
+        # via `tool.fn(...)` from inside an async handler, so a slow one stalls
+        # the whole single-worker event loop — during Live Watch that means the
+        # 4s camera ticks, timer checks and any other request all queue behind
+        # it. web_search could hold that for its full per-provider timeout
+        # times four providers. The executors in agent.py hand these to
+        # asyncio.to_thread instead of calling them inline.
+        #
+        # Deliberately opt-in rather than applied to every tool: the task-list
+        # and timer tools mutate state under a non-reentrant lock (DECISIONS.md
+        # §4.3), and moving those off the event-loop thread would change the
+        # concurrency assumptions they were written under. Only the two
+        # stateless network tools are flagged.
+        self.blocking = blocking
         # Whether a call to this tool warrants a second Groq call to weave its
         # result into the reply. True for tools that surface new information
         # (web_search, fetch_page) the model hasn't seen yet. False for tools
@@ -75,59 +90,272 @@ class ToolRegistry:
 
 # ─── Built-in tools ───────────────────────────────────────────────────────────
 
-def tool_web_search(query: str) -> str:
-    """Search the web via DuckDuckGo's HTML endpoint (no API key required)."""
-    import httpx
-    from bs4 import BeautifulSoup
+# Module-level rather than the per-function imports the rest of this file uses:
+# the search chain below has four providers that all need it, and bs4 is a hard
+# dependency already so there is nothing to defer.
+from bs4 import BeautifulSoup
 
-    try:
-        resp = httpx.get(
-            "https://html.duckduckgo.com/html/",
-            params={"q": query},
-            headers={"User-Agent": "Mozilla/5.0 (compatible; Chitragupt/1.0)"},
-            timeout=10.0,
-            follow_redirects=True,
-        )
-        resp.raise_for_status()
-    except httpx.HTTPError as e:
-        return f"Web search failed: {e}"
+# A plain self-identifying UA, deliberately NOT a spoofed browser string.
+# Measured 2026-07-28: a Chrome UA against DuckDuckGo returns 202 + a "select
+# all squares containing a duck" CAPTCHA on every request, while this one still
+# gets 200s. Spoofing makes us look like the scrapers they block. Wikipedia
+# also requires a descriptive UA and 403s generic ones.
+_SEARCH_UA = "Chitragupt/1.0 (hands-free cooking assistant; contact via repo)"
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+# Per-provider ceiling, not a total. The chain below tries providers in turn,
+# so this is what one dead provider costs before we move on. 10s used to be the
+# whole budget and a cold TLS handshake alone measured 6.4s.
+_SEARCH_TIMEOUT = 8.0
+
+MAX_SEARCH_RESULTS = 5
+
+
+class SearchBlocked(Exception):
+    """A provider refused to answer — CAPTCHA, rate limit, transport error.
+
+    Distinct from "the provider answered and there genuinely is nothing", and
+    the distinction is the entire point of this class. The old implementation
+    collapsed both into `No web search results found for "X"`, because DDG
+    serves its CAPTCHA page with HTTP *202* — a 2xx, so `raise_for_status()`
+    stayed quiet, the `.result` selector matched nothing, and a hard block was
+    reported to the model as an authoritative absence. On "does this contain
+    beef?" that is the exact false-negative the anti-false-absence rule in the
+    reasoning prompt exists to prevent, arriving via a tool result the model
+    has no reason to doubt. Blocked must never be phrased as empty.
+    """
+
+
+def _ddg_is_challenge(resp) -> bool:
+    """DDG signals its bot challenge with 202 + a duck-CAPTCHA body."""
+    return resp.status_code == 202 or "bots use DuckDuckGo" in resp.text
+
+
+def _is_excluded(url: str) -> bool:
+    """Whether `url` is from a domain the operator has ruled out as a source.
+
+    Providers below all return (title, url, snippet) triples specifically so
+    this can be applied at one choke point in tool_web_search rather than
+    four times with four chances to differ.
+
+    Suffix-matched against the host, so "wikipedia.org" also covers
+    en.wikipedia.org and de.m.wikipedia.org, while refusing to match a
+    lookalike host like "notwikipedia.org.example.com".
+    """
+    from urllib.parse import urlparse
+    from ..config import settings
+
+    if not settings.SEARCH_EXCLUDED_DOMAINS:
+        return False
+    host = (urlparse(url).hostname or "").lower()
+    return any(host == d or host.endswith("." + d) for d in settings.SEARCH_EXCLUDED_DOMAINS)
+
+
+def _search_brave(query: str, client) -> list[str]:
+    """Brave Search API — real index, 2,000 queries/month on the free tier.
+
+    Only tried when BRAVE_API_KEY is set. It is the one provider here with a
+    contract behind it; everything below is scraping and can break without
+    notice, which on Render's datacenter IPs is a matter of when.
+    """
+    from ..config import settings
+
+    resp = client.get(
+        "https://api.search.brave.com/res/v1/web/search",
+        params={"q": query, "count": MAX_SEARCH_RESULTS},
+        headers={"X-Subscription-Token": settings.BRAVE_API_KEY, "Accept": "application/json"},
+    )
+    if resp.status_code != 200:
+        raise SearchBlocked(f"Brave returned {resp.status_code}")
+    return [
+        (r.get("title", "").strip(),
+         r.get("url", ""),
+         BeautifulSoup(r.get("description", ""), "html.parser").get_text(" ", strip=True))
+        for r in resp.json().get("web", {}).get("results", [])
+    ]
+
+
+def _search_mojeek(query: str, client) -> list[str]:
+    """Mojeek — independent crawler, no key, and it does not CAPTCHA bots.
+
+    Primary keyless provider for that last reason alone: DDG's challenge rate
+    from a datacenter IP makes it unusable as a base. Results carry direct
+    hrefs, so unlike DDG there is no redirect wrapper to unpick.
+    """
+    resp = client.get("https://www.mojeek.com/search", params={"q": query})
+    if resp.status_code != 200:
+        raise SearchBlocked(f"Mojeek returned {resp.status_code}")
+
     results = []
-    for result in soup.select(".result")[:5]:
-        title_el = result.select_one(".result__title")
-        snippet_el = result.select_one(".result__snippet")
-        link_el = result.select_one(".result__url")
+    for li in BeautifulSoup(resp.text, "html.parser").select("ul.results-standard li"):
+        title_el = li.select_one("a.title") or li.select_one("h2 a")
         if not title_el:
             continue
-        title = title_el.get_text(strip=True)
-        snippet = snippet_el.get_text(strip=True) if snippet_el else ""
-        url = link_el.get_text(strip=True) if link_el else ""
-        results.append(f"- {title} ({url})\n  {snippet}")
+        snippet_el = li.select_one("p.s")
+        snippet = snippet_el.get_text(" ", strip=True) if snippet_el else ""
+        results.append((title_el.get_text(strip=True), title_el.get("href", ""), snippet))
+    return results
 
-    if not results:
-        return f'No web search results found for "{query}".'
-    return f'Web search results for "{query}":\n' + "\n".join(results)
+
+def _search_ddg_lite(query: str, client) -> list[str]:
+    """DuckDuckGo's lite endpoint — same index as the old html one, smaller page.
+
+    Kept as a fallback rather than the primary because of the CAPTCHA above.
+    Links are `//duckduckgo.com/l/?uddg=<url-encoded>` redirect wrappers; those
+    get unwrapped so fetch_page receives a real URL it can actually retrieve.
+    """
+    from urllib.parse import parse_qs, unquote, urlparse
+
+    resp = client.get("https://lite.duckduckgo.com/lite/", params={"q": query})
+    if _ddg_is_challenge(resp):
+        raise SearchBlocked("DuckDuckGo served a bot challenge")
+    if resp.status_code != 200:
+        raise SearchBlocked(f"DuckDuckGo returned {resp.status_code}")
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    links = soup.select("a.result-link")
+    snippets = soup.select("td.result-snippet")
+
+    results = []
+    for i, link in enumerate(links):
+        href = link.get("href", "")
+        wrapped = parse_qs(urlparse(href).query).get("uddg")
+        url = unquote(wrapped[0]) if wrapped else href
+        snippet = snippets[i].get_text(" ", strip=True) if i < len(snippets) else ""
+        results.append((link.get_text(strip=True), url, snippet))
+    return results
+
+
+def _search_ddg_instant(query: str, client) -> list[str]:
+    """DuckDuckGo's official Instant Answer API — an encyclopaedic abstract,
+    not web results.
+
+    Last in the chain because coverage is narrow: it answers "carrageenan" well
+    and "how long to soak rajma" not at all. But it is a sanctioned JSON API
+    rather than scraping, and it keeps returning usable content even while the
+    scraped endpoints are serving challenges — which is exactly the situation
+    where the chain has got this far.
+    """
+    resp = client.get(
+        "https://api.duckduckgo.com/",
+        params={"q": query, "format": "json", "no_html": 1},
+    )
+    # This endpoint also stamps 202 on perfectly good JSON, so status is not a
+    # usable block signal here — a parse failure is.
+    try:
+        data = resp.json()
+    except ValueError:
+        raise SearchBlocked("Instant Answer API returned non-JSON")
+
+    results = []
+    if data.get("AbstractText"):
+        results.append((data.get("AbstractSource", "DuckDuckGo"),
+                        data.get("AbstractURL", ""),
+                        data["AbstractText"]))
+    for topic in data.get("RelatedTopics", []):
+        if topic.get("Text"):
+            results.append((topic["Text"][:80], topic.get("FirstURL", ""), topic["Text"]))
+    return results
+
+
+def tool_web_search(query: str) -> str:
+    """Search the web, trying providers in order until one actually answers.
+
+    Chain rather than a single provider because every keyless option here is
+    scraping someone who would rather we did not, and Render's egress is a
+    datacenter IP that gets challenged far harder than a home connection. See
+    SearchBlocked for why "blocked" and "no results" must stay distinguishable.
+    """
+    import httpx
+    from ..config import settings
+
+    providers: list[tuple[str, Any]] = []
+    if settings.BRAVE_API_KEY:
+        providers.append(("Brave", _search_brave))
+    providers += [("Mojeek", _search_mojeek), ("DuckDuckGo", _search_ddg_lite),
+                  ("DuckDuckGo Instant Answer", _search_ddg_instant)]
+
+    failures = []
+    with httpx.Client(
+        headers={"User-Agent": _SEARCH_UA},
+        timeout=_SEARCH_TIMEOUT,
+        follow_redirects=True,
+    ) as client:
+        for name, search in providers:
+            try:
+                results = search(query, client)
+            except (SearchBlocked, httpx.HTTPError, ValueError, KeyError) as e:
+                failures.append(f"{name}: {type(e).__name__ if not isinstance(e, SearchBlocked) else e}")
+                continue
+
+            # Filter before truncating, not after — otherwise dropping one
+            # excluded hit from a page of ten leaves four results when nine
+            # were available.
+            kept = [r for r in results if not _is_excluded(r[1])][:MAX_SEARCH_RESULTS]
+            if kept:
+                return f'Web search results for "{query}":\n' + "\n".join(
+                    f"- {title} ({url})\n  {snippet}" for title, url, snippet in kept
+                )
+
+            # Nothing usable from this provider. Distinguish the two reasons:
+            # "it had results but they were all excluded sources" is a config
+            # consequence, not an absence, and must not end up phrased as one
+            # (same trap as SearchBlocked — see §3.6).
+            failures.append(f"{name}: {'all results excluded' if results else 'no results'}")
+
+    if all(f.endswith("no results") for f in failures):
+        return (
+            f'No web search results found for "{query}". '
+            f"This means the search engines returned nothing, which is weak evidence — "
+            f"do not treat it as confirmation that something does not exist."
+        )
+    if all(f.endswith(("no results", "all results excluded")) for f in failures):
+        return (
+            f'No usable web search results for "{query}" — every result came from a '
+            f"source this assistant is configured not to use. The search engines did "
+            f"return content, so this is NOT evidence that nothing exists. Answer from "
+            f"your own knowledge and say it is unverified."
+        )
+    return (
+        f'Web search is unavailable right now (tried: {"; ".join(failures)}). '
+        f'This is a tool failure, NOT a result about "{query}" — you learned nothing '
+        f"about the query. Answer from your own knowledge and say it is unverified, "
+        f"or ask the user to check. Never report this as \"nothing found\"."
+    )
 
 
 def tool_fetch_page(url: str) -> str:
     """Fetch a web page and return its visible text content."""
     import httpx
-    from bs4 import BeautifulSoup
 
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
 
+    if _is_excluded(url):
+        # Refuse before spending the round trip, and say why — an excluded
+        # domain is a deliberate policy, not a page that failed to load, and
+        # the model should look elsewhere rather than retry.
+        return (
+            f"Not fetched: {url} is from a source this assistant is configured not "
+            f"to use. This is a policy choice, not a fact about the page. Find "
+            f"another source rather than retrying this one."
+        )
+
     try:
         resp = httpx.get(
             url,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; Chitragupt/1.0)"},
-            timeout=10.0,
+            headers={"User-Agent": _SEARCH_UA},
+            timeout=_SEARCH_TIMEOUT,
             follow_redirects=True,
         )
         resp.raise_for_status()
     except httpx.HTTPError as e:
-        return f"Failed to fetch page: {e}"
+        # Same rule as web_search: a fetch failure is a tool failure, not a
+        # finding about the page. Say so, or the model reports "the page had
+        # no information about X" when it never saw the page at all.
+        return (
+            f"Failed to fetch page ({e}). This is a tool failure — you learned "
+            f"nothing about what the page says. Do not describe its contents."
+        )
 
     soup = BeautifulSoup(resp.text, "html.parser")
     for tag in soup(["script", "style", "nav", "footer", "header"]):
@@ -152,11 +380,65 @@ def tool_calculate(expression: str) -> str:
         return f"Error: {e}"
 
 
-def tool_get_time(timezone: str = "UTC") -> str:
-    """Get the current time (stub)."""
-    from datetime import datetime, timezone as tz
-    now = datetime.now(tz.utc)
-    return f"Current UTC time: {now.isoformat()}"
+def tool_get_time(timezone: str = "") -> str:
+    """Current time in `timezone`, or the user's configured local zone.
+
+    Was a stub that took `timezone` and always returned UTC regardless. In one
+    real session the model asked for Asia/Kolkata twice, got UTC both times,
+    and then reasoned out loud about offsets from a number it had been told was
+    something else — the same shape as the search bug in DECISIONS.md §3.6: the
+    tool answered a different question than the one asked, without saying so.
+
+    Hence the two rules below. An unknown zone says it fell back rather than
+    quietly returning UTC, and every reply names the zone it actually used, so
+    a wrong answer is visible rather than silent.
+
+    Phrased for speech first. The reply may be read aloud by TTS, and an ISO
+    timestamp spoken verbatim is unusable — the human phrasing leads and the
+    precise form trails for arithmetic.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    from ..config import settings
+
+    requested = (timezone or "").strip()
+    name = requested or settings.DEFAULT_TIMEZONE
+    fallback_note = ""
+
+    try:
+        zone = ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        # Unknown zone. Answer in the configured local zone rather than UTC —
+        # it is the better guess for the person asking — but say so plainly.
+        try:
+            zone = ZoneInfo(settings.DEFAULT_TIMEZONE)
+            fallback_note = (
+                f" (NOTE: '{name}' is not a recognised timezone, so this is "
+                f"{settings.DEFAULT_TIMEZONE} instead — do not present it as {name}.)"
+            )
+            name = settings.DEFAULT_TIMEZONE
+        except (ZoneInfoNotFoundError, ValueError):
+            # Misconfigured DEFAULT_TIMEZONE. UTC is the last resort and still
+            # gets labelled, never passed off as local time.
+            from datetime import timezone as _tz
+            zone, name = _tz.utc, "UTC"
+            fallback_note = (
+                f" (NOTE: neither '{requested}' nor the configured default "
+                f"'{settings.DEFAULT_TIMEZONE}' is a recognised timezone — "
+                "this is UTC.)"
+            )
+
+    now = datetime.now(zone)
+    # "16:09 on Wednesday 29 July 2026" — no leading zero on the day, since
+    # %-d/%#d differ across platforms and this string may be spoken.
+    spoken = f"{now:%H:%M} on {now:%A} {now.day} {now:%B %Y}"
+    abbrev = now.tzname() or ""
+    return (
+        f"{spoken} — {name}"
+        + (f" ({abbrev})" if abbrev and abbrev != name else "")
+        + f". ISO: {now.isoformat(timespec='seconds')}."
+        + fallback_note
+    )
 
 
 def tool_start_timer(label: str, duration_seconds: int, context: str = "") -> str:
@@ -210,6 +492,18 @@ def tool_log_observation(item: str, note: str, found: bool = False, alert: bool 
     return tasklist.add_observation(item, note, found=found)
 
 
+def tool_retract_observation(item: str, note_match: str, reopen: bool = False) -> str:
+    """Undo a logged observation the user has corrected, and optionally re-open
+    an item that was completed on the strength of it.
+
+    The counterpart to log_observation, which is append-only. Without this a
+    wrong fact — "found the toor dal" when it was black-eyed beans — stayed in
+    [Task list] permanently and got repeated for the rest of the session even
+    after the user objected twice. See tasklist.retract_observation."""
+    from . import tasklist
+    return tasklist.retract_observation(item, note_match, reopen=reopen)
+
+
 def tool_request_camera() -> str:
     """Marker tool — never executed for its return value. Its presence in a
     response is intercepted specially in agent.py to ask the client for a
@@ -237,12 +531,14 @@ def build_default_tools() -> ToolRegistry:
         description="Search the web for information",
         fn=tool_web_search,
         parameters={"query": {"type": "string", "description": "Search query", "required": True}},
+        blocking=True,
     ))
     registry.register(Tool(
         name="fetch_page",
         description="Fetch a web page by URL and return its visible text content (e.g. to read the steps or details behind a search result)",
         fn=tool_fetch_page,
         parameters={"url": {"type": "string", "description": "The URL to fetch", "required": True}},
+        blocking=True,
     ))
     registry.register(Tool(
         name="calculate",
@@ -252,9 +548,15 @@ def build_default_tools() -> ToolRegistry:
     ))
     registry.register(Tool(
         name="get_time",
-        description="Get the current time",
+        description=(
+            "Get the current date and time. Defaults to the user's local "
+            "timezone, so omit the argument unless they explicitly ask about "
+            "somewhere else — 'what time is it' means their time. The reply "
+            "always names the zone it used; trust that over any offset you "
+            "work out yourself."
+        ),
         fn=tool_get_time,
-        parameters={"timezone": {"type": "string", "description": "Timezone (default UTC)", "required": False}},
+        parameters={"timezone": {"type": "string", "description": "IANA timezone name such as 'Europe/Berlin' or 'Asia/Kolkata'. Leave empty for the user's local timezone.", "required": False}},
     ))
     registry.register(Tool(
         name="start_timer",
@@ -381,6 +683,26 @@ def build_default_tools() -> ToolRegistry:
             "note": {"type": "string", "description": "Short factual note, e.g. 'freezer drawer open, chicken tenders visible, no ice cream'", "required": True},
             "alert": {"type": "boolean", "description": "True to say this note out loud to the user this turn. Use for anything noteworthy — progress, a problem, something they should know. Changes nothing in the task list.", "required": False},
             "found": {"type": "boolean", "description": "True ONLY if this is a 'Find X' item and the target is now visible. Marks that search complete and closes the camera. Never use it to report progress on a step — use alert instead.", "required": False},
+        },
+        needs_followup=False,
+    ))
+    registry.register(Tool(
+        name="retract_observation",
+        description=(
+            "Undo something you previously logged that turns out to be wrong — "
+            "ALWAYS call this when the user corrects a fact you recorded or "
+            "told them (e.g. 'no, that's black eyed beans, not toor dal'). "
+            "Removes the false note so you stop repeating it, and with "
+            "reopen=true also moves an item you wrongly marked completed back "
+            "to in progress. Correcting yourself in conversation is not enough: "
+            "an uncorrected note keeps being fed back to you every turn and you "
+            "will repeat it."
+        ),
+        fn=tool_retract_observation,
+        parameters={
+            "item": {"type": "string", "description": "The exact task-list item content (or its id) carrying the wrong note", "required": True},
+            "note_match": {"type": "string", "description": "A distinctive fragment of the wrong note, e.g. 'toor dal'. Every observation containing it is removed.", "required": True},
+            "reopen": {"type": "boolean", "description": "True if the item was marked completed/skipped because of this wrong note — moves it back to in_progress and clears a matching note.", "required": False},
         },
         needs_followup=False,
     ))

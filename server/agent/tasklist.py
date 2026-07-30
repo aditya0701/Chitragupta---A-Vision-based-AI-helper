@@ -29,6 +29,21 @@ VALID_STATUSES = {"pending", "in_progress", "completed", "skipped"}
 # already downscaled before it left the browser.
 VALID_DETAIL = {"coarse", "fine"}
 
+# Hard ceiling on how many frames one item may be looked at closely for.
+#
+# The scope bound ("completing the step ends the close look") was the only
+# control, and it did not hold: on 2026-07-28 the model set detail:"fine" once,
+# never set it back despite the schema telling it to, the step stayed
+# in_progress for the rest of the session, and every subsequent tick ran at
+# full resolution. The session died at 198,310 of 200,000 daily Groq tokens.
+#
+# The lesson is general: a cost control that depends on the model's judgement
+# is not a cost control. This is the arithmetic backstop that does not.
+# 8 frames is enough for a genuine close look at a label (the real session read
+# one in 2-3) while capping the damage at roughly 8 x 3424 rather than
+# unbounded. See DECISIONS.md §6.4.
+MAX_FINE_FRAMES_PER_ITEM = 8
+
 
 def get_document() -> Optional[dict]:
     if not DOCUMENT_FILE.exists():
@@ -64,6 +79,41 @@ def set_document(title: str, items: list[dict]) -> dict:
             status = "pending"
         item_id = item.get("id") or existing_ids.get(content) or str(uuid.uuid4())[:8]
         existing_item = next((i for i in existing.get("items", []) if i.get("id") == item_id), None)
+
+        incoming_detail = (item.get("detail") or "").strip().lower()
+        prev_detail = (existing_item or {}).get("detail")
+        prev_used = (existing_item or {}).get("fine_frames_used", 0)
+        prev_spent = (existing_item or {}).get("fine_budget_spent", False)
+        detail = (incoming_detail if incoming_detail in VALID_DETAIL
+                  else prev_detail or None)
+
+        # Budget bookkeeping across a full replace. update_task_list resends
+        # every item on every call, so this runs constantly and is exactly
+        # where a naive rule leaks.
+        #
+        # The leak, found by the test: record_fine_frame() writes detail back
+        # to "coarse" on exhaustion, so the model's very next full replace —
+        # still carrying detail:"fine" because it hasn't noticed — looked like
+        # a coarse->fine transition and refilled the budget. That is the same
+        # drift the budget exists to stop, so exhaustion is recorded
+        # explicitly and only the model standing the look down clears it.
+        if incoming_detail == "coarse":
+            # A deliberate stand-down. Clears exhaustion, so a later explicit
+            # "fine" is a genuine second request and gets a fresh budget.
+            fine_used, spent = 0, False
+        elif prev_spent:
+            # Budget already spent and never stood down: ignore the renewed
+            # request entirely, including forcing detail back to coarse so the
+            # rendered [Task list] doesn't keep claiming a close look that
+            # isn't happening.
+            fine_used, spent = prev_used, True
+            if detail == "fine":
+                detail = "coarse"
+        elif incoming_detail == "fine" and prev_detail != "fine":
+            fine_used, spent = 0, False   # genuine new close-look request
+        else:
+            fine_used, spent = prev_used, prev_spent
+
         normalized.append({
             "id": item_id,
             "content": content,
@@ -88,9 +138,16 @@ def set_document(title: str, items: list[dict]) -> dict:
             # 640px live-tick cap), so it is opt-in and scoped to one item —
             # when the step stops being in_progress the cost stops with it.
             # See agent.py's vision stage and app.js's capture sizing.
-            "detail": (item.get("detail") or "").strip().lower()
-            if (item.get("detail") or "").strip().lower() in VALID_DETAIL
-            else (existing_item or {}).get("detail") or None,
+            "detail": detail,
+            # Frames already spent looking closely at this item. Lives on the
+            # item rather than in memory so it survives a Render restart —
+            # the budget is meaningless if a restart silently refills it.
+            "fine_frames_used": fine_used,
+            # Set once the budget runs out, cleared only when the model
+            # explicitly sends detail:"coarse". Without it the auto-revert
+            # above is indistinguishable from the model choosing coarse, and
+            # the next full replace refills the budget.
+            "fine_budget_spent": spent,
         })
 
     if items and not normalized and existing.get("items"):
@@ -164,21 +221,70 @@ MAX_OBSERVATIONS_PER_ITEM = 5
 FIND_GOAL_PREFIX = "find "
 
 
+def _wants_fine(item: dict) -> bool:
+    """An in-progress item asking for a close look that still has budget."""
+    return (
+        item.get("status") == "in_progress"
+        and item.get("detail") == "fine"
+        and item.get("fine_frames_used", 0) < MAX_FINE_FRAMES_PER_ITEM
+    )
+
+
 def active_detail() -> str:
     """The detail level the camera should be capturing at right now.
 
-    "fine" if any in-progress item asked for it, else "coarse". Read by the
-    vision stage and echoed to the client, which sizes its next capture from
-    it — the resolution decision has to reach the browser, because a frame
-    downscaled before upload can never be inspected closely afterwards.
+    "fine" if any in-progress item asked for it *and* has fine-frame budget
+    left, else "coarse". Read by the vision stage and echoed to the client,
+    which sizes its next capture from it — the resolution decision has to
+    reach the browser, because a frame downscaled before upload can never be
+    inspected closely afterwards.
+
+    Deliberately a pure read: it runs on every response to echo frame_detail,
+    so the spending half lives in record_fine_frame() where it happens once
+    per frame actually looked at.
     """
     document = get_document()
     if not document:
         return "coarse"
+    return "fine" if any(_wants_fine(i) for i in document.get("items", [])) else "coarse"
+
+
+def record_fine_frame() -> None:
+    """Charge one fine frame against every in-progress item asking for one,
+    and drop any that just ran out back to "coarse".
+
+    Called from the vision stage after a frame has actually been looked at
+    closely — not from active_detail(), which is a read consulted many times
+    per turn and would over-charge wildly.
+
+    Writing the exhausted item back to detail:"coarse" rather than only
+    letting active_detail() refuse it is deliberate: `detail` is rendered into
+    the prompt, so the model sees the close look has ended and can say so or
+    re-request it explicitly, instead of silently getting coarse frames while
+    the list still claims a close look is running.
+    """
+    document = get_document()
+    if not document:
+        return
+
+    changed = False
     for item in document.get("items", []):
-        if item.get("status") == "in_progress" and item.get("detail") == "fine":
-            return "fine"
-    return "coarse"
+        if not _wants_fine(item):
+            continue
+        item["fine_frames_used"] = item.get("fine_frames_used", 0) + 1
+        changed = True
+        if item["fine_frames_used"] >= MAX_FINE_FRAMES_PER_ITEM:
+            item["detail"] = "coarse"
+            # Marks the revert as ours, not the model's — see set_document.
+            item["fine_budget_spent"] = True
+            logger.info(
+                f"record_fine_frame: {item['content']!r} used its "
+                f"{MAX_FINE_FRAMES_PER_ITEM}-frame close-look budget — "
+                "reverted to coarse."
+            )
+
+    if changed:
+        DOCUMENT_FILE.write_text(json.dumps(document, indent=2))
 
 
 def is_find_goal_content(content: str) -> bool:
@@ -262,6 +368,87 @@ def add_observation(item_ref: str, note: str, found: bool = False) -> str:
             "alert=true; to finish a step, use update_task_list."
         )
     return f"Logged observation for '{match['content']}'."
+
+
+def retract_observation(item_ref: str, note_match: str, reopen: bool = False) -> str:
+    """Delete observations on `item_ref` whose text contains `note_match`, and
+    optionally move a wrongly-completed item back to in_progress.
+
+    The counterpart to add_observation, which was append-only. From the
+    2026-07-28 session: the model logged found=true for "toor dal" in a plastic
+    bag, the user said *"the thing in the plastic bag is black eyed beans not
+    toor dal"* — and nothing could act on that. The observation stayed, the
+    item stayed completed, the wrong note kept riding along in every subsequent
+    [Task list] injection, and the model confabulated from it for four turns,
+    was challenged twice, apologised, and then repeated the claim.
+
+    **A false observation that survives an explicit correction is worse than no
+    observation at all**, because once it is in the log it is indistinguishable
+    from a verified one.
+
+    Substring matching rather than an index: the model is working from the
+    rendered [Task list] text and can quote a fragment of the wrong note far
+    more reliably than it can count list positions. Matching is case-insensitive
+    and removes every observation that matches, since a wrong fact tends to have
+    been logged more than once across ticks.
+
+    `reopen` also clears the item's `note` when it matches, because that field
+    is the other place a bad fact rides along, and un-completing an item while
+    leaving the note that justified completing it just recreates the problem.
+    """
+    document = get_document()
+    if not document or not document.get("items"):
+        return "No active task list — nothing to retract."
+
+    match = next(
+        (i for i in document["items"]
+         if i["id"] == item_ref or i["content"].lower() == item_ref.strip().lower()),
+        None,
+    )
+    if not match:
+        return f"No task list item matching '{item_ref}' — check the [Task list] content exactly."
+
+    needle = note_match.strip().lower()
+    if not needle:
+        return "retract_observation needs the text of the observation to remove."
+
+    before = match.get("observations", [])
+    kept = [o for o in before if needle not in o.lower()]
+    removed = len(before) - len(kept)
+    match["observations"] = kept
+
+    reopened = False
+    if reopen and match["status"] in ("completed", "skipped"):
+        match["status"] = "in_progress"
+        reopened = True
+    note_cleared = False
+    if reopen and match.get("note") and needle in match["note"].lower():
+        match["note"] = None
+        note_cleared = True
+
+    if not removed and not reopened and not note_cleared:
+        return (
+            f"Nothing matched '{note_match}' on '{match['content']}'. Its current "
+            f"observations are: {kept or 'none'}. Quote a fragment of the exact "
+            "wrong note, or pass reopen=true to re-open the item."
+        )
+
+    DOCUMENT_FILE.write_text(json.dumps(document, indent=2))
+    logger.info(
+        f"retract_observation: {match['content']!r} — removed {removed} "
+        f"observation(s), reopened={reopened}, note_cleared={note_cleared}."
+    )
+    bits = []
+    if removed:
+        bits.append(f"removed {removed} observation(s)")
+    if reopened:
+        bits.append("re-opened the item (now in progress)")
+    if note_cleared:
+        bits.append("cleared its note")
+    return (
+        f"Corrected '{match['content']}': {', '.join(bits)}. Treat the retracted "
+        "information as false from now on — do not repeat it."
+    )
 
 
 _STATUS_MARKS = {"pending": "[ ]", "in_progress": "[~]", "completed": "[x]", "skipped": "[-]"}

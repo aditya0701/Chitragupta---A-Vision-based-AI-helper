@@ -60,108 +60,171 @@ injection — no timers came up. Needs a session with timers in it.
 
 ## Next, in order
 
-### 1. Bound the cost of `detail: "fine"` — it caused a 429
+### 1. Bound the cost of `detail: "fine"` — **DONE**
 
-Session died at **198,310 / 200,000 TPD**, same wall as last time.
+Session died at **198,310 / 200,000 TPD**. `detail:"fine"` was set once and
+never reverted, so every later tick ran at full resolution.
 
-A fine frame costs `Requested 3424` tokens against roughly 1400 for coarse — the
-predicted ~2.4x. But:
+Fixed with an arithmetic bound beside the scope bound:
+`MAX_FINE_FRAMES_PER_ITEM = 8`, charged per item by `record_fine_frame()` from
+the vision stage, counter stored on the item so a restart doesn't refill it.
+On exhaustion the item is written back to `detail:"coarse"` so the prompt stops
+claiming a close look that isn't happening.
 
-```
-11:26:40  🔍 frame detail → fine (live ticks now 1024px)
-          ...never switches back
-```
+**The trap, which the test caught and the obvious implementation walks into:**
+the auto-revert writes `coarse`, and `update_task_list` resends every item every
+call — so the next full replace still saying `fine` looked like a deliberate
+`coarse`→`fine` transition and refilled the budget. Exhaustion is now recorded
+explicitly (`fine_budget_spent`) and only the model itself sending `coarse`
+clears it. A legitimate second close look is a deliberate two-step: stand down
+to `coarse`, then request `fine` again.
 
-Set once, never reverted. Cost was bounded by **scope** — "completing the step
-ends it" — and the step stayed `in_progress` for the rest of the session, so
-every later tick ran at full resolution.
+`DECISIONS.md` §6.4.
 
-**The lesson: a cost control that depends on the model's judgement does not
-hold.** The schema explicitly tells it to set detail back to `coarse` when the
-close look is done. It didn't.
+### 2. Let a user correction retract an observation — **DONE**
 
-Needs a hard bound alongside the scope bound:
+The toor dal / black-eyed-beans failure: a wrong `found:true` observation that
+nothing could remove, kept riding along in `[Task list]`, confabulated from for
+four turns, challenged twice, apologised for, then repeated.
 
-- count fine frames per item and auto-revert to `coarse` after N (5–10?) — the
-  counter belongs on the item so it survives a restart;
-- or revert once the `watch_for` question has been answered (harder — needs a
-  notion of "answered");
-- or a session-wide fine-frame budget.
+Fixed with `retract_observation(item, note_match, reopen=False)` — removes every
+observation containing `note_match` (substring, not index: the model can quote a
+fragment far more reliably than it can count positions), and with `reopen=true`
+moves a wrongly-`completed` item back to `in_progress` and clears a matching
+`note`. Prompt guidance tells the model that apologising in conversation does
+*not* undo a logged note, and to believe the user over its own earlier note.
 
-Files: `server/agent/tasklist.py` (`active_detail()`, ~L167),
-`server/agent/agent.py` (`_run_vision_stage`). Background: `DECISIONS.md` §6.4.
+The §6.5 interaction was real and is fixed too: the previous-caption grounding
+now ends with *"consistency with an earlier mistake is not consistency"*, so it
+stops reading as an instruction to keep re-asserting a wrong caption.
 
-### 2. Let a user correction retract an observation
+Verified by replaying the exact transcript scenario. `DECISIONS.md` §6.6.
 
-Worst behaviour in the session, and a design gap rather than a bug.
+**Not yet exercised against live traffic** — both need a real session.
 
-The model found "toor dal" in a plastic bag and logged `found:true`. The user
-corrected it — *"the thing in the plastic bag is black eyed beans not toor
-dal"*. Nothing retracted it. `Find toor dal` stayed `completed`. The wrong note
-kept riding along in `[Task list]`, and the model confabulated for four turns:
-
-> *"the toor dal bag is on an upper shelf, open and upright, with a black loaf
-> pan sitting behind it"*
-
-The user challenged it twice (*"When did you told me about the dal on the upper
-shelf?"*), it apologised — and then **repeated the claim**.
-
-`log_observation` is append-only. There is no `retract_observation`, and no way
-to un-complete a wrongly-completed item. A false observation that survives an
-explicit correction is worse than no observation at all.
-
-Needs a way to invalidate a specific observation, a way to move `completed` back
-to `in_progress`, and prompt guidance to use both when the user says "no,
-that's wrong".
-
-Files: `server/agent/tasklist.py` (`add_observation`, ~L208),
-`server/agent/__init__.py` (tool registration), `server/agent/agent.py`
-(guidance).
-
-Decide at the same time: the phantom "black loaf pan" persisted across frames,
-possibly a side effect of the §6.5 grounding rule telling the model not to
-contradict the previous caption. Consider "…unless the user corrected you."
-
-### 3. Silence narration leaked once
-
-Spoken aloud on a watch tick:
+### 3. Silence narration leaked once — **DONE**
 
 > *"Nothing has visibly changed… **I'll stay quiet until there's something new to
 > report.**"*
 
-`_SILENCE_NARRATION_RE` ([agent.py:36-43](server/agent/agent.py#L36-L43)) exists
-for exactly this and missed two near-variants:
+Both near-variants added (`quiet` alongside `silent`; a subject-first
+`nothing … changed` branch, since the existing no-change branch was
+`scene|frame|everything` + `remains`).
 
-- `"stay quiet"` — the pattern covers `stay|remain|keep|be` + **silent** only
-- `"Nothing has visibly changed"` — covers `nothing` + `relevant|new|of note|worth …`, not `nothing has … changed`
+**But widening alone would have been the wrong fix**, and §7.2 is only half the
+story. Widening `_ACTION_CUE_RE` is safe because it makes that detector *less*
+likely to fire. This regex runs the other way — widening makes suppression
+*more* likely, and a false positive means the user never hears something real.
+The counter-example the old check couldn't separate from the leak:
 
-At ~281 chars it was under the 300 cap, so only the regex failed. One occurrence
-in 42 ticks. Cheap — but read `DECISIONS.md` §7.2 first, widening these regexes
-has bitten before.
+> *"Nothing has changed with the heat, but the onions are starting to brown —
+> give them a stir."*
 
-### 4. `get_time` ignores its own `timezone` parameter
+So `_is_silent_live_reply` gained the third condition it was missing, matching
+`_is_list_meta_nonanswer`'s shape: short, **and** no-change vocabulary, **and**
+nothing substantive — an action imperative or a digit. Bias is deliberately
+toward leaking a redundant "nothing changed" over swallowing an update.
 
-[`tool_get_time`](server/agent/__init__.py#L155) is a stub that always returns
-UTC. The model called it twice with `Asia/Kolkata`, got UTC both times, then
-reasoned out loud about timezone offsets from a value it had been told was
-something else. Small and self-contained.
+`_ACTION_CUE_RE` itself was **not** touched (the §7.2 trap). 27-case harness
+covers both directions. `DECISIONS.md` §7.8.
 
-### 5. Input-hijack race in `sendLiveFrame()` *(carried over, never fixed)*
+### 4. `get_time` ignores its own `timezone` parameter — **DONE**
 
-`sendLiveFrame()` reads and clears `#prompt-input` on its own interval tick,
-independent of the Send button. Type while Live Watch is polling and a tick can
-grab a partial value mid-keystroke. Diagnosed on 2026-07-13, still present, and
-it directly affects the mode we now use most.
+It was a stub that always returned UTC. The model called it twice with
+`Asia/Kolkata`, got UTC both times, then reasoned out loud about offsets from a
+value it had been told was something else — the same shape as §3.6: the tool
+answered a different question than the one asked, without saying so.
 
-Files: `server/static/app.js` (`sendLiveFrame`, the `typedPrompt` read), mirror
-in `debug.js`.
+Now backed by `zoneinfo`, defaulting to **`DEFAULT_TIMEZONE`
+(`Europe/Berlin`)** since "what time is it" means local time. Every reply names
+the zone it actually used, and an unrecognised zone says it fell back instead of
+quietly returning UTC.
 
-### 6. `web_search` timed out
+**`Europe/Berlin`, not `CEST`** — Berlin is CET in winter and CEST in summer, so
+an abbreviation is wrong half the year. Verified switching correctly across the
+October DST boundary. (`CEST` passed as an argument isn't a valid IANA name; it
+falls back with a note, landing on the right zone anyway.)
 
-10s against DuckDuckGo's HTML endpoint
-([__init__.py:88](server/agent/__init__.py#L88), L125). Failed once; the model
-recovered gracefully from its own knowledge, which is right — but the tool is
-unreliable enough to revisit.
+Output is phrased for speech first — *"16:10 on Wednesday 29 July 2026 —
+Europe/Berlin (CEST)"* — with the ISO form trailing for arithmetic, since a bare
+ISO timestamp read aloud by TTS is unusable.
+
+`tzdata` added to `requirements.txt`: `zoneinfo` reads the OS tz database, which
+Windows lacks and slim Linux images often omit, so without it this silently
+degrades to UTC on some hosts.
+
+**Per-user timezone is the eventual shape** — this is one server-wide setting
+standing in until there's somewhere to store per-user preferences at all.
+
+### 5. Input-hijack race in `sendLiveFrame()` — **DONE** *(carried from 2026-07-13)*
+
+The interval read and cleared `#prompt-input` itself, so a tick landing
+mid-keystroke sent a half-typed question and blanked the box.
+
+Fixed with `queuedLivePrompt` — set only by an explicit commit (Send / Enter),
+consumed by `sendLiveFrame` so it can't be resent. **The interval no longer
+touches the textarea at all.**
+
+**Behaviour change worth knowing:** a commit during Live Watch now goes out on
+the live path **with a frame**, immediately, instead of `sendMessage()`'s
+frameless `/v1/chat/stream`. Previously the same question reached the model two
+different ways depending on whether you pressed Enter or waited for a tick, and
+only the accidental path could see. Trade-off: typed questions during Live Watch
+no longer stream — but they never did when a tick picked them up, so this is
+consistency, not a loss. Partial down payment on "attach the live frame in
+`sendMessage`" below.
+
+Mirrored in `debug.js` (§8.3), `CACHE_NAME` bumped to **v19** (§8.1).
+
+Verified with a Node harness driving the real `app.js`/`debug.js` in a stubbed
+DOM — 14/14 both files, and **9 failures against the pre-fix file**, so the
+harness demonstrably catches the bug. See `DECISIONS.md` §8.5 for the
+`vm.runInContext` trap that made the first run of that harness meaningless.
+
+### 6. `web_search` timed out — **DONE**
+
+Worse than a timeout once opened up. DuckDuckGo serves its bot CAPTCHA with
+**HTTP 202**, so `raise_for_status()` passed, the parse found zero results, and
+the tool returned `No web search results found for "X"` — **a hard block
+reported to the model as an authoritative absence**, on exactly the
+does-this-contain-beef questions where that is most dangerous.
+
+Fixed: `SearchBlocked` keeps "blocked" and "genuinely empty" as visibly
+different tool results, and a provider chain replaces the single endpoint —
+Brave (if `BRAVE_API_KEY` is set) → Mojeek → DDG lite → DDG Instant Answer.
+Also found and fixed: tools ran on the event loop, so a slow search stalled
+every live tick.
+
+Full write-up including the counter-intuitive measurements (a spoofed browser
+UA gets *more* CAPTCHAs than an honest bot UA; the "slow endpoint" was a cold
+TLS handshake): `DECISIONS.md` §3.6 and §3.7.
+
+**Optional:** set `BRAVE_API_KEY` (2,000 searches/month free) to put a provider
+with an actual contract at the front of the chain. Everything works without it.
+
+### 8. The apology loop — **DONE** *(reported 2026-07-29, not in the original list)*
+
+Same session as item 2, different failure: after being corrected the model
+apologised, was challenged, apologised again, and never answered — while the
+vision stage was handing it good fresh information.
+
+Mechanical cause of "never confirmed it": `found=true` marked the item
+**completed**, and every camera path filters on `status == "in_progress"`, so
+the search dropped out of the vision briefing and the camera closed. It had
+stopped looking. Item 2's `reopen=true` restores the goal and its brief; item
+2's retraction stops the wrong note being re-injected every turn.
+
+What was left uncovered — what to do *after* apologising — is now:
+
+- **Persona:** believe the user over your own note, say sorry once and briefly,
+  then answer; never let an apology be the whole reply.
+- **Backstop** keyed on **repetition, not vocabulary** — *"Sorry, those are
+  black eyed beans, not toor dal"* is an apology *and* the right answer, so no
+  word-list can separate them. Fires from the **second** consecutive apology;
+  the first is left alone. A real answer resets the streak.
+
+Both paths wired (§5.2). 17-case harness. `DECISIONS.md` §7.2b — including two
+regex branches that matched nothing and passed the tests anyway.
 
 ### 7. Reply length for a listening user
 

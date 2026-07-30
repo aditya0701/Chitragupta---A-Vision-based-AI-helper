@@ -34,13 +34,61 @@ SILENT_MARKER = "[SILENT]"
 # Gated on is_live_frame + a length cap at the call site so a substantive
 # update that merely mentions one of these phrases is never suppressed.
 _SILENCE_NARRATION_RE = re.compile(
-    r"\b(?:stay(?:ing)?|remain(?:ing)?|keep(?:ing)?|be)\s+silent\b"
+    # "…I'll stay quiet until there's something new to report" leaked through
+    # on 2026-07-28 and was spoken aloud: this branch covered stay/remain/keep
+    # + *silent* only, and the model said "quiet".
+    r"\b(?:stay(?:ing)?|remain(?:ing)?|keep(?:ing)?|be)\s+(?:silent|quiet)\b"
     r"|\bsilent\s+as\s+instructed\b"
-    r"|\bnothing\s+(?:relevant|new|of\s+note|worth\s+(?:noting|mentioning|saying))\b"
+    r"|\bnothing\s+(?:relevant|new|of\s+note|to\s+report"
+    r"|worth\s+(?:noting|mentioning|saying|reporting))\b"
+    # The other half of the same leak: "Nothing has visibly changed". The
+    # branch below is subject-first (scene/frame/everything + remains), which
+    # this phrasing inverts. Bounded to 3 intervening words so it stays a
+    # single clause rather than reaching across a whole sentence.
+    r"|\bnothing\s+(?:\w+\s+){0,3}chang(?:ed|es)\b"
     r"|\bno\s+(?:relevant\s+)?(?:change|update)s?\b"
     r"|\b(?:scene|frame|everything)\s+(?:remains?|is\s+still|stays?)\s+(?:the\s+same|unchanged|blurred)\b",
     re.IGNORECASE,
 )
+
+# A reply whose substance is "I was wrong", used to detect the apology loop.
+#
+# From the 2026-07-28 session: after the user corrected a misidentified
+# ingredient, the model apologised, was challenged again, apologised again, and
+# never answered — while the vision stage was reporting perfectly good fresh
+# information it never acted on.
+#
+# Detection is deliberately NOT "this reply contains an apology". *"Sorry,
+# those are black-eyed beans, not toor dal"* is an apology and is also exactly
+# the right answer; no vocabulary rule separates the two without swallowing
+# good corrections. What is diagnostic is **repetition** — see
+# _apology_streak. One apology is courtesy, two in a row is a stuck model.
+# Note the explicit apolog- stems. Writing `my\s+apolog` with a trailing \b
+# silently matched nothing at all, because \b cannot sit between "apolog" and
+# the "ies"/"ise" that always follows — the same boundary behaviour that stops
+# \bsimmer\b matching "simmering" (§7.8). Both branches were dead until a probe
+# printed the actual matches.
+#
+# A bare "Sorry, …" opener is deliberately NOT here. Requiring explicit
+# self-blame keeps genuine corrections — *"Sorry, those are black eyed beans,
+# not toor dal"* — from counting toward the streak, and a false fire costs a
+# wasted call plus a replaced good reply. Erring toward not firing.
+_APOLOGY_RE = re.compile(
+    r"\b(?:i(?:'m| am)\s+(?:so\s+|really\s+|very\s+)?sorry"
+    r"|(?:my|i)\s+apolog(?:y|ies|ise|ised|ize|ized|ising|izing)"
+    r"|i\s+(?:was|were)\s+(?:wrong|mistaken|incorrect)"
+    r"|i\s+made\s+(?:a\s+)?mistake|my\s+mistake|that\s+was\s+my\s+error"
+    r"|i\s+should\s+not\s+have|i\s+shouldn't\s+have"
+    r"|i\s+got\s+that\s+wrong)\b",
+    re.IGNORECASE,
+)
+
+# Concrete readings — "2 minutes left", "180C", "3 of the 5 items". A live-tick
+# reply carrying a number is asserting something the user needs, even if it
+# opens with no-change wording, so it is never suppressed. Cheap proxy for
+# "this sentence has content" that costs nothing and has no vocabulary to
+# maintain.
+_CONCRETE_READING_RE = re.compile(r"\d")
 
 # The "pointed at the list instead of saying the step" non-answer, e.g.
 # "start with the in-progress item", "I've updated your task list — start with
@@ -156,6 +204,13 @@ class ChitraguptAgent:
         self.tools = tools or build_default_tools()
         self.memory = ConversationMemory()
         self.frame_buffer = FrameBuffer()
+        # Consecutive direct-turn replies that were substantively "I was
+        # wrong". One is fine and correct; the failure mode is the second and
+        # third, where the model keeps apologising and never answers. Counting
+        # rather than pattern-matching the content is what lets a genuine
+        # correction ("sorry, those are black-eyed beans") through untouched —
+        # see _APOLOGY_RE.
+        self._apology_streak = 0
         # Serializes every turn (typed chat, live-frame ping, timer
         # completion) so two of them can never interleave reads/writes of
         # the shared task-list document or timer state. Not reentrant —
@@ -506,7 +561,7 @@ class ChitraguptAgent:
             if response.tool_calls:
                 # Native function-calling — structured, no parsing of the
                 # visible text needed at all.
-                tool_results = self._run_structured_tool_calls(response.tool_calls)
+                tool_results = await self._run_structured_tool_calls(response.tool_calls)
             else:
                 # Fallback for backends without SUPPORTS_NATIVE_TOOLS. Only
                 # scan the *visible* response for tool calls, not the raw
@@ -697,6 +752,16 @@ class ChitraguptAgent:
         if not is_live_frame and self._is_list_meta_nonanswer(final_text):
             corrected = await self._voice_concrete_step(
                 prompt, debug_steps, "list-meta non-answer correction",
+            )
+            if corrected:
+                final_text = corrected
+
+        # Second backstop, same shape: the model acknowledged a correction and
+        # then kept acknowledging it instead of answering. Only from the second
+        # consecutive apology — the first one is the right thing to do.
+        if not is_live_frame and self._is_stuck_apologising(final_text):
+            corrected = await self._answer_not_apologise(
+                prompt, scene_description, debug_steps, "apology-loop correction",
             )
             if corrected:
                 final_text = corrected
@@ -925,7 +990,7 @@ class ChitraguptAgent:
         tool_results = []
         if settings.TOOLS_ENABLED:
             if response.tool_calls:
-                tool_results = self._run_structured_tool_calls(response.tool_calls)
+                tool_results = await self._run_structured_tool_calls(response.tool_calls)
             else:
                 tool_results = await self._execute_tool_calls(clean_text)
             tool_results = [
@@ -1046,6 +1111,22 @@ class ChitraguptAgent:
         ):
             corrected = await self._voice_concrete_step(
                 prompt, debug_steps, "list-meta non-answer correction (stream)",
+            )
+            if corrected:
+                final_text = corrected
+                yield {"type": "content_delta", "text": corrected}
+
+        # Apology-loop backstop. Deliberately NOT gated on the backend lacking
+        # chat_stream the way the check above is, because the reasoning that
+        # justifies that gate doesn't hold here: what the user *hears* is
+        # spoken from the final text (app.js speaks data.text at finalize, not
+        # the deltas), and finalize also overwrites the bubble with it. So a
+        # retro-correction does reach them on a streaming backend — which is
+        # the only backend in use, meaning gating it would leave the failure
+        # unfixed on the main typed path, i.e. exactly where it was reported.
+        if self._is_stuck_apologising(final_text):
+            corrected = await self._answer_not_apologise(
+                prompt, scene_description, debug_steps, "apology-loop correction (stream)",
             )
             if corrected:
                 final_text = corrected
@@ -1332,13 +1413,29 @@ class ChitraguptAgent:
                 "say what has CHANGED. Do not contradict it about something you "
                 "cannot clearly see now — if it said an ingredient was in the "
                 "pan and you cannot make it out any more, it is most likely "
-                "still there and simply harder to see."
+                "still there and simply harder to see.\n"
+                # The consistency rule above is right for a scene going out of
+                # focus and wrong once the description itself was mistaken —
+                # it then reads as an instruction to keep re-asserting the
+                # error. A misidentified item stayed in the captions for four
+                # turns that way. Continuity must not outrank ground truth.
+                "This holds only while the earlier description was RIGHT. If "
+                "what you can see now plainly contradicts it — a different "
+                "object, a different label — describe what is actually there "
+                "and say it differs from the earlier description. Consistency "
+                "with an earlier mistake is not consistency."
             )
         scene_description = await self.backend.vision(
             image_base64=image_base64,
             prompt=vision_prompt,
             max_tokens=vision_max_tokens,
         )
+        if detail == "fine":
+            # Charge the close look only once the frame has actually been paid
+            # for. Here rather than in active_detail(), which is a pure read
+            # consulted several times per turn to echo frame_detail and would
+            # over-charge the budget many times over per frame.
+            tasklist.record_fine_frame()
         # Recorded separately from _record_debug_step (whose shape
         # assumes a VisionResponse) since this stage only returns a
         # plain string — without this, the debug UI showed nothing
@@ -1419,7 +1516,17 @@ class ChitraguptAgent:
             "Take initiative and give the actual instruction. Never answer by "
             "pointing them at a list, telling them to check what's next, or "
             "saying you've updated something and stopping there — figuring out "
-            "and voicing the next step is your job, not theirs."
+            "and voicing the next step is your job, not theirs. "
+            # The apology loop: corrected once, the model spent turn after turn
+            # apologising while the vision stage was handing it the answer.
+            # Being sorry is not an answer, and to someone listening it is
+            # indistinguishable from being ignored.
+            "When they correct you, believe them over your own earlier note or "
+            "caption — they can see the thing and you cannot. Say sorry once, "
+            "in a few words, then immediately give them the answer or the next "
+            "step. Never apologise twice for the same mistake and never let an "
+            "apology be your whole reply: if you still can't tell, say the one "
+            "specific thing you need them to do so you can."
         )
         parts = [
             persona + (" You have tools to help you do this." if settings.TOOLS_ENABLED else "")
@@ -1580,6 +1687,13 @@ class ChitraguptAgent:
                 "turns where you don't say anything to the user. This is your memory "
                 "across frames; a later question like 'where is X' should be answered by "
                 "checking these logged notes, not just the current frame.\n"
+                + "- retract_observation: the moment the user corrects something you "
+                "recorded or claimed ('no, that's black eyed beans, not toor dal'), call "
+                "this with a fragment of the wrong note. Add reopen=true if you had marked "
+                "the item completed because of it. Your logged notes are fed back to you "
+                "every turn, so apologising in conversation does NOT undo one — if you "
+                "leave it there you will repeat the same wrong fact a few turns later. "
+                "Believe the user over your own earlier note or caption.\n"
                 + (
                     "- request_camera: no image is attached to this message. If answering "
                     "needs a single look at the current scene, call this instead of "
@@ -1670,10 +1784,27 @@ class ChitraguptAgent:
         3. a reasoning model narrating its own silence instead of emitting the
            token at all — the observed DeepSeek/hybrid failure mode.
 
-        Case 3 is gated on a length cap: a short reply that reads as a
-        no-change declaration is noise, but a long, substantive update that
-        happens to mention one of these phrases must still reach the user.
-        Only ever called for is_live_frame turns — a direct user turn always
+        Case 3 needs three conditions, the same conservative shape as
+        _is_list_meta_nonanswer: short, no-change vocabulary, **and** nothing
+        substantive alongside it.
+
+        That third condition is what makes the vocabulary safe to widen. The
+        two detectors pull in opposite directions and the asymmetry matters:
+        widening _ACTION_CUE_RE only makes that detector *less* likely to fire,
+        costing at worst one needless corrective call (§7.2). Widening this one
+        makes suppression *more* likely, and a false positive means the user
+        never hears something real — on an assistant answering questions about
+        dietary restrictions and timers, that is much the worse error. So:
+
+          - an action imperative ("give them a stir") means it is voicing a
+            step, whatever it opened with;
+          - a digit means it is reporting a concrete reading.
+
+        Either one and the reply goes through. The bias is deliberately toward
+        leaking a redundant "nothing has changed" — one occurrence in 42 ticks —
+        over swallowing an update.
+
+        Only ever called for is_live_frame turns; a direct user turn always
         gets a real answer regardless.
         """
         stripped = text.strip()
@@ -1681,9 +1812,11 @@ class ChitraguptAgent:
             return True
         if SILENT_MARKER in stripped.upper():
             return True
-        if len(stripped) <= 300 and _SILENCE_NARRATION_RE.search(stripped):
-            return True
-        return False
+        if len(stripped) > 300:
+            return False
+        if _ACTION_CUE_RE.search(stripped) or _CONCRETE_READING_RE.search(stripped):
+            return False
+        return bool(_SILENCE_NARRATION_RE.search(stripped))
 
     def _is_list_meta_nonanswer(self, text: str) -> bool:
         """Whether a direct-turn reply pointed the user AT the task list or its
@@ -1709,6 +1842,74 @@ class ChitraguptAgent:
         if _ACTION_CUE_RE.search(stripped):
             return False
         return bool(_LIST_META_RE.search(stripped))
+
+    def _is_stuck_apologising(self, text: str) -> bool:
+        """Track consecutive apology-shaped replies; True once it's a loop.
+
+        Call once per direct turn (never on live ticks — a tick that says
+        sorry isn't a conversation). Updates the streak as a side effect and
+        returns True from the SECOND consecutive apology onward, which is the
+        point at which "acknowledging a correction" has become "not
+        answering".
+
+        An apology carrying an actual instruction or reading is not counted at
+        all — same substantive-content guard as _is_silent_live_reply, so
+        *"Sorry, I misread that — take it off the heat now"* never starts a
+        streak.
+        """
+        stripped = text.strip()
+        apologetic = (
+            bool(stripped)
+            and len(stripped) <= 400
+            and bool(_APOLOGY_RE.search(stripped))
+            and not _ACTION_CUE_RE.search(stripped)
+            and not _CONCRETE_READING_RE.search(stripped)
+        )
+        self._apology_streak = self._apology_streak + 1 if apologetic else 0
+        return self._apology_streak >= 2
+
+    async def _answer_not_apologise(
+        self, prompt: str, scene: Optional[str], debug_steps: list[dict], label: str,
+    ) -> Optional[str]:
+        """One corrective call that forces an actual answer after an apology loop.
+
+        Sibling of _voice_concrete_step, deliberately separate rather than a
+        flag on it: that one's whole instruction is "say the next physical
+        step", which is the wrong output here — the user asked a question and
+        is owed an answer, not a task instruction.
+
+        Unlike _voice_concrete_step this passes observations=True and the
+        current scene. That is the entire point: in the real failure the
+        answer was already sitting in the logged observations and the fresh
+        caption, and the model was apologising instead of reading it.
+        """
+        doc = tasklist.get_document()
+        summary = tasklist.render_summary(doc, lean=False, observations=True) if doc else ""
+        correct_prompt = (
+            "You are Chitragupt, a hands-free voice assistant. You have now "
+            "apologised more than once in a row without answering, which is "
+            "not useful to someone who is listening and waiting.\n\n"
+            + (f"[What the camera can see right now]\n{scene}\n\n" if scene else "")
+            + (f"[Task list and what you have observed]\n{summary}\n\n" if summary else "")
+            + f"The user said: {prompt}\n\n"
+            "Do NOT apologise again — you already have, and repeating it helps "
+            "nobody. Answer them now in one or two short spoken sentences, "
+            "using what you can see and what you have observed above. Take the "
+            "user's correction as true and work from it. If you genuinely "
+            "cannot tell yet, say the single specific thing you need them to do "
+            "so you can (e.g. 'point the camera at the top shelf') — that is "
+            "still an answer. Plain spoken text, no markdown."
+        )
+        correction = await self.backend.chat(
+            image_base64=None, prompt=correct_prompt, think=False,
+        )
+        self._record_debug_step(debug_steps, label, correct_prompt, False, False, None, correction)
+        corrected = self._strip_tool_blocks(correction.text).strip()
+        if corrected:
+            # The corrective reply is itself an answer, so the loop is broken —
+            # don't let the streak carry into the next turn and re-fire.
+            self._apology_streak = 0
+        return corrected or None
 
     async def _voice_concrete_step(
         self, prompt: str, debug_steps: list[dict], label: str,
@@ -1748,7 +1949,18 @@ class ChitraguptAgent:
         corrected = self._strip_tool_blocks(correction.text).strip()
         return corrected or None
 
-    def _run_structured_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
+    async def _call_tool(self, tool, arguments: dict) -> str:
+        """Invoke a tool, keeping blocking network calls off the event loop.
+
+        Shared by both executor paths so the offload rule can't drift between
+        them (DECISIONS.md §5.2). See Tool.blocking in agent/__init__.py for
+        why this is opt-in per tool rather than applied to all of them.
+        """
+        if getattr(tool, "blocking", False):
+            return await asyncio.to_thread(lambda: tool.fn(**arguments))
+        return tool.fn(**arguments)
+
+    async def _run_structured_tool_calls(self, tool_calls: list[dict]) -> list[dict]:
         """Execute tool calls already parsed by a native-tool-calling backend
         (VisionResponse.tool_calls: [{"id", "name", "arguments"}, ...]) —
         no text-scanning involved, so there's no "wrong field name"/"missing
@@ -1766,7 +1978,7 @@ class ChitraguptAgent:
                 results.append({"tool": tool_name, "arguments": arguments, "result": f"Unknown tool: {tool_name}"})
                 continue
             try:
-                result = tool.fn(**arguments)
+                result = await self._call_tool(tool, arguments)
             except TypeError as e:
                 result = f"Invalid arguments for {tool_name}: {e}"
             results.append({"tool": tool_name, "arguments": arguments, "result": result})
@@ -1808,7 +2020,7 @@ class ChitraguptAgent:
                 results.append({"tool": tool_name, "arguments": arguments, "result": f"Unknown tool: {tool_name}"})
                 continue
             try:
-                result = tool.fn(**arguments)
+                result = await self._call_tool(tool, arguments)
             except TypeError as e:
                 # Missing/extra/misnamed arguments — surface it as a normal
                 # tool result instead of crashing the whole turn.
@@ -1824,7 +2036,12 @@ class ChitraguptAgent:
             arg = arg.strip()
             tool = self.tools.get(tool_name)
             if tool:
-                result = tool.fn(arg)
+                # Single positional arg, so it can't go through _call_tool's
+                # **kwargs signature — offload inline on the same rule.
+                if getattr(tool, "blocking", False):
+                    result = await asyncio.to_thread(lambda: tool.fn(arg))
+                else:
+                    result = tool.fn(arg)
                 results.append({"tool": tool_name, "arguments": {"_": arg}, "result": result})
             else:
                 results.append({"tool": tool_name, "arguments": {}, "result": f"Unknown tool: {tool_name}"})
@@ -1835,6 +2052,7 @@ class ChitraguptAgent:
         """Clear conversation memory, frame buffer, and any active task document."""
         self.memory.clear()
         self.frame_buffer.clear()
+        self._apology_streak = 0
         tasklist.clear_document()
 
     async def check_timers(self) -> dict:
@@ -1887,7 +2105,7 @@ class ChitraguptAgent:
                 tool_results = []
                 if settings.TOOLS_ENABLED:
                     if response.tool_calls:
-                        tool_results = self._run_structured_tool_calls(response.tool_calls)
+                        tool_results = await self._run_structured_tool_calls(response.tool_calls)
                     else:
                         tool_results = await self._execute_tool_calls(clean_text)
                     tool_results = [

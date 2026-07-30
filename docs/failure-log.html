@@ -1,0 +1,510 @@
+<title>Chitragupta — what broke</title>
+
+<style>
+  :root {
+    --ground:        #EDEFF2;
+    --ground-raised: #FFFFFF;
+    --ink:           #171B21;
+    --ink-soft:      #4A5462;
+    --muted:         #6E7986;
+    --rule:          #D3D8DE;
+    --reason:        #A8631A;
+    --reason-dim:    #A8631A26;
+    --vision:        #3E6E8C;
+    --vision-dim:    #3E6E8C1F;
+    --warn:          #9A3B2E;
+    --warn-dim:      #9A3B2E1A;
+
+    --panel-bg:      #10151B;
+    --panel-ink:     #DDE3EA;
+    --panel-muted:   #7C8794;
+    --panel-rule:    #232B35;
+    --panel-reason:  #E0972F;
+    --panel-vision:  #7FB0CC;
+    --panel-warn:    #D97361;
+
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
+    --sans:  system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono:  ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+
+    --measure: 64ch;
+    --step--1: clamp(.78rem, .76rem + .1vw, .84rem);
+    --step-0:  clamp(1rem, .97rem + .16vw, 1.09rem);
+    --step-1:  clamp(1.24rem, 1.16rem + .38vw, 1.48rem);
+    --step-2:  clamp(1.6rem, 1.42rem + .84vw, 2.15rem);
+    --step-3:  clamp(2.1rem, 1.7rem + 1.9vw, 3.4rem);
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:        #0E1218;
+      --ground-raised: #151B23;
+      --ink:           #E4E8ED;
+      --ink-soft:      #A9B3BF;
+      --muted:         #7C8794;
+      --rule:          #242C36;
+      --reason:        #E0972F;
+      --reason-dim:    #E0972F1F;
+      --vision:        #7FB0CC;
+      --vision-dim:    #7FB0CC1A;
+      --warn:          #D97361;
+      --warn-dim:      #D9736117;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground:        #0E1218;
+    --ground-raised: #151B23;
+    --ink:           #E4E8ED;
+    --ink-soft:      #A9B3BF;
+    --muted:         #7C8794;
+    --rule:          #242C36;
+    --reason:        #E0972F;
+    --reason-dim:    #E0972F1F;
+    --vision:        #7FB0CC;
+    --vision-dim:    #7FB0CC1A;
+    --warn:          #D97361;
+    --warn-dim:      #D9736117;
+  }
+  :root[data-theme="light"] {
+    --ground:        #EDEFF2;
+    --ground-raised: #FFFFFF;
+    --ink:           #171B21;
+    --ink-soft:      #4A5462;
+    --muted:         #6E7986;
+    --rule:          #D3D8DE;
+    --reason:        #A8631A;
+    --reason-dim:    #A8631A26;
+    --vision:        #3E6E8C;
+    --vision-dim:    #3E6E8C1F;
+    --warn:          #9A3B2E;
+    --warn-dim:      #9A3B2E1A;
+  }
+
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--ground); color: var(--ink);
+    font-family: var(--sans); font-size: var(--step-0);
+    line-height: 1.62; margin: 0;
+  }
+  .wrap {
+    max-width: 74ch; margin: 0 auto;
+    padding: clamp(1.6rem, 4vw, 2.4rem) clamp(1.1rem, 4vw, 2rem) 5rem;
+    display: flex; flex-direction: column; gap: clamp(2.6rem, 6vw, 4rem);
+  }
+  section { display: flex; flex-direction: column; gap: 1.15rem; }
+
+  h1, h2, h3 { font-family: var(--serif); font-weight: 600; text-wrap: balance; margin: 0; line-height: 1.16; }
+  h1 { font-size: var(--step-3); letter-spacing: -.015em; max-width: 19ch; }
+  h2 { font-size: var(--step-2); letter-spacing: -.01em; }
+  h3 { font-size: var(--step-1); }
+  p  { margin: 0; max-width: var(--measure); }
+  a  { color: inherit; text-underline-offset: .18em; text-decoration-thickness: 1px; }
+  a:focus-visible { outline: 2px solid var(--reason); outline-offset: 3px; border-radius: 2px; }
+
+  .eyebrow { font-family: var(--mono); font-size: var(--step--1); letter-spacing: .13em; text-transform: uppercase; color: var(--muted); }
+  .lede { font-size: var(--step-1); line-height: 1.5; color: var(--ink-soft); font-family: var(--serif); max-width: 52ch; }
+  .note { font-size: var(--step--1); color: var(--muted); max-width: var(--measure); }
+  strong { font-weight: 650; color: var(--ink); }
+  code { font-family: var(--mono); font-size: .9em; color: var(--ink-soft); }
+
+  .nav {
+    display: flex; flex-wrap: wrap; gap: 0 1.4rem; align-items: baseline;
+    font-family: var(--mono); font-size: .76rem; letter-spacing: .07em;
+    text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid var(--rule); padding-bottom: .9rem;
+  }
+  .nav a { text-decoration: none; color: var(--muted); }
+  .nav a:hover { color: var(--ink); }
+  .nav a[aria-current="page"] { color: var(--reason); }
+  .nav .home { margin-right: auto; color: var(--ink-soft); }
+
+  /* ── Case cards ───────────────────────────────────────── */
+  .cases { display: flex; flex-direction: column; gap: 1px; background: var(--rule); border: 1px solid var(--rule); }
+  .case {
+    background: var(--ground-raised);
+    padding: 1.4rem clamp(1rem, 3vw, 1.5rem);
+    display: grid; grid-template-columns: 2.6rem 1fr; gap: .85rem 1rem;
+  }
+  .c-num {
+    font-family: var(--mono); font-size: var(--step--1);
+    font-variant-numeric: tabular-nums; color: var(--muted);
+    padding-top: .3rem;
+  }
+  .c-body { display: flex; flex-direction: column; gap: .8rem; min-width: 0; }
+  .c-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: .5rem .8rem; }
+  .c-head h3 { flex: 1 1 18ch; }
+  .pill {
+    font-family: var(--mono); font-size: .68rem; letter-spacing: .1em; text-transform: uppercase;
+    border: 1px solid var(--rule); border-radius: 999px; padding: .15rem .6rem;
+    color: var(--muted); white-space: nowrap;
+  }
+  .pill.fixed { color: var(--reason); border-color: var(--reason-dim); background: var(--reason-dim); }
+  .pill.open  { color: var(--warn);   border-color: var(--warn-dim);   background: var(--warn-dim); }
+  .c-body p { font-size: .95rem; color: var(--ink-soft); }
+  .c-body p strong { color: var(--ink); }
+
+  .symptom {
+    font-family: var(--serif); font-size: 1.04rem; line-height: 1.5;
+    color: var(--ink); border-left: 2px solid var(--warn);
+    padding: .1rem 0 .1rem 1rem; max-width: 54ch;
+  }
+  .symptom span { display: block; font-family: var(--mono); font-size: .7rem; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: .3rem; }
+
+  .rule {
+    display: grid; grid-template-columns: auto 1fr; gap: .1rem .8rem;
+    background: var(--reason-dim); border-left: 2px solid var(--reason);
+    padding: .6rem .9rem;
+  }
+  .rule .r-k { font-family: var(--mono); font-size: .68rem; letter-spacing: .11em;
+    text-transform: uppercase; color: var(--reason); }
+  .rule .r-v { font-family: var(--serif); font-size: 1rem; line-height: 1.45; color: var(--ink); grid-column: 2; }
+  @media (max-width: 32rem) {
+    .case { grid-template-columns: 1fr; gap: .7rem; }
+    .c-num { padding-top: 0; }
+    .rule { grid-template-columns: 1fr; }
+    .rule .r-v { grid-column: 1; }
+  }
+
+  .term {
+    background: var(--panel-bg); color: var(--panel-ink);
+    border: 1px solid var(--panel-rule); border-radius: 3px;
+    font-family: var(--mono); font-size: var(--step--1); line-height: 1.65;
+    padding: .9rem 1rem; overflow-x: auto; white-space: pre;
+  }
+  .term .c { color: var(--panel-muted); }
+  .term .a { color: var(--panel-reason); }
+  .term .v { color: var(--panel-vision); }
+  .term .w { color: var(--panel-warn); }
+
+  .pull {
+    font-family: var(--serif); font-size: var(--step-1); line-height: 1.45;
+    color: var(--ink-soft); border-left: 2px solid var(--reason);
+    padding-left: 1.1rem; max-width: 52ch;
+  }
+
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: var(--step--1); min-width: 30rem; }
+  th, td { text-align: left; padding: .62rem .8rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-family: var(--mono); font-size: .72rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+  td:first-child { font-family: var(--mono); color: var(--ink); white-space: nowrap; }
+  tbody tr:last-child td { border-bottom: none; }
+
+  hr { border: none; border-top: 1px solid var(--rule); margin: 0; }
+  .next { display: flex; flex-wrap: wrap; gap: .6rem 1.4rem; align-items: baseline; }
+  .next a { font-family: var(--serif); font-size: var(--step-1); text-decoration-color: var(--reason); }
+</style>
+
+<div class="wrap">
+
+  <nav class="nav">
+    <a class="home" href="https://claude.ai/code/artifact/ae560c47-fc8e-4d87-b88d-8816f4641a12">Chitragupta</a>
+    <a href="https://claude.ai/code/artifact/ae560c47-fc8e-4d87-b88d-8816f4641a12">Overview</a>
+    <a href="https://claude.ai/code/artifact/da2da195-f987-4f01-b88b-d3ccaeba0363">How it works</a>
+    <a href="#" aria-current="page">What broke</a>
+  </nav>
+
+  <section>
+    <div class="eyebrow">Failure log · page 3 of 3</div>
+    <h1>Eight things that broke, and the rule each one left behind</h1>
+    <p class="lede">
+      Nearly every non-obvious line in this codebase is scar tissue from a specific bug. This is the
+      log kept alongside it — symptom, cause, and the rule that came out.
+    </p>
+    <p class="note">
+      Two of these are still open. They are here for the same reason as the rest.
+    </p>
+  </section>
+
+  <div class="cases">
+
+    <!-- 1 -->
+    <article class="case">
+      <div class="c-num">01</div>
+      <div class="c-body">
+        <div class="c-head">
+          <h3>The camera kept switching itself off</h3>
+          <span class="pill fixed">fixed</span>
+        </div>
+        <p class="symptom"><span>Symptom</span>
+          The user spent most of a session asking why the camera kept closing. One step —
+          “Prepare tadka” — was marked complete off a note that read
+          <em>“oil poured into an empty pan, no ingredients added yet”</em>.
+        </p>
+        <p>
+          One boolean on <code>log_observation</code> was doing three unrelated jobs: it guaranteed a
+          spoken alert, it marked the task item complete, and it closed the camera. It was
+          <strong>described to the model</strong> as “important enough to guarantee they're told” —
+          so the model set it on ordinary progress notes. It was behaving exactly as documented.
+        </p>
+        <p>
+          Split into two flags with one effect each, and the completion path guarded so it only fires
+          on a genuine “find X” goal. A stray flag is now logged, spoken, and explained back to the
+          model in the tool result so it corrects itself next turn.
+        </p>
+        <div class="rule">
+          <span class="r-k">Rule</span>
+          <span class="r-v">One flag, one consequence. If a boolean drives both a user-visible action and a state mutation, split it.</span>
+        </div>
+      </div>
+    </article>
+
+    <!-- 2 -->
+    <article class="case">
+      <div class="c-num">02</div>
+      <div class="c-body">
+        <div class="c-head">
+          <h3>Frames disappeared, leaving no trace at all</h3>
+          <span class="pill fixed">fixed</span>
+        </div>
+        <p class="symptom"><span>Symptom</span>
+          Nothing. That is the entire problem — there was no symptom to find.
+        </p>
+        <p>
+          A cheap yes/no call ran before the real one: <em>is this frame relevant to the current
+          goal?</em> If it said no, the tick returned empty. On the client that is
+          <strong>byte-identical</strong> to a legitimate “nothing has changed” silence. A frame
+          showing exactly the thing the user asked for could be discarded by a crude misjudgement and
+          leave no evidence anywhere in the system. It also doubled the vision calls per tick.
+        </p>
+        <p>Removed entirely, with no replacement.</p>
+        <div class="rule">
+          <span class="r-k">Rule</span>
+          <span class="r-v">Never add a pre-filter whose “no” is indistinguishable from a legitimate quiet outcome. Failures must be traceable, or they are not failures — they are behaviour.</span>
+        </div>
+      </div>
+    </article>
+
+    <!-- 3 -->
+    <article class="case">
+      <div class="c-num">03</div>
+      <div class="c-body">
+        <div class="c-head">
+          <h3>The camera contradicted itself every few seconds</h3>
+          <span class="pill fixed">fixed</span>
+        </div>
+        <p class="symptom"><span>Symptom</span>
+          Four consecutive captions of the same pan, seconds apart, with the scene barely changing —
+          and the reasoning model logging the contradictions as fact.
+        </p>
+        <div class="term">"Cumin seeds and chopped red onions are sauteing"
+"Chopped onions and red chilies are being sauteed"        <span class="w">← cumin gone</span>
+"The cumin seeds ... have not yet been added"             <span class="w">← now denied</span>
+"Cumin seeds or other spices are visible among the onions" <span class="w">← back</span></div>
+        <p>
+          Two causes. First, the prompt named the step's ingredients, which turned the job into a
+          <strong>roll-call</strong> — and a roll-call over small ambiguous items (cumin among
+          browned onions, at 640 px) produces confident false negatives. “Not yet added” is a claim
+          about a negative that a single frame usually cannot support.
+        </p>
+        <p>
+          Second, every vision call is independent: no memory, no shared attention. The previous
+          caption was already sitting in a buffer and the vision stage simply never used it. It is
+          now passed back <strong>as text</strong>, with an instruction to describe change — because
+          a hosted API cannot share attention state across calls, so the comparison baseline has to
+          arrive in words.
+        </p>
+        <div class="rule">
+          <span class="r-k">Rule</span>
+          <span class="r-v">Absence is only reportable when it is positively visible. “I cannot tell” is a valid answer; a confident false negative is not.</span>
+        </div>
+      </div>
+    </article>
+
+    <!-- 4 -->
+    <article class="case">
+      <div class="c-num">04</div>
+      <div class="c-body">
+        <div class="c-head">
+          <h3>A blocked search was reported as “nothing found”</h3>
+          <span class="pill fixed">fixed</span>
+        </div>
+        <p class="symptom"><span>Symptom</span>
+          <code>No web search results found for "…"</code> — returned to the model as authoritative,
+          on exactly the <em>does this contain beef</em> questions where being wrong matters most.
+        </p>
+        <p>
+          The search provider serves its bot CAPTCHA with <strong>HTTP 202</strong>. So the
+          status check passed, the parser found zero results in a CAPTCHA page, and a hard block was
+          rendered to the model as a confident absence. The tool was not failing loudly; it was
+          succeeding at returning nothing.
+        </p>
+        <p>
+          Now a block raises its own error type, so “blocked” and “genuinely empty” are visibly
+          different results, and a provider chain replaces the single endpoint. Two counter-intuitive
+          findings fell out of measuring it: a spoofed browser user-agent draws <em>more</em>
+          CAPTCHAs than an honest bot one, and the “slow endpoint” was a cold TLS handshake.
+        </p>
+        <div class="rule">
+          <span class="r-k">Rule</span>
+          <span class="r-v">A failed tool must never render like an empty result. The model cannot tell the difference, and it will treat silence as evidence.</span>
+        </div>
+      </div>
+    </article>
+
+    <!-- 5 -->
+    <article class="case">
+      <div class="c-num">05</div>
+      <div class="c-body">
+        <div class="c-head">
+          <h3>Correctly shipped work was invisible for an entire session</h3>
+          <span class="pill fixed">fixed</span>
+        </div>
+        <p class="symptom"><span>Symptom</span>
+          Voice input, the camera toggle and several other features were deployed, verified in the
+          repo, and simply absent in the browser.
+        </p>
+        <p>
+          The progressive-web-app service worker is cache-first for the app shell and only re-fetches
+          when <strong>its own bytes change</strong>. Its cache key sat unchanged for a whole
+          development session, so every browser that had ever loaded the app kept serving the stale
+          shell through every deploy. The code was right; the delivery was frozen.
+        </p>
+        <div class="rule">
+          <span class="r-k">Rule</span>
+          <span class="r-v">Any change to the shell must bump the cache key. It is a one-line ritual that replaces an entire category of unreproducible bug.</span>
+        </div>
+      </div>
+    </article>
+
+    <!-- 6 -->
+    <article class="case">
+      <div class="c-num">06</div>
+      <div class="c-body">
+        <div class="c-head">
+          <h3>It forgot everything for three turns, and I could not prove why</h3>
+          <span class="pill open">instrumented, unresolved</span>
+        </div>
+        <div class="term"><span class="c">user      </span>I have managed them now what should I do
+<span class="c">assistant </span><span class="w">You'll need to give me a bit more context — what is it that
+          you've managed? Are we working on a recipe, a project…?</span></div>
+        <p>
+          Thirty-six seconds after receiving detailed instructions. Both the conversation memory and
+          the task list vanished together. Ruled out: camera ticks polluting memory, the reply not
+          being recorded, an accidental reset, and the free-tier server sleeping — the gap was four
+          minutes, not fifteen.
+        </p>
+        <p>
+          <strong>The root cause is still unknown, and that is the finding.</strong> It could not be
+          diagnosed after the fact because nothing recorded how much context a turn actually carried.
+          <em>“The model ignored the task list”</em> and <em>“the task list never reached the
+          prompt”</em> look identical in a transcript and need opposite repairs.
+        </p>
+        <p>So I shipped an instrument instead of a guess. One line per turn, both code paths:</p>
+        <div class="term"><span class="c">turn context:</span> history_turns=<span class="a">12</span> (sending <span class="a">10</span>) task_items=<span class="a">6</span>
+              task_list_in_prompt=<span class="a">True</span> prompt_chars=<span class="a">3184</span></div>
+        <div class="rule">
+          <span class="r-k">Rule</span>
+          <span class="r-v">When two hypotheses need opposite fixes and the evidence cannot separate them, ship the measurement. A speculative fix here would have added machinery that addressed nothing.</span>
+        </div>
+      </div>
+    </article>
+
+    <!-- 7 -->
+    <article class="case">
+      <div class="c-num">07</div>
+      <div class="c-body">
+        <div class="c-head">
+          <h3>A wrong answer survived being corrected</h3>
+          <span class="pill open">open · top priority</span>
+        </div>
+        <p class="symptom"><span>Symptom</span>
+          The model found “toor dal” in a plastic bag. The user corrected it —
+          <em>“the thing in the plastic bag is black eyed beans not toor dal”</em>. It apologised,
+          then repeated the claim for four more turns, adding detail it had invented:
+          <em>“on an upper shelf, open and upright, with a black loaf pan behind it”</em>.
+        </p>
+        <p>
+          A design gap rather than a bug: nothing is doing the wrong thing, the capability simply
+          does not exist. Observations are append-only. There is no way to retract one, and no way to
+          move a wrongly-completed item back to in progress — so the false note kept riding along in
+          the prompt on every subsequent turn, indistinguishable from a verified one.
+        </p>
+        <p>
+          It also interacts with fix 03: the grounding rule tells the model not to contradict the
+          previous caption about something it can no longer see clearly. That is right for a scene
+          going out of focus and <strong>wrong once the user has said the caption was
+          mistaken</strong>. Whatever fixes this has to carry an “…unless the user corrected you”
+          clause.
+        </p>
+        <div class="rule">
+          <span class="r-k">Rule</span>
+          <span class="r-v">A false observation that survives an explicit correction is worse than no observation at all. If a system can write memory, it needs a way to unwrite it.</span>
+        </div>
+      </div>
+    </article>
+
+    <!-- 8 -->
+    <article class="case">
+      <div class="c-num">08</div>
+      <div class="c-body">
+        <div class="c-head">
+          <h3>The cost control was a suggestion, and the session died</h3>
+          <span class="pill open">open</span>
+        </div>
+        <div class="term"><span class="c">11:26:40</span>  🔍 frame detail → fine (live ticks now 1024px)
+          <span class="w">…never switches back</span>
+
+<span class="c">          </span>  <span class="w">429  198,310 / 200,000 tokens per day</span></div>
+        <p>
+          Close-up mode costs 2.4× a normal frame, so it is opt-in per step, and the schema explicitly
+          instructs the model to set it back when the close look is done. Its cost was bounded by
+          <em>scope</em> — finishing the step ends it. The step stayed in progress for the rest of the
+          session, so every later frame ran at full resolution until the daily ceiling hit.
+        </p>
+        <p>
+          The fix is not better wording. It needs a hard bound underneath the soft one: a count of
+          close-up frames per item that reverts automatically, stored on the item so it survives a
+          restart.
+        </p>
+        <div class="rule">
+          <span class="r-k">Rule</span>
+          <span class="r-v">A cost control that depends on the model's judgement does not hold. Instructions are a hint; the budget needs arithmetic.</span>
+        </div>
+      </div>
+    </article>
+
+  </div>
+
+  <!-- ── INSTRUMENTS ─────────────────────────────────────── -->
+  <section>
+    <div class="eyebrow">The instruments</div>
+    <h2>Most of these were found by reading, not by watching</h2>
+    <p>
+      There is no test suite here, and I would not claim otherwise. Verification is throwaway
+      harnesses plus one artifact that turned out to be worth more than all of them: a full session
+      export.
+    </p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Instrument</th><th>What it makes visible</th></tr></thead>
+        <tbody>
+          <tr><td>the session export</td><td>Every turn, every tool call, and — after this was fixed — every vision prompt and answer, silent frames included</td></tr>
+          <tr><td>Groq vision usage:</td><td>Per-frame image cost. Before this, the number that governs the entire architecture was literally unmeasurable</td></tr>
+          <tr><td>turn context:</td><td>How much history and state each turn actually carried into the prompt</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>
+      The vision round trip was invisible three times over: it never leaves the server as its own
+      request, so it is not a network call anyone can inspect; most camera ticks answer
+      <code>[SILENT]</code>, and the client only logged a turn when there was something to render, so
+      the majority of frames left <strong>no trace whatsoever</strong>; and the one log that did
+      carry it was capped and rolled off. That cap is exactly why case 06 could not be diagnosed —
+      the window had already scrolled past.
+    </p>
+    <p class="pull">
+      Case 03 is invisible in any single turn. Only the sequence shows it — which is the whole
+      argument for logging the thing nobody is looking at.
+    </p>
+  </section>
+
+  <hr>
+
+  <section class="next">
+    <span class="eyebrow">Back to</span>
+    <a href="https://claude.ai/code/artifact/da2da195-f987-4f01-b88b-d3ccaeba0363">How it works →</a>
+    <a href="https://claude.ai/code/artifact/ae560c47-fc8e-4d87-b88d-8816f4641a12">Overview →</a>
+  </section>
+
+</div>

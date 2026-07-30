@@ -154,6 +154,108 @@ genuinely new information (`web_search`, `fetch_page`) keep it `True`.
 The model mentions tool syntax hypothetically while reasoning about whether to
 use one. Scanning the thinking trace turned that into a false invocation.
 
+### 3.6 A blocked search was reported to the model as "nothing found"
+
+`web_search` scraped `html.duckduckgo.com`. The 2026-07-28 session recorded it
+as "timed out", which was the visible symptom of something worse.
+
+DuckDuckGo serves its bot challenge — *"select all squares containing a
+duck"* — with **HTTP 202**. That is a 2xx, so `raise_for_status()` stayed
+silent, the `.result` selector matched nothing on the CAPTCHA page, and the
+function fell through to its own last line:
+
+```python
+if not results:
+    return f'No web search results found for "{query}".'
+```
+
+**A hard block was handed to the reasoning model as an authoritative absence.**
+There is no way to tell those apart downstream, and the model has no reason to
+doubt a tool result. On the questions this assistant actually gets asked — *does
+this contain beef*, *is carrageenan vegan* — that manufactures exactly the
+confident false negative the anti-false-absence rule in the prompt exists to
+prevent, and manufactures it from the one source the model trusts most.
+
+So the fix is not "pick a better search engine". It is that **blocked and empty
+must never render the same**. `SearchBlocked` separates them, and the two
+outcomes now produce visibly different text, with the failure case telling the
+model in as many words that it learned nothing and must not report an absence.
+`fetch_page` carried the same defect on a non-2xx and got the same treatment.
+
+Measured while fixing it, all counter-intuitive enough to write down:
+
+- **The 6.4s that looked like a slow endpoint was a cold TLS handshake.** Warm,
+  the html and lite endpoints are both ~1.3s. The old 10s timeout was not
+  generous, it was one handshake away from the edge.
+- **A spoofed browser UA gets challenged; a self-identifying bot UA does not.**
+  `Mozilla/5.0 …Chrome/126` drew a 202 CAPTCHA on every request while
+  `Chitragupt/1.0 (…)` kept getting 200s. Looking like a browser is what the
+  anti-scraping heuristics are looking for. Do not "fix" the UA back.
+- **Render's egress is a datacenter IP** and gets challenged far harder than a
+  home connection, so anything measured locally is the optimistic case.
+
+Hence a chain rather than one provider: Brave (only if `BRAVE_API_KEY` is set —
+2,000/month free, the one provider with a contract behind it), then Mojeek
+(independent index, keyless, does not CAPTCHA bots), then DDG lite, then DDG's
+official Instant Answer API. A provider that answers with nothing does not end
+the chain — a narrow provider drawing a blank is not evidence of absence
+either, so the next one is still tried.
+
+Note the tension with §7.2's warning about widening things: this is the opposite
+case. The old code was too *narrow* about what counts as failure, not too broad.
+
+### 3.7 Tools ran on the event loop
+
+Every tool executes as `tool.fn(...)` from inside an async handler, so a
+synchronous network call stalls the entire single-worker loop — during Live
+Watch that queues the 4s camera ticks, timer checks and every other request
+behind it. `web_search` could hold that for its whole timeout budget across
+four providers.
+
+`Tool.blocking` marks the two stateless network tools and the executors hand
+those to `asyncio.to_thread`. Verified: the loop ticks 27 times during a 1.5s
+blocking tool where it previously ticked zero.
+
+**Opt-in per tool, deliberately.** The task-list and timer tools mutate state
+under the non-reentrant lock in §4.3; moving those off the event-loop thread
+would change the concurrency assumptions they were written under, for no gain
+since they do no I/O. Both executor paths share one `_call_tool` helper so the
+rule cannot drift between them (§5.2).
+
+### 3.8 Excluding a source, without that reading as absence
+
+`SEARCH_EXCLUDED_DOMAINS` (default `wikipedia.org`) drops results by host in
+`web_search` and refuses them in `fetch_page`. Wikipedia is the default
+exclusion for two independent reasons: it is a tertiary source being **read
+aloud as fact** on dietary-restriction questions, and it 403s this client
+anyway — so a Wikipedia hit was a result the model could never follow up on.
+
+Cost of the default, measured before choosing it:
+
+| Provider | Wikipedia share |
+|---|---|
+| Mojeek (primary) | 0 of 20 results on food queries — unaffected |
+| DDG Instant Answer (last resort) | **5 of 5** abstracts — effectively gutted |
+
+That is the real trade: the top of the chain does not notice, the bottom rung
+mostly stops answering. Acceptable because the bottom rung was already the
+narrow encyclopaedic one, but it means the chain is shorter than it looks.
+
+Two things this had to get right, both of them §3.6's lesson again:
+
+- **Filter before truncating.** Providers now return `(title, url, snippet)`
+  triples and hand *everything* back; the cap is applied after exclusion at the
+  choke point. Truncating first meant dropping one Wikipedia hit from a page of
+  ten left four results when nine were available.
+- **"Everything was excluded" is not "nothing exists."** It gets its own
+  message saying the engines *did* return content. Collapsing it into
+  `No web search results found` would have rebuilt the exact false-absence bug
+  §3.6 just removed, from a different direction.
+
+Host matching is suffix-based (`host == d or host.endswith("." + d)`), so
+`wikipedia.org` covers every language subdomain without matching a lookalike
+like `en.wikipedia.org.evil.com`.
+
 ---
 
 ## 4. State & concurrency
@@ -383,13 +485,36 @@ frame measured `Requested 3424` tokens against roughly 1400 coarse, matching the
 
 **The lesson: a cost control that depends on the model's judgement does not
 hold.** The schema tells it to revert to `coarse` when the close look is done;
-it didn't. Scope-bounding needs a hard bound beside it — a per-item fine-frame
-counter, or a session budget. Open, see `HANDOFF.md`.
+it didn't.
 
-**Cost is bounded by scope, not by a counter.** `fine` costs roughly 2.5x per
-frame, and it is tied to one `in_progress` item — completing the step ends the
-cost. A `pending` item asking for `fine` deliberately does *not* raise it, or
-planning a close look later would make every frame expensive now.
+**Fixed — bounded by arithmetic as well as scope.** `MAX_FINE_FRAMES_PER_ITEM`
+(8) is charged per item by `record_fine_frame()`, called from the vision stage
+once a fine frame has actually been paid for. On exhaustion the item is written
+back to `detail: "coarse"` — not merely refused by `active_detail()` — so the
+rendered `[Task list]` stops claiming a close look that isn't happening and the
+model can see the look ended. The counter lives on the item, so a Render restart
+does not silently refill it.
+
+`active_detail()` stays a pure read: it runs several times per turn to echo
+`frame_detail`, so charging there would over-count wildly per frame.
+
+**The subtle part, caught only by the test.** The auto-revert writes `coarse`,
+and `update_task_list` resends every item on every call — so the model's next
+full replace, still carrying `detail: "fine"` because it hadn't noticed, looked
+exactly like a deliberate `coarse` → `fine` transition and refilled the budget.
+That is the same drift the budget exists to stop, arriving through the reset
+rule. Exhaustion is therefore recorded explicitly as `fine_budget_spent`, and
+only the model *itself* sending `detail: "coarse"` clears it. While spent, an
+incoming `fine` is ignored and forced back to `coarse`.
+
+So the escape hatch for a legitimate second close look is deliberate and
+two-step: stand the item down to `coarse`, then ask for `fine` again. Drift
+cannot do that by accident.
+
+**Cost is also still bounded by scope.** `fine` is tied to one `in_progress`
+item — completing the step ends the cost. A `pending` item asking for `fine`
+deliberately does *not* raise it, or planning a close look later would make
+every frame expensive now.
 
 **Not built:** a one-shot `inspect_detail(question)` tool for "look closely right
 now" without a standing goal. It needs a `request_camera`-style round trip using a
@@ -449,17 +574,38 @@ then confabulated for four turns — *"the toor dal bag is on an upper shelf,
 open and upright, with a black loaf pan sitting behind it"* — was challenged
 twice, apologised, and repeated the claim.
 
-`log_observation` is append-only (capped at 5, oldest dropped). There is no
-`retract_observation` and no way to move a wrongly-`completed` item back to
+`log_observation` was append-only (capped at 5, oldest dropped), with no way to
+remove an entry and no way to move a wrongly-`completed` item back to
 `in_progress`. **A false observation that survives an explicit correction is
 worse than no observation at all**, because it is indistinguishable from a
-verified one once it is in the log.
+verified one once it is in the log — and it is re-injected into every
+subsequent prompt, so the model does not merely fail to forget it, it is
+actively reminded of it each turn.
 
-Note the interaction with §6.5: the previous-caption grounding tells the model
-not to contradict the prior frame about something it can no longer see clearly.
-That is right for a scene going out of focus and wrong once the user has said
-the caption was mistaken. Whatever fixes this should probably carry an "…unless
-the user corrected you" clause.
+**Fixed** by `retract_observation(item, note_match, reopen=False)`:
+
+- removes every observation containing `note_match`, matched as a
+  case-insensitive **substring, not an index** — the model is working from the
+  rendered `[Task list]` and can quote a fragment of the wrong note far more
+  reliably than it can count list positions. All matches go, because a wrong
+  fact tends to have been logged more than once across ticks;
+- `reopen=True` moves a `completed`/`skipped` item back to `in_progress` **and**
+  clears a matching `note`. Un-completing an item while leaving the note that
+  justified completing it just rebuilds the problem;
+- the tool result tells the model in as many words to treat the retracted
+  information as false, and the prompt guidance says that apologising in
+  conversation does not undo a logged note.
+
+Both halves matter. Retracting without reopening leaves `Find toor dal`
+completed; reopening without retracting leaves the wrong fact in the prompt.
+
+**The §6.5 interaction was real and is also fixed.** The previous-caption
+grounding told the vision model not to contradict the prior frame about
+something it could no longer see clearly — right for a scene going out of
+focus, and an instruction to keep re-asserting the error once the description
+itself was wrong. The grounding block now ends with an explicit override:
+consistency holds only while the earlier description was right, and
+*"consistency with an earlier mistake is not consistency."*
 
 ### 6.7 Pipeline, end to end
 
@@ -532,6 +678,72 @@ and screen-work verbs.
 
 Widening is otherwise safe: more verbs only make the detector *less* likely to
 fire, so a miss costs one needless corrective call.
+
+### 7.2b The apology loop — sorry is not an answer
+
+Reported from the same 2026-07-28 session as §6.6, and a *separate* failure from
+the retraction gap. After the misidentified-ingredient correction the model
+apologised, was challenged, apologised again, and **never answered** — while the
+vision stage was returning perfectly good fresh information it never acted on.
+
+Three causes, chained. The first two are already fixed elsewhere and are worth
+naming because they explain why it looked like the model was ignoring evidence:
+
+1. **It had stopped looking.** `found=true` marked `Find toor dal` **completed**,
+   and every camera path filters on `status == "in_progress"` — `watch_briefs`,
+   the in-progress item list, `active_detail()`. The moment it wrongly "found"
+   the dal, the search dropped out of the vision briefing entirely and
+   `goal_complete` switched the camera off. There was nothing left to confirm
+   against. §6.6's `reopen=true` is what restores the goal *and* its brief.
+2. **The wrong note was re-injected every turn**, so it kept reading its own
+   error and re-apologising — a loop that could not resolve while the data
+   stayed. §6.6's retraction removes it.
+3. **Nothing said what to do after apologising.** Uncovered until now.
+
+Cause 3 is the sibling of §7.1: that failure was "pointed at the list instead of
+answering", this one is "apologised instead of answering", and to a listening
+user they are the same thing — a turn that costs time and says nothing. §7.1 got
+persona guidance *and* a deterministic backstop; this got neither.
+
+Now it has both. The persona says to believe the user over its own note, say
+sorry once and briefly, then answer — and never let an apology be the whole
+reply.
+
+**The backstop keys on repetition, not on vocabulary, and that is the whole
+design.** *"Sorry, those are black eyed beans, not toor dal"* is an apology and
+is also exactly the right answer; no word-list separates a useless apology from
+a useful correction without swallowing good replies. What is diagnostic is
+saying sorry *twice in a row without answering in between*. So
+`_is_stuck_apologising` counts consecutive apology-shaped direct-turn replies
+and fires from the **second** — the first is courtesy and is left alone. Any
+real answer resets the streak, as does the corrective call itself.
+
+Guarded the same way as §7.8: a reply carrying an action imperative or a digit
+never counts, so *"My mistake — take it off the heat now"* never starts a streak.
+
+`_answer_not_apologise` is a separate corrective call rather than a flag on
+`_voice_concrete_step`, because that one's whole instruction is "say the next
+physical step" and the user here asked a *question*. It also passes
+`observations=True` and the current scene — in the real failure the answer was
+already sitting in the logged observations and the fresh caption.
+
+Unlike §7.1's backstop it is **not** gated on the backend lacking `chat_stream`.
+That gate assumes a streaming backend already showed the reply, but `app.js`
+speaks `data.text` at `finalize` (not the deltas) and overwrites the bubble with
+it, so a retro-correction does reach the user. Gating it would have left the
+failure unfixed on the only backend in use — i.e. exactly where it was reported.
+
+**Two dead branches, caught by probing rather than by the tests.** `my\s+apolog`
+and `i\s+apolog` with a trailing `\b` matched *nothing*: `\b` cannot sit between
+"apolog" and the "ies"/"ise" that always follows, the same boundary behaviour
+that stops `\bsimmer\b` matching "simmering". The unit tests passed anyway
+because another branch happened to match the fixture. Print the actual matches
+when a regex is the fix — passing tests do not prove the pattern you think is
+doing the work is doing anything.
+
+A bare `Sorry, …` opener is deliberately excluded: requiring explicit self-blame
+keeps genuine corrections out of the streak, and a false fire costs a wasted
+call *and* replaces a good reply.
 
 ### 7.3 Speak-after-task
 
@@ -608,14 +820,46 @@ emitting `[SILENT]`. On 2026-07-28 one reply got through and was spoken aloud:
 
 Two near-misses, both one word off the existing patterns:
 
-- `"stay quiet"` — the pattern covers `stay|remain|keep|be` followed by
+- `"stay quiet"` — the pattern covered `stay|remain|keep|be` followed by
   **silent**, not *quiet*.
-- `"Nothing has visibly changed"` — the pattern covers `nothing` followed by
-  `relevant|new|of note|worth …`, not `nothing has … changed`.
+- `"Nothing has visibly changed"` — the pattern covered `nothing` followed by
+  `relevant|new|of note|worth …`, not `nothing has … changed`. The existing
+  no-change branch is subject-first (`scene|frame|everything` + `remains`),
+  which this phrasing inverts.
 
 Length was ~281 chars, inside the 300 cap, so only the regex failed. One
-occurrence in 42 ticks. Widen carefully — §7.2 is the standing warning about
-what these regexes cost when they over-match.
+occurrence in 42 ticks.
+
+**Fixed, but not by widening alone — that would have been the wrong move.**
+§7.2 says widening `_ACTION_CUE_RE` is safe because more verbs make that
+detector *less* likely to fire, costing at most one needless corrective call.
+This regex runs the other way: widening makes suppression *more* likely, and a
+false positive means the user **never hears something real**. On an assistant
+answering questions about dietary restrictions and timers that is much the
+worse error, so the vocabulary could not simply be broadened.
+
+The concrete counter-example, which the old two-condition check could not
+separate from the leak and the widened one would have swallowed:
+
+> *"Nothing has changed with the heat, but the onions are starting to brown —
+> give them a stir."*
+
+So `_is_silent_live_reply` gained the third condition it was missing, giving it
+the same shape as `_is_list_meta_nonanswer`: short, **and** no-change
+vocabulary, **and** nothing substantive alongside it. Substantive means either
+
+- an action imperative (`_ACTION_CUE_RE`, reused as-is — it was not touched,
+  see the §7.2 trap), or
+- a digit (`_CONCRETE_READING_RE`) — "2 minutes left", "180C", "3 allergens".
+  A cheap content proxy with no vocabulary to maintain.
+
+Worth knowing: `_ACTION_CUE_RE`'s `\b` boundaries mean participles do **not**
+match — `\bsimmer\b` cannot match "simmering". Verified, because it decides
+whether descriptive narration ("the scene remains the same, still simmering")
+still gets suppressed. It does; only bare imperatives open the gate.
+
+The bias is deliberately toward leaking a redundant "nothing has changed" over
+swallowing an update.
 
 ---
 
@@ -672,6 +916,48 @@ almost always belong in the other.
 Observed repeatedly: WatchFiles logs a reload, old code keeps serving. **Restart
 manually** when iterating on `server/agent/*.py`. If behaviour doesn't match a
 just-made edit, suspect this before suspecting the edit.
+
+### 8.5 The interval owned the textarea
+
+`sendLiveFrame()` read `#prompt-input` and cleared it — on the **poll interval**,
+which fires every few seconds regardless of what the user is doing. Type while
+Live Watch is running and a tick could grab a half-finished question ("how much
+sal"), send it as though it were complete, and blank the box mid-keystroke.
+Diagnosed 2026-07-13, unfixed until now, and it got worse as Live Watch became
+the main mode.
+
+> **Rule:** the interval must never read or clear `#prompt-input`. The textarea
+> belongs to the user until they commit; only `sendMessage()` may take from it.
+
+Fixed with `queuedLivePrompt`, set only by an explicit commit (Send / Enter) and
+**consumed** — not peeked — by `sendLiveFrame`, so a retry or a later tick
+cannot resend the same question.
+
+**This forced a decision about what Send does during Live Watch**, because
+"typing and waiting for a tick to scrape it" *was* the mechanism by which a
+question got a frame attached. Pressing Enter instead went through
+`sendMessage()` → `/v1/chat/stream` with no frame at all. So the same question
+reached the model two different ways depending on whether the user waited, and
+only the accidental one could see.
+
+Now a commit during Live Watch routes into the live path: it goes out on
+`/v1/chat` **with a frame**, immediately rather than up to a poll period later.
+Asking "is this done?" while the camera is watching and answering it blind is
+the wrong reading of the question. This is a down payment on §5.3.
+
+**Cost:** typed questions during Live Watch no longer stream token-by-token.
+They already didn't whenever a tick picked them up — that path was never
+streamed — so this makes the behaviour consistent rather than losing something
+that reliably worked.
+
+**Testing note.** The harness runs the real `app.js` in a stubbed DOM
+(`vm.runInContext`). One trap cost a first, useless run: **top-level `let` is not
+a property of the sandbox object**, so `sandbox.liveActive = true` sets an
+unrelated property while the script's own binding stays `false`, every live
+function returns at its first guard, and the assertions pass vacuously. Poke
+state with `runInContext('liveActive = true')` instead, and assert that it took
+before trusting anything after it. Verified honest by running the same harness
+against the pre-fix file: 9 failures there, 14 passes after.
 
 ---
 

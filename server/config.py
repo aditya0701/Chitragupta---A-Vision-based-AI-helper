@@ -38,6 +38,45 @@ class Settings:
     DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
     GROQ_VISION_MODEL: str = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
 
+    # Optional. When set, web_search prefers the Brave Search API over the
+    # keyless scraped providers — 2,000 queries/month free, and the only
+    # provider in that chain with a contract rather than a tolerance behind
+    # it. Everything still works without it; see agent/__init__.py's
+    # tool_web_search for the fallback order.
+    BRAVE_API_KEY: str = os.getenv("BRAVE_API_KEY", "")
+
+    # Domains web_search will not return and fetch_page will not retrieve,
+    # comma-separated. Suffix-matched on the host, so "wikipedia.org" covers
+    # every language subdomain. Set to an empty string to allow everything.
+    #
+    # Wikipedia is excluded by default for two independent reasons: it is a
+    # tertiary source being read aloud as fact on dietary-restriction
+    # questions, and it 403s this client anyway, so a Wikipedia hit was a
+    # result the model could never follow up with fetch_page.
+    #
+    # Cost of the default, measured 2026-07-28: Mojeek returned 0 Wikipedia
+    # results in 20 on food queries, so the primary provider is unaffected —
+    # but 5/5 DuckDuckGo Instant Answer abstracts were Wikipedia, which
+    # leaves that last-resort rung mostly empty.
+    SEARCH_EXCLUDED_DOMAINS: list[str] = [
+        d.strip().lower()
+        for d in os.getenv("SEARCH_EXCLUDED_DOMAINS", "wikipedia.org").split(",")
+        if d.strip()
+    ]
+
+    # The user's local timezone — what get_time answers in when the model
+    # doesn't name one, which is almost always, since "what time is it" means
+    # local time to the person asking.
+    #
+    # An IANA zone name, NOT a fixed abbreviation like "CEST". Berlin is CET in
+    # winter and CEST in summer; "Europe/Berlin" switches on the right dates by
+    # itself, whereas hardcoding either offset is wrong for half the year.
+    #
+    # Per-user preference is the eventual shape of this (each user setting
+    # their own zone in the UI); a single server-wide setting is the stand-in
+    # until there is somewhere to store per-user settings at all.
+    DEFAULT_TIMEZONE: str = os.getenv("DEFAULT_TIMEZONE", "Europe/Berlin")
+
     # Off by default while testing plain API chat — every tool mention (even
     # unresolved/hallucinated ones) risks an extra API call and clutters
     # output. Flip to "true" once ready to re-enable tool use.

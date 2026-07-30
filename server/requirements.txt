@@ -12,3 +12,7 @@ google-generativeai==0.8.4
 groq==0.15.0
 openai==1.58.1
 beautifulsoup4==4.12.3
+# zoneinfo (stdlib) reads the OS tz database, which Windows does not have and
+# slim Linux images often omit. Pinning it makes get_time behave identically on
+# a dev laptop and on Render instead of silently falling back to UTC.
+tzdata==2024.2

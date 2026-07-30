@@ -22,3 +22,12 @@ services:
         value: deepseek-v4-flash
       - key: GROQ_VISION_MODEL
         value: qwen/qwen3.6-27b
+      # The user's local timezone for get_time. An IANA zone name, not an
+      # abbreviation — "Europe/Berlin" handles the CET/CEST switch itself.
+      - key: DEFAULT_TIMEZONE
+        value: Europe/Berlin
+      # Optional — web_search falls back to keyless providers without it.
+      # Worth setting here because Render's datacenter IP gets bot-challenged
+      # much harder than a home connection. See DECISIONS.md §3.6.
+      - key: BRAVE_API_KEY
+        sync: false
