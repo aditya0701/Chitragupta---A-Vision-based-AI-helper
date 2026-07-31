@@ -23,8 +23,54 @@ from typing import Optional
 def build_tick_vision_prompt(
     prev_caption: Optional[str],
     goals: Optional[str] = None,
+    questions: Optional[list[str]] = None,
 ) -> str:
-    parts = [
+    parts = []
+    if questions:
+        # The reasoning model's own brief, asked FIRST and answered explicitly.
+        #
+        # Without this the brief arrived only as a soft "these are relevant, be
+        # detailed" nudge at the end, so nothing was ever actually asked and
+        # nothing sharp came back. Observed live: the user wanted black-eyed
+        # beans, the caption said "several bags of lentils", and the reasoning
+        # model — with no answer to read — upgraded that into "I can see the
+        # beans". An inference stood in for an observation because no question
+        # was posed.
+        #
+        # Two rules that are load-bearing, both from v1 (DECISIONS.md 6.3, 6.2):
+        # ask for OBSERVATIONS, never judgement — this stage reports, the
+        # reasoning stage decides — and make a negative answer an explicit
+        # RESULT, since a brief whose "no" looks like silence is how frames get
+        # dropped without anyone noticing.
+        n = len(questions)
+        # The count is stated twice on purpose. Asked with a single question,
+        # the model answered "Q1/Q2/Q3", inventing two more to hang the rest of
+        # its observations on — harmless to read but it makes the answer block
+        # unparseable and pads every caption.
+        parts += [
+            f"FIRST, answer the {n} question(s) below about this frame. Answer before "
+            f"the description, exactly one line each, using the exact labels below. "
+            f"There are exactly {n} — never invent extra questions; anything else you "
+            f"noticed belongs in the description that follows.",
+            "",
+        ]
+        parts += [f"Q{i}: {q}" for i, q in enumerate(questions, 1)]
+        parts += [
+            "",
+            f"Answer format — exactly {n} line(s), one per question:",
+            "  Q<n>: FOUND — <exactly where it is in the frame, plus any label text you can read>",
+            "  Q<n>: NOT VISIBLE — <what is in that part of the frame instead>",
+            "  Q<n>: UNCLEAR — <what you can make out, and what is blocking a confident answer>",
+            "",
+            "NOT VISIBLE is a real, useful answer — say it rather than stretching. "
+            "Never guess an identification to be helpful: report what is actually "
+            "legible or visibly distinctive (label text, shape, colour, markings) and "
+            "let the reader decide. Do not judge whether the answer is good news.",
+            "",
+            "THEN, after the answers, describe the frame as follows.",
+            "",
+        ]
+    parts += [
         "You are the eyes of a live first-person assistant. Describe this camera "
         "frame in at most 4 short sentences, optimized for someone who will read "
         "many of these in sequence to understand what is happening over time.",

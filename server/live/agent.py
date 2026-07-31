@@ -24,7 +24,7 @@ from typing import Optional
 
 from ..agent import ConversationMemory
 from ..backends import VisionBackend, should_think
-from . import compaction, triggers, worlddoc
+from . import compaction, config, triggers, worlddoc
 from .tools import build_live_tools
 from .vision import build_tick_vision_prompt
 
@@ -153,14 +153,57 @@ class LiveAgent:
     # ── Tick ─────────────────────────────────────────────────────────────────
 
     def _goal_hint(self, doc: dict) -> str:
-        """Short goal text for the vision stage — goal-conditioned detail."""
+        """Standing context for the vision stage — what this session is about.
+
+        Event-anchored conditions used to be folded in here as 'watch for: X'
+        bullets. They are now posed as explicit questions instead; see
+        _vision_questions.
+        """
         parts = []
         if doc.get("title"):
             parts.append(doc["title"])
         parts += [t["content"] for t in doc["tasks"] if t["status"] == "in_progress"]
-        parts += [f"watch for: {e['condition']}"
-                  for e in worlddoc.open_expectations(doc) if e["anchor"] == "event"]
         return "\n".join(f"- {p}" for p in parts)
+
+    def _vision_questions(self, doc: dict, charge: bool = True) -> list[str]:
+        """The open event-anchored conditions, as questions for the vision stage.
+
+        These are the reasoning model's own briefs — it cannot see the camera,
+        so a separate model looks on its behalf and answers only what it was
+        asked. Standing state read straight off the doc, NOT a per-tick round
+        trip asking the reasoning model what to look for, which would double the
+        model calls on every frame (v1 made the same call — see its watch_for
+        notes in agent/agent.py).
+
+        `charge` counts how many times each brief has been asked. Server-managed
+        so the model can see a brief going stale and close it: v1's lesson was
+        that a focus mode set once is never voluntarily reverted, so something
+        has to make the drift visible. Here that pressure is a nudge in the tick
+        prompt rather than a hard cutoff, because silently dropping a watch the
+        user is still waiting on is the worse failure.
+        """
+        questions = []
+        for exp in worlddoc.open_expectations(doc):
+            if exp["anchor"] != "event" or not exp.get("condition"):
+                continue
+            if charge:
+                exp["asks"] = int(exp.get("asks") or 0) + 1
+            questions.append(exp["condition"].strip())
+        return questions
+
+    def _stale_brief_note(self, doc: dict) -> str:
+        """Briefs that have been asked many times without ever being resolved."""
+        stale = [
+            e for e in worlddoc.open_expectations(doc)
+            if e["anchor"] == "event" and int(e.get("asks") or 0) >= config.MAX_BRIEF_ASKS
+        ]
+        if not stale:
+            return ""
+        lines = ["", "[Watches going stale — the camera has been asked these many times "
+                     "with no resolution. If one no longer applies, or you already have "
+                     "your answer, close it with resolve_expectation.]"]
+        lines += [f"- ({e['id']}) {e['description']} — asked {e['asks']} times" for e in stale]
+        return "\n".join(lines)
 
     def _build_tick_prompt(self, doc: dict, caption: str, events: list[dict]) -> str:
         lines = [
@@ -173,6 +216,11 @@ class LiveAgent:
             "",
             "Housekeeping (do silently via tools, this is most of your job):",
             "- If the frame confirms an open expectation happened, call resolve_expectation.",
+            "- The observation may open with 'Q1: FOUND / NOT VISIBLE / UNCLEAR' lines. "
+            "Those are the camera's direct answers to the watches you set. Treat them as "
+            "the answer — do not re-interpret a NOT VISIBLE as a maybe, and do not turn a "
+            "generic description into a specific identification. When one is answered for "
+            "good, close it with resolve_expectation so the camera stops being asked.",
             "- Check every event-anchored expectation's condition against this frame; if one "
             "fires (the condition is now true), speak up about it.",
             "- If the frame shows where something is kept, call log_environment. Record "
@@ -194,6 +242,9 @@ class LiveAgent:
             lines += ["", "[Trigger events — these fired by arithmetic while you were away; "
                           "address them in your reply]"]
             lines += [f"- {e['text']}" for e in events]
+        stale = self._stale_brief_note(doc)
+        if stale:
+            lines.append(stale)
         return "\n".join(lines)
 
     async def tick(self, image_base64: str) -> dict:
@@ -202,7 +253,8 @@ class LiveAgent:
             self._doc = doc
             try:
                 prev = worlddoc.last_caption(doc)
-                vision_prompt = build_tick_vision_prompt(prev, self._goal_hint(doc) or None)
+                vision_prompt = build_tick_vision_prompt(
+                    prev, self._goal_hint(doc) or None, self._vision_questions(doc))
                 caption = await self.backend.vision(image_base64, vision_prompt)
 
                 batch = worlddoc.add_recent(doc, caption)
@@ -317,7 +369,8 @@ class LiveAgent:
                 vision_prompt = None
                 if image_base64:
                     vision_prompt = build_tick_vision_prompt(
-                        worlddoc.last_caption(doc), self._goal_hint(doc) or None)
+                        worlddoc.last_caption(doc), self._goal_hint(doc) or None,
+                        self._vision_questions(doc))
                     caption = await self.backend.vision(image_base64, vision_prompt)
                     batch = worlddoc.add_recent(doc, caption)
                     if batch:

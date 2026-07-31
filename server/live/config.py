@@ -38,6 +38,13 @@ MIN_UNPROMPTED_GAP_S: int = int(os.getenv("LIVE_MIN_UNPROMPTED_GAP_S", "90"))
 # one moment a follow-up is *solicited*, so it opens a window instead.
 FOLLOWUP_WINDOW_S: int = int(os.getenv("LIVE_FOLLOWUP_WINDOW_S", "180"))
 
+# How many times an event-anchored brief may be put to the camera before the
+# reasoning model is nudged to resolve or cancel it. A nudge, not a cutoff:
+# v1's lesson was that a focus mode set once never gets voluntarily reverted,
+# but silently dropping a watch the user is still waiting on is worse than
+# asking one stale question. At a 6s tick that is roughly four minutes.
+MAX_BRIEF_ASKS: int = int(os.getenv("LIVE_MAX_BRIEF_ASKS", "40"))
+
 # Server-side floor between accepted ticks, same safety-net role as
 # LIVE_FRAME_MIN_INTERVAL_S in the old system.
 TICK_MIN_INTERVAL_S: float = float(os.getenv("LIVE_TICK_MIN_INTERVAL_S", "1.5"))
