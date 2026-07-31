@@ -10,6 +10,7 @@ let ticking = false;
 let tickTimer = null;
 let busy = false;            // a /v2 request is in flight
 let pendingFrame = null;     // latest frame captured while busy — flushed when free
+let queuedPrompt = null;     // user message spoken/typed while busy — flushed when free
 let lastSentFrame = null;    // grayscale sample of the last frame actually sent (diff gate)
 
 const $ = (id) => document.getElementById(id);
@@ -165,7 +166,7 @@ async function sendTick(frame, sample) {
     lastSentFrame = sample;
     if (data.caption) addCaptionDot(data.caption);
     (data.triggers || []).forEach((t) => addMsg('trigger', `⚡ ${t}`));
-    if (data.text) addMsg('assistant', data.text);
+    if (data.text) { addMsg('assistant', data.text); speak(data.text); }
     updateDoc(data.doc);
     setStatus(data.text ? 'spoke' : 'silent tick');
   } catch (e) {
@@ -176,8 +177,17 @@ async function sendTick(frame, sample) {
   }
 }
 
+// A queued user message always goes before a buffered frame: the person is
+// waiting on an answer, the frame is only ever a few seconds of staleness.
 function flushPending() {
-  if (pendingFrame && ticking && !busy) {
+  if (busy) return;
+  if (queuedPrompt) {
+    const prompt = queuedPrompt;
+    queuedPrompt = null;
+    deliverMessage(prompt);
+    return;
+  }
+  if (pendingFrame && ticking) {
     const { frame, sample } = pendingFrame;
     pendingFrame = null;
     sendTick(frame, sample);
@@ -189,9 +199,23 @@ function flushPending() {
 async function sendMessage() {
   const input = $('chat-input');
   const prompt = input.value.trim();
-  if (!prompt || busy) return;
+  if (!prompt) return;
   input.value = '';
   addMsg('user', prompt);
+  // A tick holds `busy` for its whole vision+reasoning round trip, which on a
+  // 4s interval is most of the wall clock. Dropping the message here (the
+  // original behavior) meant speaking or hitting Enter mid-tick did nothing
+  // at all — no reply, no error, and with voice input no visible input box to
+  // notice it in. Queue it instead, exactly as pendingFrame does for frames.
+  if (busy) {
+    queuedPrompt = prompt;
+    setStatus('queued — waiting for the current tick to finish…');
+    return;
+  }
+  await deliverMessage(prompt);
+}
+
+async function deliverMessage(prompt) {
   busy = true;
   setStatus('thinking…');
   try {
@@ -206,6 +230,7 @@ async function sendMessage() {
     const data = await resp.json();
     if (data.caption && $('show-captions').checked) addCaptionDot(data.caption);
     addMsg('assistant', data.text || '(no reply)');
+    if (data.text) speak(data.text);
     updateDoc(data.doc);
     setStatus('idle');
   } catch (e) {
@@ -227,6 +252,7 @@ async function pollTriggers() {
     if (data.message) {
       (data.triggers || []).forEach((t) => addMsg('trigger', `⚡ ${t}`));
       addMsg('assistant', `⏰ ${data.message}`);
+      speak(data.message);  // an expectation firing is the main thing worth hearing
     }
     updateDoc(data.doc);
   } catch (_) { /* transient — next poll will catch up */ }
@@ -240,6 +266,115 @@ async function refreshDoc() {
     const data = await resp.json();
     updateDoc(data.rendered);
   } catch (_) {}
+}
+
+// ── Voice output (Web Speech API — on-device, free, no server call) ──────────
+// Ported from app.js. This is the hands-free payoff: a tick that decides to
+// speak, or an expectation firing while your hands are in the dal, reaches you
+// without looking at the screen. On by default here (unlike v1) because a live
+// tick loop you can't hear is just a screen you have to watch.
+
+const TTS_KEY = 'chitragupt-live-tts';
+const synth = window.speechSynthesis || null;
+let ttsEnabled = true;
+
+function initTts() {
+  const btn = $('tts-btn');
+  if (!synth) { btn.style.display = 'none'; return; }
+  const saved = localStorage.getItem(TTS_KEY);
+  ttsEnabled = saved === null ? true : saved === '1';
+  updateTtsBtn();
+}
+
+function toggleTts() {
+  if (!synth) return;
+  ttsEnabled = !ttsEnabled;
+  try { localStorage.setItem(TTS_KEY, ttsEnabled ? '1' : '0'); } catch { /* ignore */ }
+  updateTtsBtn();
+  if (!ttsEnabled) synth.cancel();
+}
+
+function updateTtsBtn() {
+  const btn = $('tts-btn');
+  btn.classList.toggle('active', ttsEnabled);
+  btn.textContent = ttsEnabled ? '🔊' : '🔇';
+  btn.title = ttsEnabled ? 'Voice replies on — tap to mute' : 'Voice replies off — tap to enable';
+}
+
+function ttsCleanText(text) {
+  return String(text || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/[*_`#>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Cancel anything mid-utterance first — in a live loop the newest thing to say
+// supersedes a stale one, same "latest matters" logic as pendingFrame. Letting
+// narration queue up means hearing about the onions after they've burned.
+function speak(text) {
+  if (!ttsEnabled || !synth) return;
+  const clean = ttsCleanText(text);
+  if (!clean) return;
+  synth.cancel();
+  const u = new SpeechSynthesisUtterance(clean);
+  u.lang = 'en-US';
+  u.rate = 1.0;
+  synth.speak(u);
+}
+
+// ── Voice input (Web Speech API) ─────────────────────────────────────────────
+// Chrome/Edge/Safari only (not Firefox), and needs a secure context — same
+// requirement as getUserMedia, so if the camera works the mic will too. The
+// button hides itself entirely rather than showing a dead control.
+
+const SpeechRecognitionImpl = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognizer = null;
+let isRecording = false;
+
+function initVoiceInput() {
+  const micBtn = $('mic-btn');
+  if (!SpeechRecognitionImpl) { micBtn.style.display = 'none'; return; }
+
+  recognizer = new SpeechRecognitionImpl();
+  recognizer.lang = 'en-US';
+  recognizer.continuous = false;
+  recognizer.interimResults = true;
+
+  recognizer.onresult = (event) => {
+    let transcript = '';
+    for (let i = 0; i < event.results.length; i++) transcript += event.results[i][0].transcript;
+    $('chat-input').value = transcript;
+  };
+
+  recognizer.onerror = () => { isRecording = false; micBtn.classList.remove('active'); };
+
+  // continuous=false, so this fires when the browser hears you stop talking.
+  // Send automatically: speaking the question is the whole interaction, no
+  // follow-up tap. sendMessage queues if a tick is mid-flight, so unlike the
+  // old behavior a question spoken over a tick is never lost.
+  recognizer.onend = () => {
+    isRecording = false;
+    micBtn.classList.remove('active');
+    if ($('chat-input').value.trim()) sendMessage();
+  };
+}
+
+function toggleVoiceInput() {
+  if (!recognizer) return;
+  if (isRecording) { recognizer.stop(); return; }
+  // Silence any spoken reply before opening the mic, so the assistant isn't
+  // talking over you — and so its own voice can't bleed into the recognizer.
+  if (synth) synth.cancel();
+  $('chat-input').value = '';
+  isRecording = true;
+  $('mic-btn').classList.add('active');
+  try {
+    recognizer.start();
+  } catch {
+    isRecording = false;
+    $('mic-btn').classList.remove('active');
+  }
 }
 
 // ── Wiring ───────────────────────────────────────────────────────────────────
@@ -257,6 +392,12 @@ $('reset-btn').addEventListener('click', async () => {
   refreshDoc();
   addMsg('system', 'World document cleared.');
 });
+
+$('mic-btn').addEventListener('click', toggleVoiceInput);
+$('tts-btn').addEventListener('click', toggleTts);
+
+initTts();
+initVoiceInput();
 
 setInterval(pollTriggers, POLL_INTERVAL_MS);
 refreshDoc();

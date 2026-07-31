@@ -22,6 +22,16 @@ services:
         value: deepseek-v4-flash
       - key: GROQ_VISION_MODEL
         value: qwen/qwen3.6-27b
+      # v2 live system only (/live, /v2/*). Its tick loop runs ~3x over Groq's
+      # 8K TPM cap and exhausts the 200K daily cap in ~20 minutes, so its
+      # vision half runs on DeepInfra instead. v1 above is unaffected.
+      # Paste the key into the Render dashboard under Environment.
+      - key: DEEPINFRA_API_KEY
+        sync: false
+      - key: DEEPINFRA_VISION_MODEL
+        value: Qwen/Qwen3-VL-30B-A3B-Instruct
+      - key: LIVE_BACKEND_MODE
+        value: deepinfra
       # The user's local timezone for get_time. An IANA zone name, not an
       # abbreviation — "Europe/Berlin" handles the CET/CEST switch itself.
       - key: DEFAULT_TIMEZONE

@@ -35,5 +35,11 @@ def get_backend(mode: str | None = None) -> VisionBackend:
     elif mode == "hybrid":
         from .deepseek_backend import DeepSeekBackend
         return DeepSeekBackend()
+    elif mode == "deepinfra":
+        # Hybrid with the vision half on DeepInfra instead of Groq. Intended
+        # for the v2 live system via LIVE_BACKEND_MODE — v2's tick rate does
+        # not fit Groq's free-tier caps.
+        from .deepinfra_backend import DeepInfraHybridBackend
+        return DeepInfraHybridBackend()
     else:
         raise ValueError(f"Unknown BACKEND_MODE: {mode}")

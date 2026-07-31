@@ -38,6 +38,17 @@ class Settings:
     DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
     GROQ_VISION_MODEL: str = os.getenv("GROQ_VISION_MODEL", "qwen/qwen3.6-27b")
 
+    # Same hybrid split, but with the vision half on DeepInfra's hosted
+    # Qwen3-VL rather than Groq. Exists because the v2 live system's tick
+    # loop cannot fit under Groq's 8K TPM / 200K TPD free tier at any usable
+    # interval — see backends/deepinfra_backend.py for the arithmetic.
+    # Selected via LIVE_BACKEND_MODE=deepinfra (live/config.py), which leaves
+    # v1's BACKEND_MODE=hybrid on Groq untouched.
+    DEEPINFRA_API_KEY: str = os.getenv("DEEPINFRA_API_KEY", "")
+    DEEPINFRA_VISION_MODEL: str = os.getenv(
+        "DEEPINFRA_VISION_MODEL", "Qwen/Qwen3-VL-30B-A3B-Instruct"
+    )
+
     # Optional. When set, web_search prefers the Brave Search API over the
     # keyless scraped providers — 2,000 queries/month free, and the only
     # provider in that chain with a contract rather than a tolerance behind

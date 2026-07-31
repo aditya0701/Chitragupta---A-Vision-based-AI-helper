@@ -56,6 +56,10 @@
       border-radius: 8px; padding: 9px 12px; font-size: 13px;
     }
     #chat-input:focus { outline: none; border-color: #2d6cd6; }
+    #mic-btn, #tts-btn { font-size: 15px; padding: 6px 10px; }
+    /* Recording is the one state you must be able to read across a kitchen. */
+    #mic-btn.active { background: #8f1f2e; border-color: #d62d43; animation: pulse 1.2s ease-in-out infinite; }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.55; } }
 
     #doc-head { padding: 8px 12px; background: #12151c; border-bottom: 1px solid #262c38;
                 font-size: 12px; color: #98a1b3; display: flex; justify-content: space-between; align-items: center; }
@@ -95,8 +99,10 @@
       <div id="transcript"></div>
       <div id="status-line">idle</div>
       <div id="chat-row">
+        <button id="mic-btn" title="Hold a question — tap and speak">🎤</button>
         <input id="chat-input" type="text" placeholder="Talk to Chitragupta… (current frame auto-attached when camera is on)">
         <button id="send-btn">Send</button>
+        <button id="tts-btn" title="Voice replies">🔊</button>
       </div>
     </div>
     <div class="col" id="right">

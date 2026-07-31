@@ -182,10 +182,29 @@ class LiveAgent:
                 else:
                     # Politeness budget: trigger-driven and high-priority speech
                     # always passes; spontaneous commentary waits out the gap.
+                    #
+                    # The high-priority path used to be unreachable from here,
+                    # which cost event-anchored expectations their entire point.
+                    # A firing event-anchored expectation is NOT in `events` —
+                    # triggers.check() only produces time-anchored and stale-task
+                    # events, by design — and may_speak_unprompted() was called
+                    # with no priority, so it always evaluated as "normal". A
+                    # high-priority watch ("tell me the moment the dal boils
+                    # over") therefore got swallowed by the 90s gap unless the
+                    # model happened to also call resolve_expectation, which it
+                    # has no reason to do when the condition it was guarding
+                    # AGAINST just came true. Pass the priority of any still-open
+                    # high-priority watch through instead: if one is live and the
+                    # model chose to break silence, that is what it is speaking
+                    # about. poll() already did this correctly.
                     important = bool(events) or any(
                         r["tool"] == "resolve_expectation" for r in tool_results
                     )
-                    if not important and not triggers.may_speak_unprompted(doc):
+                    watch_priority = "high" if any(
+                        e["anchor"] == "event" and e["priority"] == "high"
+                        for e in worlddoc.open_expectations(doc)
+                    ) else "normal"
+                    if not important and not triggers.may_speak_unprompted(doc, watch_priority):
                         logger.info("Politeness gate suppressed unprompted tick speech: %r", text[:80])
                         text = ""
                 if text:
