@@ -244,6 +244,53 @@ def add_environment_fact(doc: dict, fact: str) -> str:
     return f"Noted: {fact}"
 
 
+def retract_environment_fact(doc: dict, fact_match: str, correction: str = "") -> str:
+    """Remove environment facts containing `fact_match`, optionally replacing
+    them with a correction in the same call.
+
+    The counterpart to add_environment_fact, which is append-only. v1 learned
+    this the hard way and v2 shipped without it — see agent/tasklist.py's
+    retract_observation: the model logged "found the toor dal" for what was
+    actually a bag of black-eyed beans, the user corrected it, and nothing
+    could act on the correction. The wrong fact rode along in every subsequent
+    prompt injection and the model repeated it for four turns.
+
+    **A false fact that survives an explicit correction is worse than no fact
+    at all**, because once logged it is indistinguishable from a verified one.
+
+    Two v2-specific details:
+
+    `correction` exists because deleting alone is not enough here. The raw
+    captions that produced the wrong inference are still sitting in `recent`
+    and will keep suggesting it — the model can re-derive the same claim on the
+    very next tick from the very same evidence. A durable "the bag on the
+    pantry shelf is black-eyed beans, NOT toor dal" actively blocks that, where
+    a hole in the fact list does not.
+
+    Substring matching rather than an index, case-insensitive, removing every
+    match: the model works from the rendered [Known environment facts] text, so
+    it can quote a fragment far more reliably than it can count positions, and
+    a wrong fact tends to have been logged more than once across ticks.
+    """
+    needle = (fact_match or "").strip().lower()
+    if not needle:
+        return "retract_environment_fact needs the text of the fact to remove."
+
+    before = len(doc["environment"])
+    doc["environment"] = [f for f in doc["environment"] if needle not in f["fact"].lower()]
+    removed = before - len(doc["environment"])
+
+    note = ""
+    if correction and correction.strip():
+        add_environment_fact(doc, correction.strip())
+        note = f" Recorded instead: {correction.strip()}"
+
+    if not removed:
+        return (f"No environment fact matching '{fact_match}' — check the "
+                f"[Known environment facts] text.{note}")
+    return f"Removed {removed} environment fact(s) matching '{fact_match}'.{note}"
+
+
 def add_recent(doc: dict, caption: str) -> list[dict]:
     """Append a raw tick caption. Returns the batch that should be compacted
     (oldest entries beyond the bound), already removed from `recent` — the

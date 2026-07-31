@@ -175,7 +175,13 @@ class LiveAgent:
             "- If the frame confirms an open expectation happened, call resolve_expectation.",
             "- Check every event-anchored expectation's condition against this frame; if one "
             "fires (the condition is now true), speak up about it.",
-            "- If the frame shows where something is kept, call log_environment.",
+            "- If the frame shows where something is kept, call log_environment. Record "
+            "only what the observation actually says. It comes from a camera model that "
+            "describes generically — 'a bag of lentils', 'a jar of yellow powder' — and "
+            "you must not upgrade that into a specific identification the words do not "
+            "support. 'Lentils on the shelf' is not 'the black-eyed beans'. If the user "
+            "is looking for something specific and you can only see a generic match, say "
+            "what you can see and ask them to confirm, rather than announcing a find.",
             "- If a task visibly finished or started, call mark_task.",
             "",
             f"Then: if nothing needs saying to the user, your entire visible reply must be "
@@ -285,6 +291,15 @@ class LiveAgent:
             "them. So never end on 'here's the plan:' or announce something you then "
             "only put in a tool. Every reply must stand alone as speech: say how many "
             "steps there are and what to do first, in the same breath.",
+            "",
+            "If the user corrects a fact you recorded or claimed — 'those aren't "
+            "lobhiya', 'that's not the toor dal' — call retract_environment_fact "
+            "immediately, with what is actually true as the correction. Never leave the "
+            "wrong fact in place and just log a new one next to it: both get re-injected "
+            "into every later prompt, you will contradict yourself for the rest of the "
+            "session, and the user has to keep correcting the same thing. Take the "
+            "correction at face value; the user is standing in front of the object and "
+            "you are looking at a description of a photograph of it.",
             "",
             "Only set a time-anchored expectation for a step the user has actually "
             "STARTED. Deadlines attached to steps they haven't begun go overdue while "

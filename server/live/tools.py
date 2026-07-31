@@ -55,6 +55,9 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
     def _log_environment(fact: str) -> str:
         return worlddoc.add_environment_fact(get_doc(), fact)
 
+    def _retract_environment_fact(fact_match: str, correction: str = "") -> str:
+        return worlddoc.retract_environment_fact(get_doc(), fact_match, correction)
+
     def _mark_task(task: str, status: str, note: str = "") -> str:
         doc = get_doc()
         match = worlddoc.find_task(doc, task)
@@ -163,6 +166,27 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
         fn=_log_environment,
         parameters={
             "fact": {"type": "string", "description": "One short, specific, durable fact", "required": True},
+        },
+        needs_followup=False,
+    ))
+
+    registry.register(Tool(
+        name="retract_environment_fact",
+        description=(
+            "Undo a fact you logged that turns out to be wrong. ALWAYS call this the "
+            "moment the user corrects something you recorded or claimed — 'no, those "
+            "aren't lobhiya', 'that's not the toor dal', 'wrong shelf'. Pass a distinctive "
+            "fragment of the wrong fact as fact_match, and what is actually true as "
+            "correction. Do not just log a new fact on top: the old one keeps riding "
+            "along in every prompt and you will repeat the mistake. If you are no longer "
+            "sure what the item is, say so in the correction ('the bag on the pantry "
+            "shelf is NOT black-eyed beans; contents unconfirmed') rather than guessing "
+            "again — an honest unknown is worth more than a second wrong label."
+        ),
+        fn=_retract_environment_fact,
+        parameters={
+            "fact_match": {"type": "string", "description": "Distinctive text from the wrong fact, as it appears in [Known environment facts]", "required": True},
+            "correction": {"type": "string", "description": "What is actually true — recorded in its place. Omit only if nothing is known.", "required": False},
         },
         needs_followup=False,
     ))
