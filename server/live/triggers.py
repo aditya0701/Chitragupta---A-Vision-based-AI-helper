@@ -82,3 +82,22 @@ def may_speak_unprompted(doc: dict, priority: str = "normal") -> bool:
 
 def mark_spoke(doc: dict):
     doc["last_spoken_ts"] = time.time()
+
+
+def mark_user_turn(doc: dict):
+    """Record that the user just asked for something. Tracked separately from
+    last_spoken_ts because the two pull in opposite directions: speaking should
+    make the assistant quieter, being asked should make it more forthcoming."""
+    doc["last_user_turn_ts"] = time.time()
+
+
+def in_followup_window(doc: dict) -> bool:
+    """True while a tick is still allowed to volunteer something on the back of
+    a recent user request, regardless of the politeness gap.
+
+    Deliberately NOT folded into may_speak_unprompted(): poll()'s stale-task
+    nags also route through that function, and a nag firing seconds after a
+    conversation is the exact thing the gap is right to suppress. Only the tick
+    path — where the model is reacting to what it can actually see — opts in.
+    """
+    return time.time() - (doc.get("last_user_turn_ts") or 0.0) < config.FOLLOWUP_WINDOW_S

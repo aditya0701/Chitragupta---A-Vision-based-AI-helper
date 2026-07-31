@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Optional
 
 from ..agent import ConversationMemory
@@ -37,6 +38,35 @@ PERSONA = (
     "persistent world document (shown below) so the user never has to repeat "
     "themselves. Be brief and concrete when you speak."
 )
+
+
+# Text that trails off into something the user was clearly meant to receive
+# next — "Here's the plan:", "Do this first —".
+_DANGLING_RE = re.compile(r"[:\-–—]\s*$")
+
+
+def _repair_dangling_plan(text: str, tool_results: list[dict], doc: dict) -> str:
+    """Speak the plan when the model announced one and then wrote it into a tool.
+
+    Observed live: the model replied "Got it — we just need the tadka. Here's
+    the plan:" and stopped, because the plan itself went into update_tasks.
+    update_tasks has needs_followup=False, so no second call happened and the
+    naked preamble shipped. The user is LISTENING, not reading — a task list
+    that only exists in the doc panel does not reach someone whose hands are in
+    the dal, and they had to ask "I cannot see the plan".
+
+    Deterministic rather than another model call: this fires on the exact shape
+    of the failure, costs nothing, and cannot itself dangle. Only the first step
+    is spoken — reading six steps aloud is how you lose someone at a stove.
+    """
+    if not text or not _DANGLING_RE.search(text):
+        return text
+    if not any(r["tool"] in ("update_tasks", "mark_task") for r in tool_results):
+        return text
+    todo = [t for t in doc["tasks"] if t["status"] in ("pending", "in_progress")]
+    if not todo:
+        return text
+    return f"{text.rstrip(':-–— \t')}: {len(todo)} steps. First: {todo[0]['content']}."
 
 
 class LiveAgent:
@@ -197,8 +227,15 @@ class LiveAgent:
                     # high-priority watch through instead: if one is live and the
                     # model chose to break silence, that is what it is speaking
                     # about. poll() already did this correctly.
-                    important = bool(events) or any(
-                        r["tool"] == "resolve_expectation" for r in tool_results
+                    # in_followup_window: the user asked for something in the
+                    # last few minutes, so volunteering an answer is what they
+                    # are waiting for, not chatter. Without this the assistant
+                    # silences itself for the whole search it just promised to
+                    # run — see live/config.py FOLLOWUP_WINDOW_S.
+                    important = (
+                        bool(events)
+                        or triggers.in_followup_window(doc)
+                        or any(r["tool"] == "resolve_expectation" for r in tool_results)
                     )
                     watch_priority = "high" if any(
                         e["anchor"] == "event" and e["priority"] == "high"
@@ -242,6 +279,17 @@ class LiveAgent:
             "for each step with a deadline or a watch-for condition — in this same turn, "
             "without being asked. Don't recite the whole plan back; summarize and point "
             "out only what to do first.",
+            "",
+            "The user is LISTENING to you, not reading. They cannot see your tool calls "
+            "or the task list — writing a plan with update_tasks does not show it to "
+            "them. So never end on 'here's the plan:' or announce something you then "
+            "only put in a tool. Every reply must stand alone as speech: say how many "
+            "steps there are and what to do first, in the same breath.",
+            "",
+            "Only set a time-anchored expectation for a step the user has actually "
+            "STARTED. Deadlines attached to steps they haven't begun go overdue while "
+            "they are still gathering ingredients, and you waste their turn cancelling "
+            "reminders instead of answering them.",
         ]
         return "\n".join(lines)
 
@@ -265,12 +313,14 @@ class LiveAgent:
                     built, think=should_think(prompt),
                     history=self.memory.get_history(),
                 )
+                text = _repair_dangling_plan(text, tool_results, doc)
                 if not text:
                     text = "(no reply — something went wrong, try again)"
 
                 self.memory.add("user", prompt)
                 self.memory.add("assistant", text)
-                triggers.mark_spoke(doc)  # answering counts — resets the nag clock too
+                triggers.mark_spoke(doc)      # suppresses stale-task nags
+                triggers.mark_user_turn(doc)  # but OPENS the tick follow-up window
                 worlddoc.save(doc)
                 return {
                     "text": text,

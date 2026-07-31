@@ -29,6 +29,15 @@ STALENESS_S: int = int(os.getenv("LIVE_STALENESS_S", "480"))
 # utterances. High-priority expectations bypass it; everything else waits.
 MIN_UNPROMPTED_GAP_S: int = int(os.getenv("LIVE_MIN_UNPROMPTED_GAP_S", "90"))
 
+# How long after a user turn a tick may still speak without waiting out the
+# politeness gap. Answering the user used to RESET that gap, which silenced
+# exactly the follow-up they were waiting for: asked to find the onions, the
+# assistant replied "I'll point them out as soon as they're in view", and that
+# reply gagged it for the entire 90s search — it found them at +27s, logged
+# them silently, and said nothing until asked again. A recent request is the
+# one moment a follow-up is *solicited*, so it opens a window instead.
+FOLLOWUP_WINDOW_S: int = int(os.getenv("LIVE_FOLLOWUP_WINDOW_S", "180"))
+
 # Server-side floor between accepted ticks, same safety-net role as
 # LIVE_FRAME_MIN_INTERVAL_S in the old system.
 TICK_MIN_INTERVAL_S: float = float(os.getenv("LIVE_TICK_MIN_INTERVAL_S", "1.5"))

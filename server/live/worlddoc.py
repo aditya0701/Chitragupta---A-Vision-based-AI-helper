@@ -26,8 +26,10 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from . import config
+from ..config import settings
 
 logger = logging.getLogger("chitragupt.live")
 
@@ -45,8 +47,31 @@ def _now() -> float:
     return time.time()
 
 
+_tz_cache: Optional[ZoneInfo] = None
+
+
+def _tz() -> Optional[ZoneInfo]:
+    """The user's zone, not the server's. Render runs UTC, so the naive
+    datetime.fromtimestamp() this used to call stamped every timestamp in the
+    doc — including the "[Current time]" header the model does all its temporal
+    arithmetic against — two hours behind a Berlin user. Ask "will this be done
+    by four?" and it was answering about a different four. Falls back to server
+    local if the zone name is bad or tzdata is missing."""
+    global _tz_cache
+    if _tz_cache is None:
+        try:
+            _tz_cache = ZoneInfo(settings.DEFAULT_TIMEZONE)
+        except Exception:
+            logger.warning(
+                "DEFAULT_TIMEZONE %r unusable — world-doc timestamps fall back to "
+                "server local time", settings.DEFAULT_TIMEZONE,
+            )
+            return None
+    return _tz_cache
+
+
 def fmt_ts(ts: float) -> str:
-    return datetime.fromtimestamp(ts).strftime("%H:%M:%S")
+    return datetime.fromtimestamp(ts, _tz()).strftime("%H:%M:%S")
 
 
 def _empty_doc() -> dict:
@@ -54,6 +79,7 @@ def _empty_doc() -> dict:
         "title": None,
         "session_started": _now(),
         "last_spoken_ts": 0.0,
+        "last_user_turn_ts": 0.0,
         "tasks": [],
         "expectations": [],
         "environment": [],
