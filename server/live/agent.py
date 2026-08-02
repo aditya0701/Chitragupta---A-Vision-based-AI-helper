@@ -191,6 +191,38 @@ class LiveAgent:
             questions.append(exp["condition"].strip())
         return questions
 
+    def _frame_detail(self, doc: dict) -> str:
+        """What resolution the client should use for its NEXT capture.
+
+        Echoed on every /v2 response; the client sizes the next frame from it.
+        It has to work one frame ahead because resolution discarded in the
+        browser cannot be recovered — a 640px JPEG has already thrown the label
+        away by the time it reaches us, and nothing here can upscale it back.
+        So the frame that *causes* an upgrade is itself coarse; the brief
+        outlives that by many ticks, so the answer is not lost.
+
+        Fine is a consequence of an open question, never a flag the model sets.
+        That is the structural fix for v1's failure, where the model set
+        detail:'fine' by hand and then never reverted it — see CLAUDE.md's
+        MAX_FINE_FRAMES_PER_ITEM. Here, resolving the brief reverts it.
+
+        The asks budget doubles as the cost bound: past MAX_BRIEF_ASKS the
+        watch STAYS OPEN but stops buying full resolution. A search that has
+        not converged in forty frames will not converge on the forty-first, and
+        dropping the watch entirely — v1's other option — silently abandons
+        something the user may still be waiting on.
+
+        One flag, one consequence (DECISIONS.md 4.4): this controls capture
+        size and nothing else. It must never also gate whether questions are
+        asked or whether the tick may speak.
+        """
+        for exp in worlddoc.open_expectations(doc):
+            if exp["anchor"] != "event" or not (exp.get("condition") or "").strip():
+                continue
+            if int(exp.get("asks") or 0) < config.MAX_BRIEF_ASKS:
+                return "fine"
+        return "coarse"
+
     def _stale_brief_note(self, doc: dict) -> str:
         """Briefs that have been asked many times without ever being resolved."""
         stale = [
@@ -313,6 +345,7 @@ class LiveAgent:
                     "tool_calls": tool_results,
                     "model": response.model,
                     "provider": response.provider,
+                    "frame_detail": self._frame_detail(doc),
                     "doc": worlddoc.render(doc),
                     "debug": {"vision_prompt": vision_prompt, "reason_prompt": prompt,
                               "raw_text": response.text},
@@ -396,6 +429,7 @@ class LiveAgent:
                     "tool_calls": tool_results,
                     "model": response.model,
                     "provider": response.provider,
+                    "frame_detail": self._frame_detail(doc),
                     "doc": worlddoc.render(doc),
                     "debug": {"vision_prompt": vision_prompt, "reason_prompt": built,
                               "raw_text": response.text},

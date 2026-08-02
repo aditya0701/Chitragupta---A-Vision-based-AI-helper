@@ -1,7 +1,11 @@
 // Chitragupta Live (v2) — client for the world-doc tick system.
 // Independent of app.js; talks only to /v2/*.
 
-const MAX_FRAME_DIM = 1024;
+// Capture size per detail tier. Image cost scales with RESOLUTION, not JPEG
+// quality — quality is not a lever (DECISIONS.md 1.2). Coarse is ~390 image
+// tokens, fine ~735, so the tier is roughly a 30% saving on every tick that
+// isn't actively trying to read something.
+const FRAME_DIM = { coarse: 640, fine: 1024 };
 const JPEG_QUALITY = 0.85;
 const POLL_INTERVAL_MS = 20000;
 
@@ -12,6 +16,9 @@ let busy = false;            // a /v2 request is in flight
 let pendingFrame = null;     // latest frame captured while busy — flushed when free
 let queuedPrompt = null;     // user message spoken/typed while busy — flushed when free
 let lastSentFrame = null;    // grayscale sample of the last frame actually sent (diff gate)
+// What the server told us the NEXT tick capture should be. It works a frame
+// ahead because resolution thrown away here can never be recovered server-side.
+let frameDetail = 'coarse';
 
 const $ = (id) => document.getElementById(id);
 const video = $('camera-video');
@@ -76,9 +83,13 @@ function stopCamera() {
   $('tick-btn').disabled = true;
 }
 
-function captureFrame() {
+// `detail` is explicit at every call site rather than read from the global:
+// ticks follow the server's echo, but a user turn always gets a full-resolution
+// frame — you asked, you get the good look — same rule as v1.
+function captureFrame(detail) {
   if (!stream || video.videoWidth === 0) return null;
-  const scale = Math.min(1, MAX_FRAME_DIM / Math.max(video.videoWidth, video.videoHeight));
+  const dim = FRAME_DIM[detail] || FRAME_DIM.coarse;
+  const scale = Math.min(1, dim / Math.max(video.videoWidth, video.videoHeight));
   const canvas = document.createElement('canvas');
   canvas.width = Math.round(video.videoWidth * scale);
   canvas.height = Math.round(video.videoHeight * scale);
@@ -141,7 +152,7 @@ async function onTick() {
     scheduleTick();
     return;
   }
-  const frame = captureFrame();
+  const frame = captureFrame(frameDetail);
   if (!frame) { scheduleTick(); return; }
   if (busy) {
     pendingFrame = { frame, sample };  // keep only the latest; flushed when free
@@ -164,11 +175,13 @@ async function sendTick(frame, sample) {
     const data = await resp.json();
     if (data.skipped) { setStatus('tick throttled by server'); return; }
     lastSentFrame = sample;
+    if (data.frame_detail) frameDetail = data.frame_detail;
     if (data.caption) addCaptionDot(data.caption);
     (data.triggers || []).forEach((t) => addMsg('trigger', `⚡ ${t}`));
     if (data.text) { addMsg('assistant', data.text); speak(data.text); }
     updateDoc(data.doc);
-    setStatus(data.text ? 'spoke' : 'silent tick');
+    const lens = frameDetail === 'fine' ? ' · 🔍 looking closely' : '';
+    setStatus((data.text ? 'spoke' : 'silent tick') + lens);
   } catch (e) {
     setStatus(`tick failed: ${e.message}`);
   } finally {
@@ -220,7 +233,9 @@ async function deliverMessage(prompt) {
   setStatus('thinking…');
   try {
     const body = { prompt };
-    const frame = captureFrame();  // auto-attach current frame when camera is on
+    // Always fine: a question the user actually asked deserves the best frame,
+    // regardless of what the tick loop is currently sized at.
+    const frame = captureFrame('fine');
     if (frame) body.image_base64 = frame;
     const resp = await fetch('/v2/chat', {
       method: 'POST',
@@ -228,11 +243,12 @@ async function deliverMessage(prompt) {
       body: JSON.stringify(body),
     });
     const data = await resp.json();
+    if (data.frame_detail) frameDetail = data.frame_detail;
     if (data.caption && $('show-captions').checked) addCaptionDot(data.caption);
     addMsg('assistant', data.text || '(no reply)');
     if (data.text) speak(data.text);
     updateDoc(data.doc);
-    setStatus('idle');
+    setStatus(frameDetail === 'fine' ? 'idle · 🔍 looking closely' : 'idle');
   } catch (e) {
     addMsg('system', `Chat failed: ${e.message}`);
     setStatus('idle');
