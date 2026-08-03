@@ -2,101 +2,46 @@
 world-doc tick system (v2)
 ← classic UI
 Reset
-🎥 Stop camera
+Camera off — start it to begin ticking.
+🎥 Start camera
 ▶ Start ticks
 every
 4s
 sensitivity
 show captions
-hey chitragupt how are you
-15:32:45
-👁 No meaningful changes compared to the previous frame. Scene remains static: sink on left with black-handled tool resting on rim; blue dish soap bottle near sink edge; oil bottle, tissue box, and orange cleaner behind it; blue textured cup on counter far from sink.
-Hey! Doing well — just keeping an eye on the kitchen as always. Sink's clear, soap's by the edge, oil and the orange cleaner are still tucked behind. What's on your mind — cooking something, or just checking in?
-15:32:47
-I want to cook dal and I need your help I have already cooked the dial I just need you to help me with processing it to make the dull complete
-15:33:18
-👁 A set of keys attached to a card keychain has appeared in the lower-left foreground. The blue dish soap bottle and oil bottle remain in place in the upper-left background. The camera angle is now oriented near the bottom-left corner of the counter.
-Got it — dal's already cooked, we just need the **tadka (tempering)** to finish it. Here's the plan:
-15:33:58
-I cannot see the plan
-15:34:13
-👁 The camera view has completely shifted downward and away from the kitchen counter, losing sight of the keys and bottles. The frame now shows a top-down perspective of the light gray wood-effect floor. Two bare feet have appeared at the bottom edge of the frame, standing still. No kitchen activity is currently visible in this frame.
-No problem — here's the full plan for finishing the dal:
-
-**Step 1 — Gather** (mostly done already): oil/ghee, cumin, mustard seeds, hing, turmeric, chili powder, garlic, onion, tomato, curry leaves, cilantro, salt.
-
-**Step 2 — Heat the tadka pan**: oil/ghee on medium, then cumin + mustard seeds until they splutter.
-
-**Step 3 — Aromatics**: add hing, curry leaves, then garlic + onion. Sauté 2–3 min.
-
-**Step 4 — Tomato + spices**: add chopped tomato, turmeric, chili, salt. Cook 3–4 min until oil separates.
-
-**Step 5 — Simmer**: add the cooked dal + water. Simmer 5–10 min.
-
-**Step 6 — Finish**: garam masala + fresh cilantro, then serve.
-
-➡️ **What to do first:** get the tadka pan heating with the oil, and have cumin + mustard seeds ready to drop in.
-
-I notice you've stepped away from the counter (I can see your feet on the floor) — take your time, and when you're back at the stove just say the word and I'll keep pace with you.
-15:34:18
-can you help me find onion and garlic
-15:34:44
-👁 The camera perspective has shifted closer to the floor surface in front of the white cabinet baseboards. The bare feet that were previously at the bottom edge have now moved out of the frame entirely. No other objects or kitchen activity are visible in the field of view.
-Let me clear those premature timer reminders first — nothing's on the stove yet.
-15:34:54
-can you help me with finding onion tomatoes and garlic
-15:35:10
-👁 The camera pulls back and tilts upward, widening the field of view to reveal the top portion of the storage crate. No new food items or hands enter the frame.
-I can see the storage crate in front of you now — that's the most likely spot. Could you lift the lid or open it up? I'll watch the frame and point out the onions, tomatoes, and garlic as soon as they're in view.
-15:35:14
-👁 The camera pushes in close to the pressure cooker, cutting out the surrounding counter space to focus solely on the cooking vessel. The silver lid remains detached and positioned just behind the pot's rim. Inside, the dal is simmering in the open pot. No hands or new seasoning ingredients have entered the frame to begin the tadka.
-👁 The camera has moved away from the pressure cooker and now focuses on a wooden pantry shelf. A bag of red onions and a bulb of garlic emerge in the frame, resting on the shelf. The bag displays a label reading "CHINESE ONIONS," identifying the ingredient for the tadka.
-👁 The camera has tilted downward to reveal a net of yellow potatoes on the lower shelf beneath the bun. The bag of red onions in the wooden bowl reads "1kg," and a bulb of garlic rests beside it. Scattered red onion skins have accumulated on the floor below. The scene focuses on confirming the ingredient inventory for the tadka.
-👁 The camera pulls back upwards and zooms out, moving away from the wooden bowl of onions. The red onion mesh bag in the wooden bowl is now partially cut off at the top of the frame. The view expands further to show more of the lower shelf and the wooden floor, distancing the ingredients. No hands enter the frame.
-👁 The camera angle shifts significantly to the right and moves closer to the pot, framing the dal more centrally while cutting off the left side of the counter. Two red tomatoes are visible resting on the counter surface just to the left of the pot, marked for the tadka ingredients. A set of keys and a service card lie on the counter in the immediate foreground. The bottle of oil and the box in the background are pushed to the far left edge due to the zoom.
-did you find it
-15:36:50
-👁 No change occurred since the previous frame. All tadka ingredients and tools remain stationary on the counter.
-Yes — found all three! Here's exactly where they are:
-
-- **Onions + garlic:** on the wooden pantry shelf (red onions in the wooden bowl, garlic bulb right beside them)
-- **Tomatoes:** on the kitchen counter, just left of the pressure cooker holding the dal
-
-Grab the garlic and one onion from the shelf, and the two tomatoes from the counter — then bring them over to the stove and we'll start the tadka.
-15:37:06
-idle
+hi chitragupt
+17:44:06
+Hi! Chitragupta here, ready to keep track of whatever's going on. What are we up to?
+17:44:18
+I want to make chole bhature can you help me with that I don't want to make I just want to make chole because I'm typing
+17:44:41
+(no reply — something went wrong, try again)
+17:45:21
+what happened
+17:45:48
+You said you wanted chole bhature, then quickly corrected — only the chole, no bhature. So I've started a chole plan. The only thing that matters right now: do you have **dried chickpeas** or **canned**? If dried and unsoaked, this is a tomorrow dish (they need to soak overnight). Show me or tell me which you have and I'll take it from there.
+17:45:53
+I have already processed the Sholay Sholay in the pressure cooker I need next steps on what to do
+17:46:24
+thinking…
 🎤
 Talk to Chitragupta… (current frame auto-attached when camera is on)
 Send
 🔊
 World document
 ↻
-[Current time: 13:38:10]
+[Current time: 17:46:07]
 
-[Goal] Finish cooked dal with tadka
+[Goal] Chole (chickpea curry)
 
 [Tasks]
-[~] Gather tadka ingredients: oil/ghee, cumin, mustard seeds, asafoetida, turmeric, chili powder, garlic, onion, tomato, curry leaves, cilantro, salt
-[ ] Heat oil/ghee, splutter cumin + mustard seeds
-[ ] Add asafoetida, curry leaves, garlic + onion, sauté 2-3 min
-[ ] Add tomato + spices (turmeric, chili, salt), cook until oil separates ~3-4 min
-[ ] Add cooked dal + water, simmer 5-10 min
-[ ] Finish with garam masala + cilantro, serve
+[~] Check chickpea situation: dried (needs overnight soak) vs canned (fast)  (It's evening — dried chickpeas unsoaked means chole is a tomorrow dish)
+[ ] Soak dried chickpeas overnight in water (8+ hrs)
+[ ] Pressure cook soaked chickpeas ~20 min (with a black tea bag for color)
+[ ] Prep: chop onions, tomatoes, ginger-garlic, green chili
+[ ] Cook masala: sauté onions, add ginger-garlic, tomatoes + spices (cumin, coriander, turmeric, chole masala, amchur)
+[ ] Add chickpeas + some cooking water, simmer 10-15 min, mash a few
+[ ] Garnish: coriander, ginger juliennes, green chili; serve
 
-[Known environment facts]
-- (13:35:45) Red onions (bag labeled "CHINESE ONIONS") and a garlic bulb are kept on the wooden pantry shelf.
-- (13:35:59) A net of yellow potatoes is kept on the lower pantry shelf, beneath the bun (red onions in a wooden bowl and garlic bulb are on the shelf above).
-- (13:36:45) (13:36:41) Two red tomatoes are on the kitchen counter, just left of the pressure cooker with the dal.
-
-[Recent observations]
-- 13:32:46: No meaningful changes compared to the previous frame. Scene remains static: sink on left with black-handled tool resting on rim; blue dish soap bottle near sink edge; oil bottle, tissue box, and orange cleaner behind it; blue textured cup on counter far from sink.
-- 13:33:19: A set of keys attached to a card keychain has appeared in the lower-left foreground. The blue dish soap bottle and oil bottle remain in place in the upper-left background. The camera angle is now oriented near the bottom-left corner of the counter.
-- 13:34:14: The camera view has completely shifted downward and away from the kitchen counter, losing sight of the keys and bottles. The frame now shows a top-down perspective of the light gray wood-effect floor. Two bare feet have appeared at the bottom edge of the frame, standing still. No kitchen activity is currently visible in this frame.
-- 13:34:45: The camera perspective has shifted closer to the floor surface in front of the white cabinet baseboards. The bare feet that were previously at the bottom edge have now moved out of the frame entirely. No other objects or kitchen activity are visible in the field of view.
-- 13:35:11: The camera pulls back and tilts upward, widening the field of view to reveal the top portion of the storage crate. No new food items or hands enter the frame.
-- 13:35:33: The camera pushes in close to the pressure cooker, cutting out the surrounding counter space to focus solely on the cooking vessel. The silver lid remains detached and positioned just behind the pot's rim. Inside, the dal is simmering in the open pot. No hands or new seasoning ingredients have entered the frame to begin the tadka.
-- 13:35:41: The camera has moved away from the pressure cooker and now focuses on a wooden pantry shelf. A bag of red onions and a bulb of garlic emerge in the frame, resting on the shelf. The bag displays a label reading "CHINESE ONIONS," identifying the ingredient for the tadka.
-- 13:35:56: The camera has tilted downward to reveal a net of yellow potatoes on the lower shelf beneath the bun. The bag of red onions in the wooden bowl reads "1kg," and a bulb of garlic rests beside it. Scattered red onion skins have accumulated on the floor below. The scene focuses on confirming the ingredient inventory for the tadka.
-- 13:36:18: The camera pulls back upwards and zooms out, moving away from the wooden bowl of onions. The red onion mesh bag in the wooden bowl is now partially cut off at the top of the frame. The view expands further to show more of the lower shelf and the wooden floor, distancing the ingredients. No hands enter the frame.
-- 13:36:41: The camera angle shifts significantly to the right and moves closer to the pot, framing the dal more centrally while cutting off the left side of the counter. Two red tomatoes are visible resting on the counter surface just to the left of the pot, marked for the tadka ingredients. A set of keys and a service card lie on the counter in the immediate foreground. The bottle of oil and the box in the background are pushed to the far left edge due to the zoom.
-- 13:37:04: No change occurred since the previous frame. All tadka ingredients and tools remain stationary on the counter.
+[Open expectations]
+- (e5c9da02, normal) See the chickpeas the user has — a bag of dried white chickpeas (kabuli chana/chole) or a can of chickpeas. Read any label text. — fires when: Is there a bag or can of chickpeas (chole / kabuli chana / garbanzo beans) visible — dried beans or a tin? Read any label text.

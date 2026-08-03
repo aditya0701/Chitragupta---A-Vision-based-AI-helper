@@ -69,6 +69,22 @@ def _repair_dangling_plan(text: str, tool_results: list[dict], doc: dict) -> str
     return f"{text.rstrip(':-–— \t')}: {len(todo)} steps. First: {todo[0]['content']}."
 
 
+def _fallback_from_work(tool_results: list[dict], doc: dict) -> str:
+    """Last resort when a user turn still has no words after the retry.
+
+    Reporting "something went wrong" beside a correctly built plan is worse
+    than saying nothing useful — it tells the user to redo work that already
+    succeeded, and they have no way to see the doc to know better. If the turn
+    demonstrably did something, say what.
+    """
+    if not any(r["tool"] in ("update_tasks", "mark_task") for r in tool_results or []):
+        return ""
+    todo = [t for t in doc["tasks"] if t["status"] in ("pending", "in_progress")]
+    if not todo:
+        return ""
+    return f"Plan updated — {len(todo)} steps left. Next: {todo[0]['content']}."
+
+
 class LiveAgent:
     def __init__(self, backend: VisionBackend):
         self.backend = backend
@@ -108,9 +124,25 @@ class LiveAgent:
                             "needs_followup": tool.needs_followup})
         return results
 
-    async def _reason(self, prompt: str, think: bool, history: Optional[list[dict]] = None):
+    async def _reason(self, prompt: str, think: bool, history: Optional[list[dict]] = None,
+                      require_text: bool = False):
         """One reasoning call + tool execution + at most one follow-up call
-        (only when a tool surfaced new information), + one truncation retry."""
+        (only when a tool surfaced new information), + one truncation retry.
+
+        `require_text` is the difference between a tick and a user turn. On a
+        tick, empty text IS the answer — silence is the default and most ticks
+        should produce none. On a user turn it never is: the user asked a
+        question and is owed words.
+
+        Without it, a turn that did all its work through tools and said nothing
+        reported itself as a failure. Observed live: asked for help with chole,
+        the model called update_tasks and set_expectation, wrote a correct
+        seven-step plan into the doc, emitted no prose — and the user saw "(no
+        reply — something went wrong, try again)" next to a perfectly built
+        plan. Neither update_tasks nor set_expectation is flagged
+        needs_followup (deliberately: they surface no new information the model
+        doesn't already have), so nothing ever asked it to speak.
+        """
         response = await self.backend.chat(
             image_base64=None, prompt=prompt,
             conversation_history=history, think=think,
@@ -128,14 +160,26 @@ class LiveAgent:
         text = (response.text or "").strip()
 
         followup_results = [r for r in tool_results if r.get("needs_followup")]
+        # A user turn that did work but produced no words is a failure, not a
+        # silence — go back once for the words, using every result as context.
+        speechless = require_text and tool_results and not text
+        if speechless and not followup_results:
+            followup_results = tool_results
+
         if followup_results:
             results_text = "\n\n".join(
                 f"Result of {r['tool']}:\n{r['result']}" for r in followup_results
             )
-            followup_prompt = (
-                f"{prompt}\n\n[You called tools; here are the results — use them to give "
-                f"your final answer now, without calling those tools again]\n{results_text}"
+            instruction = (
+                "[You called tools but said nothing to the user, who is waiting on an "
+                "answer and cannot see tool calls or the task list. Here is what you "
+                "just did — now SAY it, briefly and out loud. Do not call those tools "
+                "again.]"
+                if speechless else
+                "[You called tools; here are the results — use them to give your final "
+                "answer now, without calling those tools again]"
             )
+            followup_prompt = f"{prompt}\n\n{instruction}\n{results_text}"
             response2 = await self.backend.chat(
                 image_base64=None, prompt=followup_prompt,
                 conversation_history=history, think=False,
@@ -413,10 +457,12 @@ class LiveAgent:
                 text, tool_results, response = await self._reason(
                     built, think=should_think(prompt),
                     history=self.memory.get_history(),
+                    require_text=True,  # a user turn is never allowed to be silent
                 )
                 text = _repair_dangling_plan(text, tool_results, doc)
                 if not text:
-                    text = "(no reply — something went wrong, try again)"
+                    text = (_fallback_from_work(tool_results, doc)
+                            or "(no reply — something went wrong, try again)")
 
                 self.memory.add("user", prompt)
                 self.memory.add("assistant", text)
