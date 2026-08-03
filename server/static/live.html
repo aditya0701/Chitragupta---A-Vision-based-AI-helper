@@ -24,7 +24,18 @@
     #left { flex: 1.2; border-right: 1px solid #262c38; }
     #right { flex: 1; }
 
-    #camera-wrap { background: #000; position: relative; }
+    /* Capture feedback. inset box-shadow rather than a border so the frame
+       flash never reflows the video. Each colour is a distinct event, so a
+       glance across the kitchen tells you what the loop just did. */
+    #camera-wrap {
+      background: #000; position: relative;
+      box-shadow: inset 0 0 0 4px transparent;
+      transition: box-shadow 140ms ease-out;
+    }
+    #camera-wrap.cap-coarse { box-shadow: inset 0 0 0 4px #2d6cd6; }  /* sent, 640  */
+    #camera-wrap.cap-fine   { box-shadow: inset 0 0 0 4px #e8a11c; }  /* sent, 1024 */
+    #camera-wrap.cap-user   { box-shadow: inset 0 0 0 4px #35c26a; }  /* your turn  */
+    #camera-wrap.cap-skip   { box-shadow: inset 0 0 0 4px #39445a; }  /* diff gate  */
     #camera-video { width: 100%; max-height: 34dvh; display: block; object-fit: contain; }
     #camera-off { padding: 24px; text-align: center; color: #7c8598; font-size: 13px; }
     #controls {
@@ -40,6 +51,20 @@
     button.active { background: #1f4b8f; border-color: #2d6cd6; }
     #controls label { color: #98a1b3; display: flex; gap: 5px; align-items: center; }
     #controls input[type=range] { width: 80px; }
+    /* Persistent state, as opposed to the border which shows events. */
+    #tier-badge {
+      margin-left: auto; font-size: 11px; padding: 3px 8px; border-radius: 999px;
+      border: 1px solid #333c4e; color: #98a1b3; white-space: nowrap;
+      transition: background 200ms ease, color 200ms ease, border-color 200ms ease;
+    }
+    #tier-badge.fine { background: #4a3708; border-color: #e8a11c; color: #f5c65c; }
+
+    #legend {
+      display: flex; gap: 12px; padding: 4px 12px; background: #12151c;
+      border-bottom: 1px solid #262c38; font-size: 10px; color: #7c8598;
+    }
+    #legend span { display: flex; align-items: center; gap: 4px; }
+    #legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
 
     #transcript { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
     .msg { max-width: 88%; padding: 8px 12px; border-radius: 10px; font-size: 13px; line-height: 1.45; white-space: pre-wrap; }
@@ -95,6 +120,13 @@
         <label>every <input type="range" id="interval" min="2" max="15" value="4"><span id="interval-val">4s</span></label>
         <label>sensitivity <input type="range" id="sensitivity" min="1" max="20" value="6"></label>
         <label><input type="checkbox" id="show-captions"> show captions</label>
+        <span id="tier-badge" title="Capture resolution for the next tick">640 · coarse</span>
+      </div>
+      <div id="legend">
+        <span><i style="background:#2d6cd6"></i>sent 640</span>
+        <span><i style="background:#e8a11c"></i>sent 1024</span>
+        <span><i style="background:#35c26a"></i>your turn</span>
+        <span><i style="background:#39445a"></i>skipped</span>
       </div>
       <div id="transcript"></div>
       <div id="status-line">idle</div>

@@ -48,6 +48,37 @@ function addCaptionDot(caption) {
 
 function setStatus(text) { $('status-line').textContent = text; }
 
+// ── Capture feedback ─────────────────────────────────────────────────────────
+// Two separate signals, deliberately: the badge is STATE (what the next capture
+// will be), the border flash is an EVENT (a frame just left, or didn't). The
+// tick loop is otherwise completely invisible — you cannot tell a working gate
+// from a broken camera, or a coarse tick from a fine one, without reading logs.
+
+let flashTimer = null;
+const CAP_CLASSES = ['cap-coarse', 'cap-fine', 'cap-user', 'cap-skip'];
+
+function flashCapture(kind) {
+  const wrap = $('camera-wrap');
+  wrap.classList.remove(...CAP_CLASSES);
+  // Force a reflow so back-to-back flashes of the same kind still re-trigger
+  // the transition instead of looking like one long hold.
+  void wrap.offsetWidth;
+  wrap.classList.add(`cap-${kind}`);
+  clearTimeout(flashTimer);
+  flashTimer = setTimeout(() => wrap.classList.remove(...CAP_CLASSES),
+                          kind === 'skip' ? 220 : 450);
+}
+
+function updateTierBadge() {
+  const badge = $('tier-badge');
+  const fine = frameDetail === 'fine';
+  badge.textContent = fine ? '1024 · fine 🔍' : '640 · coarse';
+  badge.classList.toggle('fine', fine);
+  badge.title = fine
+    ? 'Looking closely — a watch is open, so frames go at full resolution to read labels'
+    : 'Normal watching — 640px frames, ~28% cheaper per tick';
+}
+
 function updateDoc(rendered) {
   if (rendered != null) $('doc-panel').textContent = rendered || '(empty)';
 }
@@ -148,6 +179,7 @@ async function onTick() {
   const sample = graySample();
   const threshold = Number($('sensitivity').value);
   if (lastSentFrame && meanDelta(sample, lastSentFrame) < threshold) {
+    flashCapture('skip');   // the gate working IS the main cost control — show it
     setStatus('tick skipped — scene unchanged');
     scheduleTick();
     return;
@@ -165,7 +197,8 @@ async function onTick() {
 
 async function sendTick(frame, sample) {
   busy = true;
-  setStatus('tick → vision + reasoning…');
+  flashCapture(frameDetail === 'fine' ? 'fine' : 'coarse');
+  setStatus(`tick → vision + reasoning… (${FRAME_DIM[frameDetail] || FRAME_DIM.coarse}px)`);
   try {
     const resp = await fetch('/v2/tick', {
       method: 'POST',
@@ -175,7 +208,7 @@ async function sendTick(frame, sample) {
     const data = await resp.json();
     if (data.skipped) { setStatus('tick throttled by server'); return; }
     lastSentFrame = sample;
-    if (data.frame_detail) frameDetail = data.frame_detail;
+    if (data.frame_detail) { frameDetail = data.frame_detail; updateTierBadge(); }
     if (data.caption) addCaptionDot(data.caption);
     (data.triggers || []).forEach((t) => addMsg('trigger', `⚡ ${t}`));
     if (data.text) { addMsg('assistant', data.text); speak(data.text); }
@@ -230,6 +263,7 @@ async function sendMessage() {
 
 async function deliverMessage(prompt) {
   busy = true;
+  if (stream) flashCapture('user');
   setStatus('thinking…');
   try {
     const body = { prompt };
@@ -243,7 +277,7 @@ async function deliverMessage(prompt) {
       body: JSON.stringify(body),
     });
     const data = await resp.json();
-    if (data.frame_detail) frameDetail = data.frame_detail;
+    if (data.frame_detail) { frameDetail = data.frame_detail; updateTierBadge(); }
     if (data.caption && $('show-captions').checked) addCaptionDot(data.caption);
     addMsg('assistant', data.text || '(no reply)');
     if (data.text) speak(data.text);
@@ -414,6 +448,7 @@ $('tts-btn').addEventListener('click', toggleTts);
 
 initTts();
 initVoiceInput();
+updateTierBadge();
 
 setInterval(pollTriggers, POLL_INTERVAL_MS);
 refreshDoc();
