@@ -77,26 +77,9 @@ def build_tick_vision_prompt(
             "imagined when this was written. Describe the arrangement in front of you on "
             "its own terms.",
             "",
-            "Do NOT say whether any of it is safe, correct, proper, careful, stable or "
-            "fine — that judgement belongs to the reader and a wrong reassurance from "
-            "you is the most damaging thing you can write. Describe it; they decide.",
-            "",
-            # Observed live: given a pot whose handle plainly projected past the
-            # counter edge, the model wrote "the pot is stable and fully on the
-            # hob, no spillage or overhang". Banning positive verdicts is not
-            # enough — the same reassurance arrives as a confident denial, and
-            # an all-clear nobody checked is worse than no answer at all.
-            "That ban covers NEGATIVE claims too, which are the easier trap. Never write "
-            "'no spillage', 'nothing is overhanging', 'no hazards', 'all clear' or "
-            "similar. Absence is something you usually cannot establish from one frame. "
-            "Report only what you can positively SEE, and where you genuinely cannot tell "
-            "— the angle is wrong, it is out of frame, it is blurred or occluded — say "
-            "exactly that instead. 'Cannot see the pot handle from this angle' is a good "
-            "answer. 'The handle is not overhanging' is a claim you have to earn.",
-            "",
-            "Describe only what is actually in the picture. Do not add a hand, a tool, or "
-            "an action because the task implies one should be there — if no hand is "
-            "visible, say no hand is visible.",
+            "Do NOT say whether any of it is safe, correct, proper, careful or fine — "
+            "that judgement belongs to the reader and a wrong reassurance from you is "
+            "the most damaging thing you can write. Describe it; they decide.",
             "",
             "Then, separately: if ANYTHING ELSE in the frame looks out of place, "
             "unstable, spilling, overheating, about to fall or be knocked over, left "

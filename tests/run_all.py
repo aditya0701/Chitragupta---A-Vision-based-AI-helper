@@ -25,6 +25,7 @@ PY = [
     ("search exclusion   ", "t_exclude.py"),
     ("silence detection  ", "t_silence.py"),
     ("apology loop       ", "t_apology.py"),
+    ("v2 live prompts    ", "t_live_prompts.py"),
 ]
 
 results = []

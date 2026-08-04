@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import threading
 import time
 import uuid
@@ -165,41 +164,6 @@ def touch_task(doc: dict, ref: str):
 
 # ── Expectations ─────────────────────────────────────────────────────────────
 
-_WORD_RE = re.compile(r"[a-z0-9]+")
-# Words that carry no distinguishing signal in a watch question — they appear in
-# nearly every one, so counting them makes unrelated watches look similar.
-_STOPWORDS = frozenset("""
-is are the a an and or of to in on at it its be being been has have had
-that this these those with without for from by as not no if any there
-""".split())
-
-
-def _keywords(text: str) -> set:
-    return {w for w in _WORD_RE.findall((text or "").lower())
-            if w not in _STOPWORDS and len(w) > 2}
-
-
-def _find_similar_condition(doc: dict, condition: str, threshold: float = 0.6) -> Optional[dict]:
-    """An open event watch asking substantially the same thing.
-
-    Jaccard overlap on content words rather than exact match, because the
-    duplicates that actually occur are rephrasings, not copies.
-    """
-    new = _keywords(condition)
-    if len(new) < 3:
-        return None
-    for exp in open_expectations(doc):
-        if exp["anchor"] != "event" or not exp.get("condition"):
-            continue
-        old = _keywords(exp["condition"])
-        if not old:
-            continue
-        overlap = len(new & old) / len(new | old)
-        if overlap >= threshold:
-            return exp
-    return None
-
-
 def add_expectation(
     doc: dict,
     description: str,
@@ -221,19 +185,18 @@ def add_expectation(
     if priority not in VALID_PRIORITIES:
         priority = "normal"
 
-    # Reject a watch that duplicates one already open. Seen live on an
-    # oil-filter plan: the model registered nine watches of which four were
-    # restatements ("Car is safe to work under" / "The car should be settled
-    # firmly on both ramps..."), because a web_search follow-up made it re-plan
-    # from scratch and re-record everything. Duplicates are not cosmetic — every
-    # open watch is a question in every vision prompt for the rest of the
-    # session, so each one is a permanent per-tick tax.
-    if anchor == "event" and condition:
-        dup = _find_similar_condition(doc, condition)
-        if dup:
-            return (f"Already watching that — '{dup['description']}' (id {dup['id']}) "
-                    f"covers it. Not adding a duplicate.")
-
+    # No duplicate detection here, deliberately. A Jaccard-overlap check was
+    # tried and removed: it failed in both directions. The duplicates that
+    # actually occurred were rephrasings sharing only ~19% of their words ("Car
+    # is safe to work under" vs "The car should be settled firmly on both
+    # ramps"), well under any usable threshold — while a threshold low enough
+    # to catch them merged genuinely distinct watches that differed only in the
+    # object ("is the 10mm socket seated" vs "the 12mm"). Silently dropping a
+    # watch the user is relying on is far worse than carrying a duplicate.
+    #
+    # The duplicate pressure it was built for is gone anyway: form and safety
+    # moved to set_vision_focus, which replaces rather than appends, and
+    # _vision_questions caps how many reach the camera per frame.
     task = find_task(doc, task_ref) if task_ref else None
     exp = {
         "id": uuid.uuid4().hex[:8],
