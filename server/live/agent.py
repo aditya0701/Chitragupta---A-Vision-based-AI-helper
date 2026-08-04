@@ -165,6 +165,24 @@ class LiveAgent:
                 tools=self._native_tools(),
             )
 
+        # A response with neither text nor tool calls is a failed call, not an
+        # answer — DeepSeek returns one intermittently. Observed twice while
+        # dumping prompts for a real oil-filter planning turn: once on the first
+        # call, once on the follow-up. Retry WITH tools, because the turn still
+        # needs to do its work; the text-only rescue further down cannot write a
+        # plan, so falling straight through to it loses the whole turn's tool
+        # calls and the user gets advice that never reaches the world document.
+        #
+        # Only on user turns. A tick may legitimately produce nothing, and
+        # retrying every silent tick would double the cost of the common case.
+        if require_text and not (response.text or "").strip() and not response.tool_calls:
+            logger.info("Empty reasoning response on a user turn — retrying once with tools")
+            response = await self.backend.chat(
+                image_base64=None, prompt=prompt,
+                conversation_history=history, think=False,
+                tools=self._native_tools(),
+            )
+
         tool_results = self._run_tool_calls(response.tool_calls)
         text = (response.text or "").strip()
 
@@ -186,7 +204,12 @@ class LiveAgent:
                 "again.]"
                 if speechless else
                 "[You called tools; here are the results — use them to give your final "
-                "answer now, without calling those tools again]"
+                "answer now, without calling those tools again. Anything you already "
+                "recorded is recorded: do NOT call update_tasks or set_expectation again "
+                "to restate a plan or a watch you just wrote, only if this result "
+                "genuinely changes it. Re-recording produces duplicate watches, and every "
+                "duplicate is a question asked on every frame for the rest of the "
+                "session.]"
             )
             followup_prompt = f"{prompt}\n\n{instruction}\n{results_text}"
             response2 = await self.backend.chat(
@@ -198,6 +221,35 @@ class LiveAgent:
             tool_results.extend(extra_results)
             if (response2.text or "").strip():
                 text = response2.text.strip()
+
+        # Last resort for a user turn: still no words after the follow-up.
+        #
+        # Reproduced live on "walk me through changing an oil filter": the model
+        # called web_search, the follow-up call came back completely empty, and
+        # the user got "(no reply — something went wrong)" for a turn that was
+        # working fine. Checking `speechless` before the follow-up is not
+        # enough, because a ReAct chain can spend both calls on tools.
+        #
+        # tools=None is the whole point. While tools are offered the model can
+        # always answer with another call instead of prose; taking them away
+        # leaves it nothing to reply with except words. Nothing here can loop —
+        # it is one call, and it cannot invoke anything.
+        if require_text and not text:
+            logger.info("User turn still speechless after follow-up — forcing a text-only reply")
+            done = "\n".join(f"- {r['tool']}: {str(r['result'])[:300]}" for r in tool_results)
+            final = await self.backend.chat(
+                image_base64=None,
+                prompt=(
+                    f"{prompt}\n\n[You have finished working. Here is what you did"
+                    f"{' — nothing yet' if not done else ''}:]\n{done}\n\n"
+                    "Now answer the user in plain speech. They are listening and cannot "
+                    "see any of the above. Do not call any tools — just say the answer."
+                ),
+                conversation_history=history, think=False, tools=None,
+            )
+            if (final.text or "").strip():
+                text = final.text.strip()
+                response = final
 
         for r in tool_results:
             r.pop("needs_followup", None)
@@ -234,15 +286,36 @@ class LiveAgent:
         has to make the drift visible. Here that pressure is a nudge in the tick
         prompt rather than a hard cutoff, because silently dropping a watch the
         user is still waiting on is the worse failure.
+
+        A full plan registers many watches — a real oil-filter turn produced
+        nine, covering steps from chocking the wheels to seating the new
+        gasket. Sending all of them every tick is wrong twice over: it is a
+        permanent per-tick token tax, and the vision model cannot answer nine
+        questions and describe the scene inside one reply, so the answers
+        truncate. Only watches relevant NOW are asked — the ones tied to a task
+        in progress, plus any not tied to a task, plus high-priority ones,
+        which are safety and must never wait their turn. Hard-capped after that.
         """
-        questions = []
+        in_progress = {t["id"] for t in doc["tasks"] if t["status"] == "in_progress"}
+        candidates = []
         for exp in worlddoc.open_expectations(doc):
-            if exp["anchor"] != "event" or not exp.get("condition"):
+            if exp["anchor"] != "event" or not (exp.get("condition") or "").strip():
                 continue
+            relevant = (
+                exp["priority"] == "high"
+                or not exp.get("task_id")
+                or exp["task_id"] in in_progress
+            )
+            if relevant:
+                candidates.append(exp)
+
+        # High priority first, so a safety question is never the one dropped.
+        candidates.sort(key=lambda e: 0 if e["priority"] == "high" else 1)
+        selected = candidates[: config.MAX_ACTIVE_BRIEFS]
+        for exp in selected:
             if charge:
                 exp["asks"] = int(exp.get("asks") or 0) + 1
-            questions.append(exp["condition"].strip())
-        return questions
+        return [e["condition"].strip() for e in selected]
 
     def _frame_detail(self, doc: dict) -> str:
         """What resolution the client should use for its NEXT capture.
@@ -294,7 +367,12 @@ class LiveAgent:
         lines = [
             PERSONA, "",
             worlddoc.render(doc), "",
-            f"[New camera observation, {worlddoc.fmt_ts(doc['recent'][-1]['ts'])}]",
+            # tick() always add_recent()s the caption before building this, so
+            # `recent` is never empty on the live path — but defaulting rather
+            # than indexing keeps harnesses and any future caller from
+            # exploding on an IndexError deep inside prompt assembly.
+            f"[New camera observation, "
+            f"{worlddoc.fmt_ts(doc['recent'][-1]['ts']) if doc['recent'] else 'now'}]",
             caption, "",
             "This is an automatic camera tick, NOT a user message. The user is busy; "
             "your default is silence.",
@@ -321,8 +399,11 @@ class LiveAgent:
             f"exactly {SILENT_MARKER} and nothing else. Speak when: an event-anchored "
             "expectation fired; something genuinely new and important for the active goal "
             "happened; the user is about to make a mistake; a trigger event below asks you "
-            "to; something is READY or DONE and they are looking elsewhere; or you can see "
-            "something they cannot because their attention is on their hands.",
+            "to; something is READY or DONE and they are looking elsewhere; you can see "
+            "something they cannot because their attention is on their hands; or a FORM "
+            "watch shows the technique going wrong in a way that will cost them the "
+            "outcome — say what to change in one sentence, once, and do not nag if they "
+            "carry on.",
             "",
             f"SAFETY OVERRIDE. If you can see a physical hazard — a hand in the path of a "
             f"blade, fingers extended flat under a knife, a pan handle turned out over the "
@@ -350,9 +431,13 @@ class LiveAgent:
             self._doc = doc
             try:
                 prev = worlddoc.last_caption(doc)
+                questions = self._vision_questions(doc)
                 vision_prompt = build_tick_vision_prompt(
-                    prev, self._goal_hint(doc) or None, self._vision_questions(doc))
-                caption = await self.backend.vision(image_base64, vision_prompt)
+                    prev, self._goal_hint(doc) or None, questions)
+                caption = await self.backend.vision(
+                    image_base64, vision_prompt,
+                    max_tokens=config.VISION_MAX_TOKENS
+                    + config.VISION_TOKENS_PER_QUESTION * len(questions))
 
                 batch = worlddoc.add_recent(doc, caption)
                 if batch:
@@ -457,19 +542,38 @@ class LiveAgent:
             "correction at face value; the user is standing in front of the object and "
             "you are looking at a description of a photograph of it.",
             "",
-            "When the task involves hands, blades, heat, power tools, or anything under "
-            "load, work out for YOURSELF what could hurt them or ruin the work, and set "
-            "event-anchored watches for those at priority='high' — in the same turn as "
-            "the plan, without being asked. You are the only one looking while their "
-            "attention is on the work.",
+            "Whenever the task is done BY HAND, work out for yourself what the camera "
+            "should be watching about how it is being done, and register those watches in "
+            "the same turn as the plan, without being asked. Two kinds, and most hands-on "
+            "tasks want both:",
             "",
-            "Those watches are questions put straight to the camera, so ask for OBSERVABLE "
-            "physical detail, never for a verdict. 'Is the hand not holding the knife "
-            "curled with fingertips tucked behind the knuckles, or extended flat toward "
-            "the blade?' — not 'is their grip safe?'. 'Is the pan handle turned inward "
-            "over the counter, or outward past the edge?' — not 'is the pan safe?'. The "
-            "camera reports what it sees; deciding whether that is dangerous is YOUR job, "
-            "and it cannot do it for you.",
+            "  SAFETY (priority='high') — what could injure them. Hand in the path of a "
+            "blade, pan handle projecting past the edge, a tool that will slip, something "
+            "under load about to let go.",
+            "",
+            "  FORM (priority='normal') — how well the technique is being executed, even "
+            "when nothing is remotely dangerous. This is most of the value and it is the "
+            "part that gets forgotten. A spanner pulled instead of pushed, or set at an "
+            "angle that will round the nut. A knife held with the index finger on the "
+            "spine instead of pinching the blade, giving uneven slices. Dough folded "
+            "rather than pushed. A screwdriver not seated square in the head. A pan "
+            "crowded so things steam instead of browning. Whisking from the wrist instead "
+            "of the elbow. None of these will hurt anyone; all of them decide whether the "
+            "job comes out well, and the user cannot see themselves doing them.",
+            "",
+            "Do not restrict this to cooking, and do not wait for the task to look "
+            "dangerous. Any time someone is gripping, turning, cutting, mixing, seating, "
+            "aligning or applying force to something, there is a right way to hold it that "
+            "they may not know — ask about that.",
+            "",
+            "Every watch is a question put straight to the camera, so ask for OBSERVABLE "
+            "physical detail, never for a verdict. 'Is the free hand curled with "
+            "fingertips tucked behind the knuckles, or extended flat toward the blade?' — "
+            "not 'is their grip safe?'. 'Is the spanner's handle being pushed away from "
+            "the body or pulled toward it, and is the jaw square on the flats or angled "
+            "across the corners?' — not 'are they using the spanner correctly?'. The "
+            "camera reports what it sees; judging whether that is dangerous, or merely "
+            "wrong, is YOUR job and it cannot do it for you.",
             "",
             "Only set a time-anchored expectation for a step the user has actually "
             "STARTED. Deadlines attached to steps they haven't begun go overdue while "
@@ -486,10 +590,14 @@ class LiveAgent:
                 caption = None
                 vision_prompt = None
                 if image_base64:
+                    questions = self._vision_questions(doc)
                     vision_prompt = build_tick_vision_prompt(
                         worlddoc.last_caption(doc), self._goal_hint(doc) or None,
-                        self._vision_questions(doc))
-                    caption = await self.backend.vision(image_base64, vision_prompt)
+                        questions)
+                    caption = await self.backend.vision(
+                    image_base64, vision_prompt,
+                    max_tokens=config.VISION_MAX_TOKENS
+                    + config.VISION_TOKENS_PER_QUESTION * len(questions))
                     batch = worlddoc.add_recent(doc, caption)
                     if batch:
                         await compaction.compact(self.backend, doc, batch)

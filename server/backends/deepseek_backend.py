@@ -48,6 +48,11 @@ class DeepSeekBackend(VisionBackend):
     SPLIT_VISION_REASONING = True  # Groq sees the image; DeepSeek never does
     SUPPORTS_NATIVE_TOOLS = True   # DeepSeek's API is OpenAI-compatible function calling
 
+    # Ceiling on a reasoning reply. A cap, not a charge — raising it costs
+    # nothing unless the model actually generates more. Subclasses raise it
+    # where the prompt is bigger; see DeepInfraHybridBackend.
+    REASONING_MAX_TOKENS = 2048
+
     def __init__(self):
         self.vision_client = AsyncGroq(api_key=settings.GROQ_API_KEY)
         self.vision_model = settings.GROQ_VISION_MODEL
@@ -115,7 +120,7 @@ class DeepSeekBackend(VisionBackend):
                 messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": prompt})
 
-        create_kwargs = dict(model=self.model, messages=messages, max_tokens=2048)
+        create_kwargs = dict(model=self.model, messages=messages, max_tokens=self.REASONING_MAX_TOKENS)
         if tools:
             create_kwargs["tools"] = tools
             create_kwargs["tool_choice"] = "auto"
@@ -171,7 +176,7 @@ class DeepSeekBackend(VisionBackend):
                 messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": prompt})
 
-        create_kwargs = dict(model=self.model, messages=messages, max_tokens=2048, stream=True)
+        create_kwargs = dict(model=self.model, messages=messages, max_tokens=self.REASONING_MAX_TOKENS, stream=True)
         if tools:
             create_kwargs["tools"] = tools
             create_kwargs["tool_choice"] = "auto"

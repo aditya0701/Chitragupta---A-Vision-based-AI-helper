@@ -48,6 +48,19 @@ class DeepInfraHybridBackend(DeepSeekBackend):
     inherited from DeepSeekBackend and stay correct: the vision/reasoning
     split is still real, and DeepSeek still supports native tool calling."""
 
+    # v2's planning prompt is ~1,000 tokens and should_think() returns True for
+    # anything over 80 characters, so a user turn thinks first and answers
+    # second. At the inherited 2048 the chain-of-thought consumed the entire
+    # budget and the call came back finish_reason=length with NO visible text
+    # and NO tool calls — three times in a row on one oil-filter planning turn.
+    # That is what made planning turns look broken: the model never reached the
+    # point of writing update_tasks or set_expectation, so nothing was ever
+    # recorded and the user got an error beside an empty document.
+    #
+    # A cap is not a charge; this only costs anything when the model genuinely
+    # needs the room. Scoped to the subclass so v1 keeps its own ceiling.
+    REASONING_MAX_TOKENS = 8192
+
     def __init__(self):
         # Builds the DeepSeek reasoning client (self.client / self.model) and
         # a Groq vision client we immediately replace — cheap, no network.

@@ -45,6 +45,17 @@ FOLLOWUP_WINDOW_S: int = int(os.getenv("LIVE_FOLLOWUP_WINDOW_S", "180"))
 # asking one stale question. At a 6s tick that is roughly four minutes.
 MAX_BRIEF_ASKS: int = int(os.getenv("LIVE_MAX_BRIEF_ASKS", "40"))
 
+# How many watches may be put to the camera on a single frame. A whole plan's
+# worth of watches is far too many to ask at once — they cannot all be answered
+# inside one vision reply, and every one is billed on every tick.
+MAX_ACTIVE_BRIEFS: int = int(os.getenv("LIVE_MAX_ACTIVE_BRIEFS", "4"))
+
+# Vision reply budget. The base covers the scene description; each question
+# needs room for its own answer line, or the answers truncate mid-block and the
+# description never arrives at all.
+VISION_MAX_TOKENS: int = int(os.getenv("LIVE_VISION_MAX_TOKENS", "200"))
+VISION_TOKENS_PER_QUESTION: int = int(os.getenv("LIVE_VISION_TOKENS_PER_QUESTION", "60"))
+
 # Server-side floor between accepted ticks, same safety-net role as
 # LIVE_FRAME_MIN_INTERVAL_S in the old system.
 TICK_MIN_INTERVAL_S: float = float(os.getenv("LIVE_TICK_MIN_INTERVAL_S", "1.5"))
