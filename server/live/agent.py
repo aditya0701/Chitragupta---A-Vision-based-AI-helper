@@ -99,6 +99,9 @@ class LiveAgent:
         self.backend = backend
         self._lock = asyncio.Lock()
         self._doc: Optional[dict] = None  # current turn's doc, seen by tools
+        # Set by chat() BEFORE it queues for the lock, so a tick already
+        # holding it can see that a person is waiting and get out of the way.
+        self._user_waiting = False
         self.tools = build_live_tools(lambda: self._doc)
         self.memory = ConversationMemory(max_turns=30)
         if not backend.SUPPORTS_NATIVE_TOOLS:
@@ -416,8 +419,20 @@ class LiveAgent:
             "to; something is READY or DONE and they are looking elsewhere; you can see "
             "something they cannot because their attention is on their hands; or a FORM "
             "watch shows the technique going wrong in a way that will cost them the "
-            "outcome — say what to change in one sentence, once, and do not nag if they "
-            "carry on.",
+            "outcome; or — most important of all — YOU ASKED THEM FOR SOMETHING AND IT "
+            "HAS NOW ARRIVED.",
+            "",
+            "That last one is not optional. If you asked them to show you a label, hold "
+            "something up, open a lid or move the camera, and this frame finally shows it, "
+            "SPEAK NOW: say what you can read or see, and what it means for the next step. "
+            "They are holding that thing in the air waiting for you. Staying silent after "
+            "you made a request is the single worst thing you can do here — they have no "
+            "way to know you saw it, and they will have to ask you whether you did. "
+            "Logging it silently to the document is NOT answering them.",
+            "",
+            "When a FORM watch shows the technique going wrong in a way that will cost "
+            "them the outcome, say what to change in one sentence, once, and do not nag "
+            "if they carry on.",
             "",
             f"SAFETY OVERRIDE. If you can see a physical hazard — a hand in the path of a "
             f"blade, fingers extended flat under a knife, a pan handle turned out over the "
@@ -457,6 +472,23 @@ class LiveAgent:
                 # This frame was captured at whatever the last response asked
                 # for; if the focus is the reason it was fine, charge it.
                 worlddoc.charge_focus_frame(doc)
+
+                # A person is mid-sentence and this tick is holding the lock
+                # they need. Keep the caption — it is already paid for and is
+                # the freshest thing we know — but skip the reasoning call and
+                # release, so the user waits ~1.5s for a vision call instead of
+                # 3-6s for a whole tick. Losing one tick's commentary costs
+                # nothing; a tick is disposable and a person waiting is not.
+                # Same "latest matters" logic as pendingFrame on the client.
+                if self._user_waiting:
+                    worlddoc.add_recent(doc, caption)
+                    worlddoc.save(doc)
+                    logger.info("Tick yielded mid-turn to a waiting user")
+                    return {"text": None, "caption": caption, "triggers": [],
+                            "tool_calls": [], "yielded": True,
+                            "model": None, "provider": None,
+                            "frame_detail": self._frame_detail(doc),
+                            "doc": worlddoc.render(doc)}
 
                 batch = worlddoc.add_recent(doc, caption)
                 if batch:
@@ -610,6 +642,15 @@ class LiveAgent:
         return "\n".join(lines)
 
     async def chat(self, prompt: str, image_base64: Optional[str] = None) -> dict:
+        # Announce before queueing, not after acquiring — the whole point is
+        # for a tick that already holds the lock to notice and yield.
+        self._user_waiting = True
+        try:
+            return await self._chat_locked(prompt, image_base64)
+        finally:
+            self._user_waiting = False
+
+    async def _chat_locked(self, prompt: str, image_base64: Optional[str] = None) -> dict:
         async with self._lock:
             doc = worlddoc.load()
             self._doc = doc

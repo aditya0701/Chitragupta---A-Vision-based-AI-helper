@@ -185,11 +185,17 @@ async function startCamera() {
   // anyway and there is otherwise no way to tell that it did.
   video.addEventListener('loadedmetadata', () => {
     const w = video.videoWidth, h = video.videoHeight;
-    const ratio = (w / h).toFixed(2);
-    const shape = Math.abs(w / h - 4 / 3) < 0.05 ? '4:3'
-                : Math.abs(w / h - 16 / 9) < 0.05 ? '16:9 (asked for 4:3)'
-                : `${ratio}:1`;
-    addMsg('system', `Camera: ${w}×${h} — ${shape}`);
+    // Compare on the LONG side over the short side, so a phone held upright
+    // isn't misreported. A portrait 960x1280 is a 4:3 sensor readout rotated,
+    // not some odd shape — the first version printed it as "0.75:1", which
+    // looked like the aspect request had failed when it had actually worked.
+    const long = Math.max(w, h), short = Math.min(w, h);
+    const r = long / short;
+    const portrait = h > w ? ' portrait' : '';
+    const shape = Math.abs(r - 4 / 3) < 0.05 ? `4:3${portrait}`
+                : Math.abs(r - 16 / 9) < 0.05 ? `16:9${portrait} (asked for 4:3)`
+                : `${r.toFixed(2)}:1${portrait}`;
+    addMsg('system', `Camera: ${w}×${h} — ${shape}, capturing ${captureDims(frameDetail)}`);
     updateTierBadge();
   }, { once: true });
 }
@@ -257,7 +263,12 @@ function stopTicks() {
   clearTimeout(tickTimer);
   $('tick-btn').textContent = '▶ Start ticks';
   $('tick-btn').classList.remove('active');
-  setStatus('idle');
+  // Only claim idle if nothing is actually in flight. Stopping ticks or the
+  // camera used to overwrite "thinking…" with "idle" while a chat request was
+  // still running, which reads as though the turn was cancelled — it never
+  // was, and the reply still arrives. Toggling a control must not narrate
+  // someone else's request.
+  if (!busy) setStatus('idle');
 }
 
 function scheduleTick() {
@@ -299,6 +310,14 @@ async function sendTick(frame, sample) {
     });
     const data = await resp.json();
     if (data.skipped) { setStatus('tick throttled by server'); return; }
+    // The server dropped this tick's reasoning because a user turn was
+    // waiting. Keep the caption, say nothing — it is not a silent tick.
+    if (data.yielded) {
+      if (data.caption) addCaptionDot(data.caption);
+      updateDoc(data.doc);
+      setStatus('tick yielded — answering you first');
+      return;
+    }
     lastSentFrame = sample;
     if (data.frame_detail && data.frame_detail !== frameDetail) {
       frameDetail = data.frame_detail; updateTierBadge(); logEvent('tier', frameDetail);
