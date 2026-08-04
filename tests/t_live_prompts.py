@@ -177,9 +177,11 @@ print("\n[7] REASONING PROMPTS")
 d = doc_with_focus()
 tick = A._build_tick_prompt(d, "Right hand on a filter wrench.", events=[])
 check("caption is included", "Right hand on a filter wrench." in tick)
-check("silence is the default", SILENT_MARKER in tick)
-check("urgent override documented", URGENT_MARKER in tick)
-check("may speak when something is READY/DONE", "READY or DONE" in tick)
+# Speech rules now live in stage 2 (see [7b]) — the tick prompt is bookkeeping only.
+check("tick prompt no longer decides speech", SILENT_MARKER not in tick)
+check("urgent handling moved out of the tick prompt", URGENT_MARKER not in tick)
+check("READY/DONE licence moved to the speech step",
+      "ready or done" in A._build_speech_prompt(d, "cap", [], []).lower())
 check("world doc is rendered in", "[Tasks]" in tick)
 check("tick explains the system to the model", "HOW THIS WORKS" in tick)
 check("...explains it cannot see pixels", "You never see pixels" in tick)
@@ -194,9 +196,32 @@ check("told to call set_vision_focus on hands-on work", "set_vision_focus" in ch
 check("told NOT to write the checklist itself", "do NOT describe the setup you expect" in chat.replace("Do NOT", "do NOT"))
 check("retraction path taught", "retract_environment_fact" in chat)
 check("chat carries the same system brief", chat.count("HOW THIS WORKS") == 1)
-check("speaks when the asked-for thing arrives", "IT HAS NOW ARRIVED" in tick)
+check("answers a pending request from the speech step",
+      "they are waiting and cannot see your notes"
+      in A._build_speech_prompt(d, "cap", [], []))
 
 # ── 8. Doc rendering ─────────────────────────────────────────────────────────
+print("\n[7b] TWO-STAGE TICK: bookkeeping vs speech")
+d = doc_with_focus()
+stage1 = A._build_tick_prompt(d, "Cumin spluttering in hot oil.", events=[])
+stage2 = A._build_speech_prompt(d, "Cumin spluttering in hot oil.",
+                                [{"tool": "mark_task", "result": "ok"}], [])
+check("stage 1 carries no speech rules",
+      not any(k in stage1 for k in ["Speak when", "SAFETY OVERRIDE", "default is silence"]))
+check("stage 1 says speech is decided elsewhere", "decided separately" in stage1)
+check("stage 1 still asks for tool bookkeeping", "log_environment" in stage1)
+check("stage 2 asks exactly one question", "Decide ONE thing" in stage2)
+check("stage 2 sees what was recorded", "mark_task" in stage2)
+check("stage 2 sees the caption", "Cumin spluttering" in stage2)
+check("stage 2 knows when the user last spoke", "[User last spoke]" in stage2)
+check("stage 2 knows when it last spoke", "[You last spoke]" in stage2)
+check("stage 2 can escalate a hazard", URGENT_MARKER in stage2)
+check("stage 2 can decline", SILENT_MARKER in stage2)
+check("stage 2 is much cheaper than stage 1", len(stage2) < len(stage1) / 2,
+      f"{len(stage2)} vs {len(stage1)}")
+check("stage 2 omits the full doc", "[Recent observations]" not in stage2)
+check("stage 2 omits the system brief", "HOW THIS WORKS" not in stage2)
+
 print("\n[8] WORLD DOC RENDER")
 r = worlddoc.render(d)
 check("current time header first", r.startswith("[Current time:"))

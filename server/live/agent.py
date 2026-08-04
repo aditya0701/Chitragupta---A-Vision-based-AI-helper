@@ -402,6 +402,77 @@ class LiveAgent:
                 return "fine"
         return "coarse"
 
+    def _build_speech_prompt(self, doc: dict, caption: str,
+                             tool_results: list[dict], events: list[dict]) -> str:
+        """Stage 2 of a tick: one decision, nothing else.
+
+        Splitting this out is the fix for a failure reported three times — the
+        model reading a label into the document and saying nothing. A single
+        call was being scored on two objectives that pull against each other:
+        keep the document accurate (which rewards quiet bookkeeping) and decide
+        whether to speak (which rewards noticing the user). Silence kept
+        winning because it was also the stated default for the other job.
+
+        Deliberately cheap: no tools, no system brief, no full document, no
+        history — just what changed, what the user last asked, and the timing.
+        It runs at roughly a third of the main call's prompt size.
+        """
+        now = worlddoc._now()
+        last_user = doc.get("last_user_turn_ts") or 0.0
+        last_spoke = doc.get("last_spoken_ts") or 0.0
+        ago = lambda ts: (f"{int(now - ts)}s ago" if ts else "not this session")
+
+        lines = [
+            "You are the voice of a live assistant watching someone work through a "
+            "camera. You have already finished updating your notes. Decide ONE thing: "
+            "does the user need to hear something from you right now?",
+            "",
+            "[What the camera just reported]", caption, "",
+        ]
+        if tool_results:
+            lines += ["[What you just recorded]"]
+            lines += [f"- {r['tool']}: {str(r['result'])[:200]}" for r in tool_results]
+            lines.append("")
+        if events:
+            lines += ["[Things that just came due]"]
+            lines += [f"- {e['text']}" for e in events]
+            lines.append("")
+        if doc.get("title"):
+            lines.append(f"[Goal] {doc['title']}")
+        active = [t["content"] for t in doc["tasks"] if t["status"] == "in_progress"]
+        if active:
+            lines.append(f"[Current step] {'; '.join(active)}")
+        lines += [
+            f"[User last spoke] {ago(last_user)}",
+            f"[You last spoke] {ago(last_spoke)}",
+            "",
+            "SPEAK if: they asked you for something and this answers it, even partly — "
+            "they are waiting and cannot see your notes; something they were waiting on "
+            "is ready or done; a step just finished; they are about to make a mistake; "
+            "you can see something they cannot because they are looking at their hands.",
+            "",
+            "STAY SILENT if: nothing happened that they do not already know; you would "
+            "only be narrating what they are doing; you already told them this; they are "
+            "mid-task and it can wait for a natural pause.",
+            "",
+            f"If there is a physical hazard, start with {URGENT_MARKER} — that reaches "
+            "them immediately regardless of timing.",
+            "",
+            f"Reply with EITHER the exact words to say aloud, one or two sentences, "
+            f"plain spoken language with no markdown — OR exactly {SILENT_MARKER} and "
+            "nothing else. Do not explain your decision; the reply IS the speech.",
+        ]
+        return "\n".join(lines)
+
+    async def _decide_speech(self, doc: dict, caption: str,
+                             tool_results: list[dict], events: list[dict]) -> str:
+        """Ask the speech question on its own. Returns '' for silence."""
+        prompt = self._build_speech_prompt(doc, caption, tool_results, events)
+        resp = await self.backend.chat(
+            image_base64=None, prompt=prompt, think=False, tools=None)
+        text = (resp.text or "").strip()
+        return "" if text.upper().startswith(SILENT_MARKER) else text
+
     def _stale_brief_note(self, doc: dict) -> str:
         """Briefs that have been asked many times without ever being resolved."""
         stale = [
@@ -427,18 +498,18 @@ class LiveAgent:
             f"[New camera observation, "
             f"{worlddoc.fmt_ts(doc['recent'][-1]['ts']) if doc['recent'] else 'now'}]",
             caption, "",
-            "This is an automatic camera tick, NOT a user message. The user is busy; "
-            "your default is silence.",
+            "This is an automatic camera tick, NOT a user message.",
             "",
-            "Housekeeping (do silently via tools, this is most of your job):",
+            "Housekeeping via tools — this is the whole of your job here:",
             "- If the frame confirms an open expectation happened, call resolve_expectation.",
             "- The observation may open with 'Q1: FOUND / NOT VISIBLE / UNCLEAR' lines. "
             "Those are the camera's direct answers to the watches you set. Treat them as "
             "the answer — do not re-interpret a NOT VISIBLE as a maybe, and do not turn a "
             "generic description into a specific identification. When one is answered for "
             "good, close it with resolve_expectation so the camera stops being asked.",
-            "- Check every event-anchored expectation's condition against this frame; if one "
-            "fires (the condition is now true), speak up about it.",
+            "- Check every event-anchored expectation's condition against this frame. If "
+            "one has fired, resolve it and note what happened — the speech step will see "
+            "that you did and can raise it.",
             "- If the frame shows where something is kept, call log_environment. Record "
             "only what the observation actually says. It comes from a camera model that "
             "describes generically — 'a bag of lentils', 'a jar of yellow powder' — and "
@@ -448,42 +519,17 @@ class LiveAgent:
             "what you can see and ask them to confirm, rather than announcing a find.",
             "- If a task visibly finished or started, call mark_task.",
             "",
-            f"Then: if nothing needs saying to the user, your entire visible reply must be "
-            f"exactly {SILENT_MARKER} and nothing else. Speak when: an event-anchored "
-            "expectation fired; something genuinely new and important for the active goal "
-            "happened; the user is about to make a mistake; a trigger event below asks you "
-            "to; something is READY or DONE and they are looking elsewhere; you can see "
-            "something they cannot because their attention is on their hands; or a FORM "
-            "watch shows the technique going wrong in a way that will cost them the "
-            "outcome; or — most important of all — YOU ASKED THEM FOR SOMETHING AND IT "
-            "HAS NOW ARRIVED.",
+            "Your ONLY job on this tick is to make the document match what is now "
+            "true. Speaking is decided separately, afterwards, by another step — so do "
+            "not weigh whether to say anything, do not write a message, and do not stay "
+            "quiet to be polite. Just call the tools that need calling.",
             "",
-            "That last one is not optional. If you asked them to show you a label, hold "
-            "something up, open a lid or move the camera, and this frame finally shows it, "
-            "SPEAK NOW: say what you can read or see, and what it means for the next step. "
-            "They are holding that thing in the air waiting for you. Staying silent after "
-            "you made a request is the single worst thing you can do here — they have no "
-            "way to know you saw it, and they will have to ask you whether you did. "
-            "Logging it silently to the document is NOT answering them.",
-            "",
-            "When a FORM watch shows the technique going wrong in a way that will cost "
-            "them the outcome, say what to change in one sentence, once, and do not nag "
-            "if they carry on.",
-            "",
-            f"SAFETY OVERRIDE. If you can see a physical hazard — a hand in the path of a "
-            f"blade, fingers extended flat under a knife, a pan handle turned out over the "
-            f"edge, a tool about to slip, a loose fitting under load, something near a "
-            f"flame that should not be — say so IMMEDIATELY, in one short sentence, "
-            f"starting your reply with {URGENT_MARKER}. That marker skips the politeness "
-            f"delay and nothing else, so a warning arrives while it still matters. Lead "
-            f"with the action to take ('{URGENT_MARKER} curl your left fingertips back, "
-            f"they're flat under the blade'), not with an explanation. Use it only for "
-            "physical risk or work about to be ruined — on anything else it is noise, and "
-            "noise is how people learn to ignore you.",
+            "If nothing in the frame changes anything you have recorded, call no tools "
+            "and reply with a single full stop.",
         ]
         if events:
             lines += ["", "[Trigger events — these fired by arithmetic while you were away; "
-                          "address them in your reply]"]
+                          "record anything they imply; a separate step decides what to say]"]
             lines += [f"- {e['text']}" for e in events]
         stale = self._stale_brief_note(doc)
         if stale:
@@ -560,69 +606,33 @@ class LiveAgent:
                     await compaction.compact(self.backend, doc, batch)
 
                 events = triggers.check(doc)
-                prompt = self._build_tick_prompt(doc, caption, events)
-                text, tool_results, response = await self._reason(prompt, think=False)
 
-                # Second chance, only in the exact shape that keeps failing:
-                # the user asked for something a moment ago, this tick recorded
-                # new information about it, and the model still said nothing.
-                # Seen twice on live traffic — it read a frozen-meal label into
-                # the document and stayed silent while the user stood holding
-                # the packet up, then asked "do you want to say something to me"
-                # twice. Prompt wording alone has not fixed it, so this is a
-                # structural backstop rather than another instruction.
-                #
-                # Costs one extra call ONLY in that narrow case: never on an
-                # idle tick, never when the model already spoke, never when it
-                # recorded nothing.
-                recorded = [r["tool"] for r in tool_results
-                            if r["tool"] in _RECORDING_TOOLS]
-                if (not text.strip() or text.strip().upper() == SILENT_MARKER) \
-                        and recorded and triggers.in_followup_window(doc):
-                    logger.info("Tick recorded %s while the user was waiting — "
-                                "asking once whether it owes them an answer", recorded)
-                    text2, extra, response2 = await self._reason(
-                        f"{prompt}\n\n[You just recorded: {', '.join(recorded)} — and said "
-                        "nothing. The user asked you for something in the last few minutes "
-                        "and is still waiting on it. They cannot see the document. If what "
-                        "you just observed answers them, even partly, TELL THEM NOW in one "
-                        f"or two sentences. Only reply {SILENT_MARKER} if this genuinely "
-                        "has nothing to do with what they asked.]",
-                        think=False)
-                    if text2.strip():
-                        text, response = text2, response2
-                        tool_results.extend(extra)
+                # STAGE 1 — bookkeeping. Tools only; whatever prose comes back
+                # is discarded. This call is judged on one thing: is the
+                # document now accurate?
+                prompt = self._build_tick_prompt(doc, caption, events)
+                _, tool_results, response = await self._reason(prompt, think=False)
+
+                # STAGE 2 — speech, asked as its own question with its own
+                # prompt. Skipped entirely when nothing happened that could
+                # possibly warrant speech, so an idle tick still costs exactly
+                # one call.
+                worth_asking = bool(tool_results) or bool(events)                     or triggers.in_followup_window(doc)
+                text = ""
+                if worth_asking:
+                    text = await self._decide_speech(doc, caption, tool_results, events)
 
                 urgent = text.upper().startswith(URGENT_MARKER)
                 if urgent:
                     text = text[len(URGENT_MARKER):].lstrip(" :—-")
-                if text.upper() == SILENT_MARKER or not text:
+                if text.upper() == SILENT_MARKER:
                     text = ""
-                elif urgent:
-                    logger.info("Urgent tick speech — politeness gate bypassed: %r", text[:80])
-                else:
-                    # Politeness budget: trigger-driven and high-priority speech
-                    # always passes; spontaneous commentary waits out the gap.
-                    #
-                    # The high-priority path used to be unreachable from here,
-                    # which cost event-anchored expectations their entire point.
-                    # A firing event-anchored expectation is NOT in `events` —
-                    # triggers.check() only produces time-anchored and stale-task
-                    # events, by design — and may_speak_unprompted() was called
-                    # with no priority, so it always evaluated as "normal". A
-                    # high-priority watch ("tell me the moment the dal boils
-                    # over") therefore got swallowed by the 90s gap unless the
-                    # model happened to also call resolve_expectation, which it
-                    # has no reason to do when the condition it was guarding
-                    # AGAINST just came true. Pass the priority of any still-open
-                    # high-priority watch through instead: if one is live and the
-                    # model chose to break silence, that is what it is speaking
-                    # about. poll() already did this correctly.
-                    # in_followup_window: the user asked for something in the
-                    # last few minutes, so volunteering an answer is what they
-                    # are waiting for, not chatter. Without this the assistant
-                    # silences itself for the whole search it just promised to
-                    # run — see live/config.py FOLLOWUP_WINDOW_S.
+
+                if text and not urgent:
+                    # Politeness budget still applies as a floor, but the
+                    # decision above already weighed the timing, so anything
+                    # trigger-driven, expectation-resolving or inside the
+                    # follow-up window passes untouched.
                     important = (
                         bool(events)
                         or triggers.in_followup_window(doc)
@@ -633,8 +643,12 @@ class LiveAgent:
                         for e in worlddoc.open_expectations(doc)
                     ) else "normal"
                     if not important and not triggers.may_speak_unprompted(doc, watch_priority):
-                        logger.info("Politeness gate suppressed unprompted tick speech: %r", text[:80])
+                        logger.info("Politeness gate suppressed unprompted tick speech: %r",
+                                    text[:80])
                         text = ""
+                elif urgent and text:
+                    logger.info("Urgent tick speech — politeness gate bypassed: %r", text[:80])
+
                 if text:
                     triggers.mark_spoke(doc)
 
