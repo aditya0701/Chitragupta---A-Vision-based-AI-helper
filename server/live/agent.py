@@ -48,6 +48,30 @@ PERSONA = (
     "themselves. Be brief and concrete when you speak."
 )
 
+# How the machine around the model actually works. It was never told any of
+# this: it knew it had "a persistent world document" and nothing about where
+# the observations come from, that it cannot see, or that its own writes are
+# what it will be reading back next tick. Without that it cannot reason about
+# its own role — it treats each tick as an isolated question rather than one
+# step in a loop it is steering.
+#
+# Deliberately short. This is prepended to EVERY tick, so each sentence is
+# billed a few hundred times an hour.
+SYSTEM_BRIEF = (
+    "HOW THIS WORKS. A camera frame is captured every few seconds while the user "
+    "works. You never see pixels — a separate vision model looks at each frame and "
+    "writes the plain-text observation you are given, answering any brief you set. "
+    "You are the only part that reasons, decides and speaks.\n"
+    "The document below is YOUR memory, and it is what your own tool calls on "
+    "earlier ticks wrote. Everything you record is shown back to you on every "
+    "later tick and survives restarts, so a fact you log wrong will be repeated to "
+    "you until you retract it, and a plan you write is the plan you will be held "
+    "to. Nothing else maintains it.\n"
+    "Most ticks should change the document and produce no speech. Updating state "
+    "silently is the normal outcome and the bulk of the job; speaking is the "
+    "exception you make when the user genuinely needs to hear something."
+)
+
 
 # Text that trails off into something the user was clearly meant to receive
 # next — "Here's the plan:", "Do this first —".
@@ -382,7 +406,7 @@ class LiveAgent:
 
     def _build_tick_prompt(self, doc: dict, caption: str, events: list[dict]) -> str:
         lines = [
-            PERSONA, "",
+            PERSONA, "", SYSTEM_BRIEF, "",
             worlddoc.render(doc), "",
             # tick() always add_recent()s the caption before building this, so
             # `recent` is never empty on the live path — but defaulting rather
@@ -563,7 +587,7 @@ class LiveAgent:
     # ── Chat ─────────────────────────────────────────────────────────────────
 
     def _build_chat_prompt(self, doc: dict, user_prompt: str, caption: Optional[str]) -> str:
-        lines = [PERSONA, "", worlddoc.render(doc), ""]
+        lines = [PERSONA, "", SYSTEM_BRIEF, "", worlddoc.render(doc), ""]
         if caption:
             lines += [f"[Current camera frame, {worlddoc.fmt_ts(doc['recent'][-1]['ts'])}]",
                       caption, ""]
@@ -724,7 +748,7 @@ class LiveAgent:
                     return {"message": None, "doc": worlddoc.render(doc)}
 
                 lines = [
-                    PERSONA, "",
+                    PERSONA, "", SYSTEM_BRIEF, "",
                     worlddoc.render(doc), "",
                     "[Trigger events — these just fired by arithmetic; no camera frame, no "
                     "user message. Write ONE short message to the user addressing them. "
