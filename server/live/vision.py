@@ -25,9 +25,48 @@ def build_tick_vision_prompt(
     goals: Optional[str] = None,
     questions: Optional[list[str]] = None,
     focus: Optional[str] = None,
+    focus_mode: str = "form",
 ) -> str:
     parts = []
-    if focus:
+    if focus and focus_mode == "read":
+        # Reading mode. The form block is not merely unhelpful here, it is
+        # actively wrong: asked to read a frozen-meal packet, the camera
+        # reported "POSTURE AND GRIP — hand position is not visible" while the
+        # cooking instructions the user was holding up went untranscribed.
+        # Different job, different instructions, and none of the grip wording
+        # is loaded at all — which also keeps this block ~40% shorter.
+        parts += [
+            "WHAT THE USER IS DOING:",
+            focus,
+            "",
+            "You are the live eyes of an AI assistant. It cannot see, and it needs to "
+            "READ what is in this frame. Transcribe every piece of legible text you can "
+            "see, verbatim.",
+            "",
+            "  - Copy the words exactly as printed. Do not paraphrase, translate, tidy "
+            "up or summarise — whoever reads this needs the original wording.",
+            "  - Numbers, times, temperatures, weights and units EXACTLY as shown "
+            "('3 ½ MIN', '180°C', '400g'). These are the whole point; an approximated "
+            "number is worse than no number.",
+            "  - Keep the structure: separate lines stay separate, headings stay with "
+            "the text under them, and lists stay in order.",
+            "  - Say which language the text is in if it is not English.",
+            "",
+            "Where you cannot read something, say so precisely and say WHY — too small, "
+            "blurred, glare, cut off at the edge, angled away, folded, obscured by a "
+            "hand. Then say what would fix it: rotate it upright, hold it closer, "
+            "flatten it, tilt it away from the light, move a thumb. The user is holding "
+            "the thing and can act on that immediately, but only if you tell them.",
+            "",
+            "Never guess at a character or a digit to complete a word or number. An "
+            "honest 'the second digit is not legible' is far more useful than a "
+            "plausible invention, which nobody downstream can detect.",
+            "",
+            "After the text, add one short line about anything in the frame that looks "
+            "unsafe or about to go wrong. Then stop.",
+            "",
+        ]
+    elif focus:
         # The standing lens, as opposed to `questions` which are closed asks.
         #
         # Discrete questions cannot cover technique, because we do not know

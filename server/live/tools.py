@@ -190,16 +190,26 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
             "a nut, threads, label text, a gauge reading. Fine frames are 1024px and cost "
             "about 40% more, so use detail='coarse' when only gross movement matters — "
             "stirring, carrying, walking to a shelf, waiting for something to boil. "
+            "SET mode='read' WHENEVER YOU NEED TO KNOW WHAT SOMETHING SAYS — a packet's "
+            "cooking instructions, a bottle's ingredients, a torque figure, a dial, a "
+            "screen, a model number. In read mode the camera transcribes the text verbatim "
+            "and tells you what is illegible and how to fix it (rotate, closer, less "
+            "glare), instead of describing grip and posture — which is useless when what "
+            "you actually need is the words. Do not try to get a label read with a form "
+            "brief; ask for read mode and you will get the text back. Switch to mode='form' "
+            "once you have what you needed. "
             "IMPORTANT: when the thing you needed fine detail for is done — the step "
             "finished, the part is seated, you got your answer, the user moved on — call "
             "this again with detail='coarse' (or an empty brief if the hands-on work is "
             "over entirely). Do not leave it on fine out of habit; it is billed on every "
             "single frame until you change it."
         ),
-        fn=lambda brief="", detail="fine": worlddoc.set_vision_focus(get_doc(), brief, detail),
+        fn=lambda brief="", detail="fine", mode="form": worlddoc.set_vision_focus(
+            get_doc(), brief, detail, mode),
         parameters={
             "brief": {"type": "string", "description": "One or two sentences: what the user is physically doing right now. Not a checklist. Empty string clears it.", "required": True},
             "detail": {"type": "string", "enum": ["fine", "coarse"], "description": "fine = 1024px, for seeing grip/threads/labels/small detail. coarse = 640px, for gross movement. Revert to coarse when the close work is done.", "required": False},
+            "mode": {"type": "string", "enum": ["form", "read"], "description": "form = watch how the work is being done (grip, posture, danger). read = TRANSCRIBE text in frame verbatim — labels, instructions, gauges, screens. Forces fine frames.", "required": False},
         },
         needs_followup=False,
     ))

@@ -247,7 +247,11 @@ def open_expectations(doc: dict) -> list[dict]:
 
 # ── Vision focus ─────────────────────────────────────────────────────────────
 
-def set_vision_focus(doc: dict, brief: str, detail: str = "fine") -> str:
+VALID_FOCUS_MODES = {"form", "read"}
+
+
+def set_vision_focus(doc: dict, brief: str, detail: str = "fine",
+                     mode: str = "form") -> str:
     """The standing lens the camera looks through — one brief, replaced not
     appended.
 
@@ -269,12 +273,21 @@ def set_vision_focus(doc: dict, brief: str, detail: str = "fine") -> str:
     if not brief:
         doc["vision_focus"] = None
         return "Vision focus cleared — the camera goes back to plain description, coarse frames."
+    if mode not in VALID_FOCUS_MODES:
+        mode = "form"
     if detail not in ("fine", "coarse"):
+        detail = "fine"
+    # Reading is impossible at 640px — that is the entire reason the fine tier
+    # exists (CLAUDE.md: resolution discarded in the browser cannot be
+    # recovered). Asking to read at coarse would silently return "text is not
+    # legible" forever, so the mode wins over the argument.
+    if mode == "read":
         detail = "fine"
     prev = doc.get("vision_focus") or {}
     doc["vision_focus"] = {
         "brief": brief,
         "detail": detail,
+        "mode": mode,
         "ts": _now(),
         # Frames spent at fine on THIS focus. Carried over ONLY when the focus
         # is re-sent completely unchanged, which is a no-op re-assertion —
@@ -284,9 +297,9 @@ def set_vision_focus(doc: dict, brief: str, detail: str = "fine") -> str:
         # another close look is never locked out by an earlier one.
         "fine_frames": (prev.get("fine_frames", 0)
                         if prev.get("detail") == detail and prev.get("brief") == brief
-                        else 0),
+                        and prev.get("mode") == mode else 0),
     }
-    return (f"Camera focus set ({detail} frames): {brief}"
+    return (f"Camera focus set ({mode}, {detail} frames): {brief}"
             + ("" if detail == "fine" else
                " — call again with detail='fine' when you need to see small things."))
 
@@ -300,6 +313,12 @@ def focus_detail(doc: dict) -> Optional[str]:
     """The resolution this focus asked for, or None if no focus is set."""
     focus = doc.get("vision_focus")
     return (focus or {}).get("detail") if focus else None
+
+
+def focus_mode(doc: dict) -> Optional[str]:
+    """'form' (watch how the work is done) or 'read' (transcribe text)."""
+    focus = doc.get("vision_focus")
+    return (focus or {}).get("mode", "form") if focus else None
 
 
 def charge_focus_frame(doc: dict):

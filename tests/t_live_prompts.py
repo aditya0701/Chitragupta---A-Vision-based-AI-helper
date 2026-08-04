@@ -46,6 +46,18 @@ check("forbids verdicts", "Do NOT say whether any of it is safe" in p)
 check("keeps the open anything-else channel", "ANYTHING ELSE in the frame" in p)
 check("standard block is NOT model-supplied", "POSTURE AND GRIP" not in focus)
 
+p_form = p
+# Reading mode: a different job, so a different standard block entirely.
+r = build_tick_vision_prompt(None, None, None,
+                             focus="User is holding a curry packet up to the camera.",
+                             focus_mode="read")
+check("read mode asks for verbatim transcription", "Transcribe every piece of legible text" in r)
+check("read mode demands exact numbers/units", "EXACTLY as shown" in r)
+check("read mode says how to fix an unreadable frame", "rotate it upright" in r)
+check("read mode forbids guessing characters", "Never guess at a character" in r)
+check("read mode drops the grip block entirely", "POSTURE AND GRIP" not in r)
+check("read mode is shorter than form mode", len(r) < len(p_form))
+
 plain = build_tick_vision_prompt(None, None, None)
 check("no focus set -> no form block at all", "POSTURE AND GRIP" not in plain)
 check("no focus set -> still a normal description prompt", plain.startswith("You are the eyes"))
@@ -137,6 +149,18 @@ check("budget exhausted -> forced coarse", A._frame_detail(d) == "coarse")
 check("...but the focus survives", worlddoc.get_vision_focus(d) is not None)
 worlddoc.set_vision_focus(d, "User is reading the torque spec off the plug.", "fine")
 check("re-arming after exhaustion resets the budget", A._frame_detail(d) == "fine")
+
+print("\n[6d] READING MODE")
+d = worlddoc._empty_doc()
+worlddoc.set_vision_focus(d, "User is holding a packet up to read it.", "coarse", "read")
+check("read mode overrides a coarse request", worlddoc.focus_detail(d) == "fine")
+check("read mode forces fine frames", A._frame_detail(d) == "fine")
+check("mode is readable back", worlddoc.focus_mode(d) == "read")
+worlddoc.set_vision_focus(d, "User is stirring the pot.", "coarse", "form")
+check("form mode honours coarse again", A._frame_detail(d) == "coarse")
+d2 = worlddoc._empty_doc()
+worlddoc.set_vision_focus(d2, "x", "fine", "nonsense")
+check("unknown mode falls back to form", worlddoc.focus_mode(d2) == "form")
 
 print("\n[6c] FOCUS IS VISIBLE IN THE DOC")
 d = worlddoc._empty_doc()

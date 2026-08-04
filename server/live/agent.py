@@ -376,7 +376,7 @@ class LiveAgent:
         #    version of this got wrong: a hands-on hammering task set a focus
         #    and still captured at 640, because "is there an open watch" is a
         #    poor proxy for "does this need resolution".
-        if worlddoc.focus_detail(doc) == "fine":
+        if worlddoc.focus_detail(doc) == "fine" or worlddoc.focus_mode(doc) == "read":
             focus = doc.get("vision_focus") or {}
             if int(focus.get("fine_frames") or 0) < config.MAX_FINE_FOCUS_FRAMES:
                 return "fine"
@@ -498,9 +498,11 @@ class LiveAgent:
                 self._goal_hint(doc) or None,
                 self._vision_questions(doc, charge=False),
                 worlddoc.get_vision_focus(doc),
+                worlddoc.focus_mode(doc) or "form",
             )
-        prev, goal, questions, focus = snapshot
-        vision_prompt = build_tick_vision_prompt(prev, goal, questions, focus=focus)
+        prev, goal, questions, focus, focus_mode = snapshot
+        vision_prompt = build_tick_vision_prompt(prev, goal, questions, focus=focus,
+                                                 focus_mode=focus_mode)
         caption = await self.backend.vision(
             image_base64, vision_prompt,
             max_tokens=config.VISION_MAX_TOKENS
