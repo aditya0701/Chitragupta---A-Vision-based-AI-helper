@@ -247,7 +247,7 @@ def open_expectations(doc: dict) -> list[dict]:
 
 # ── Vision focus ─────────────────────────────────────────────────────────────
 
-def set_vision_focus(doc: dict, brief: str) -> str:
+def set_vision_focus(doc: dict, brief: str, detail: str = "fine") -> str:
     """The standing lens the camera looks through — one brief, replaced not
     appended.
 
@@ -268,14 +268,45 @@ def set_vision_focus(doc: dict, brief: str) -> str:
     brief = (brief or "").strip()
     if not brief:
         doc["vision_focus"] = None
-        return "Vision focus cleared — the camera goes back to plain description."
-    doc["vision_focus"] = {"brief": brief, "ts": _now()}
-    return f"Camera focus set: {brief}"
+        return "Vision focus cleared — the camera goes back to plain description, coarse frames."
+    if detail not in ("fine", "coarse"):
+        detail = "fine"
+    prev = doc.get("vision_focus") or {}
+    doc["vision_focus"] = {
+        "brief": brief,
+        "detail": detail,
+        "ts": _now(),
+        # Frames spent at fine on THIS focus. Carried over ONLY when the focus
+        # is re-sent completely unchanged, which is a no-op re-assertion —
+        # otherwise the model could dodge the cap forever by repeating itself.
+        # Any real change (new brief, or a different detail level) is new
+        # intent and earns a fresh budget, so a step that legitimately needs
+        # another close look is never locked out by an earlier one.
+        "fine_frames": (prev.get("fine_frames", 0)
+                        if prev.get("detail") == detail and prev.get("brief") == brief
+                        else 0),
+    }
+    return (f"Camera focus set ({detail} frames): {brief}"
+            + ("" if detail == "fine" else
+               " — call again with detail='fine' when you need to see small things."))
 
 
 def get_vision_focus(doc: dict) -> Optional[str]:
     focus = doc.get("vision_focus")
     return (focus or {}).get("brief") or None
+
+
+def focus_detail(doc: dict) -> Optional[str]:
+    """The resolution this focus asked for, or None if no focus is set."""
+    focus = doc.get("vision_focus")
+    return (focus or {}).get("detail") if focus else None
+
+
+def charge_focus_frame(doc: dict):
+    """Count one frame captured at fine against the active focus."""
+    focus = doc.get("vision_focus")
+    if focus and focus.get("detail") == "fine":
+        focus["fine_frames"] = int(focus.get("fine_frames") or 0) + 1
 
 
 # ── Environment facts & recent captions ──────────────────────────────────────
@@ -387,6 +418,15 @@ def render(doc: dict, recent_limit: Optional[int] = None) -> str:
             if t.get("note"):
                 line += f"  ({t['note']})"
             lines.append(line)
+
+    # The model must be able to see its own standing focus, or it cannot know
+    # whether to update it, and cannot tell that it left the camera on fine.
+    focus = doc.get("vision_focus")
+    if focus:
+        spent = int(focus.get("fine_frames") or 0)
+        lines.append(f"\n[Camera focus — {focus.get('detail', 'fine')} frames"
+                     + (f", {spent} used" if spent else "") + "]")
+        lines.append(focus["brief"])
 
     opens = open_expectations(doc)
     if opens:

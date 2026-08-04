@@ -50,6 +50,13 @@ MAX_BRIEF_ASKS: int = int(os.getenv("LIVE_MAX_BRIEF_ASKS", "40"))
 # inside one vision reply, and every one is billed on every tick.
 MAX_ACTIVE_BRIEFS: int = int(os.getenv("LIVE_MAX_ACTIVE_BRIEFS", "4"))
 
+# Frames a single vision focus may spend at fine before being forced back to
+# coarse. The model is told to drop to coarse itself when a step is done; this
+# is the backstop for when it doesn't, which is v1's documented failure mode.
+# Generous, because a hands-on step legitimately runs a long time — roughly 12
+# minutes at a 6s tick. Resets when the focus is replaced or its detail changes.
+MAX_FINE_FOCUS_FRAMES: int = int(os.getenv("LIVE_MAX_FINE_FOCUS_FRAMES", "120"))
+
 # Vision reply budget. The base covers the scene description; each question
 # needs room for its own answer line, or the answers truncate mid-block and the
 # description never arrives at all.

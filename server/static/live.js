@@ -23,9 +23,58 @@ let frameDetail = 'coarse';
 const $ = (id) => document.getElementById(id);
 const video = $('camera-video');
 
+// ── Session log ──────────────────────────────────────────────────────────────
+// Everything that happened, in order, for the export. Kept separate from the
+// DOM because the transcript hides captions behind dots and drops nothing here:
+// the point of a saved session is judging a real run afterwards, and per
+// DECISIONS.md's testing notes the wire log is the highest-value artifact
+// there is. Captions, tool calls and tier changes all matter and none of them
+// are legible on screen.
+const sessionLog = [];
+const logEvent = (kind, text, extra) =>
+  sessionLog.push({ t: new Date().toISOString(), kind, text, ...(extra || {}) });
+
+function exportSession() {
+  const pad = (n) => String(n).padStart(2, '0');
+  const d = new Date();
+  const out = [
+    '# Chitragupta Live (v2) session',
+    `Exported ${d.toISOString()}`,
+    `Entries: ${sessionLog.length}`,
+    '',
+    '## Transcript',
+    '',
+  ];
+  for (const e of sessionLog) {
+    const time = e.t.slice(11, 19);
+    if (e.kind === 'caption') {
+      out.push(`- \`${time}\` 👁 **camera** _(${e.detail || '?'})_: ${e.text}`);
+    } else if (e.kind === 'tools') {
+      out.push(`- \`${time}\` 🔧 tools: ${e.text}`);
+    } else if (e.kind === 'urgent') {
+      out.push(`- \`${time}\` ⚠️ **URGENT**: ${e.text}`);
+    } else if (e.kind === 'tier') {
+      out.push(`- \`${time}\` 🔍 capture tier → **${e.text}**`);
+    } else {
+      out.push(`- \`${time}\` **${e.kind}**: ${e.text}`);
+    }
+  }
+  out.push('', '## World document at export', '', '```', $('doc-panel').textContent, '```');
+
+  const blob = new Blob([out.join('\n')], { type: 'text/markdown' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `chitragupt-live-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`
+             + `-${pad(d.getHours())}${pad(d.getMinutes())}.md`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  setStatus(`saved ${sessionLog.length} entries`);
+}
+
 // ── Transcript ───────────────────────────────────────────────────────────────
 
 function addMsg(kind, text) {
+  logEvent(kind, text);
   const div = document.createElement('div');
   div.className = `msg ${kind}`;
   div.textContent = text;
@@ -38,6 +87,7 @@ function addMsg(kind, text) {
 }
 
 function addCaptionDot(caption) {
+  logEvent('caption', caption, { detail: frameDetail });
   const div = document.createElement('div');
   div.className = $('show-captions').checked ? 'msg system' : 'caption-dot';
   div.textContent = $('show-captions').checked ? `👁 ${caption}` : '·';
@@ -208,7 +258,10 @@ async function sendTick(frame, sample) {
     const data = await resp.json();
     if (data.skipped) { setStatus('tick throttled by server'); return; }
     lastSentFrame = sample;
-    if (data.frame_detail) { frameDetail = data.frame_detail; updateTierBadge(); }
+    if (data.frame_detail && data.frame_detail !== frameDetail) {
+      frameDetail = data.frame_detail; updateTierBadge(); logEvent('tier', frameDetail);
+    }
+    if ((data.tool_calls || []).length) logEvent('tools', data.tool_calls.map((t) => t.tool).join(', '));
     if (data.caption) addCaptionDot(data.caption);
     (data.triggers || []).forEach((t) => addMsg('trigger', `⚡ ${t}`));
     if (data.text) {
@@ -283,8 +336,11 @@ async function deliverMessage(prompt) {
       body: JSON.stringify(body),
     });
     const data = await resp.json();
-    if (data.frame_detail) { frameDetail = data.frame_detail; updateTierBadge(); }
-    if (data.caption && $('show-captions').checked) addCaptionDot(data.caption);
+    if (data.frame_detail && data.frame_detail !== frameDetail) {
+      frameDetail = data.frame_detail; updateTierBadge(); logEvent('tier', frameDetail);
+    }
+    if ((data.tool_calls || []).length) logEvent('tools', data.tool_calls.map((t) => t.tool).join(', '));
+    if (data.caption) addCaptionDot(data.caption);
     addMsg('assistant', data.text || '(no reply)');
     if (data.text) speak(data.text);
     updateDoc(data.doc);
@@ -441,6 +497,7 @@ $('interval').addEventListener('input', () => { $('interval-val').textContent = 
 $('send-btn').addEventListener('click', sendMessage);
 $('chat-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendMessage(); });
 $('doc-refresh').addEventListener('click', refreshDoc);
+$('save-btn').addEventListener('click', exportSession);
 $('reset-btn').addEventListener('click', async () => {
   if (!confirm('Clear the world document and conversation?')) return;
   await fetch('/v2/reset', { method: 'POST' });

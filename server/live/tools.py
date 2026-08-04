@@ -184,11 +184,22 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
             "automatically to every frame — you do not need to write them and you should "
             "not try. Just say what the activity is, and keep it current. "
             "Send an empty brief when the hands-on work is done. Keep set_expectation for "
-            "discrete things that either are or aren't true yet."
+            "discrete things that either are or aren't true yet. "
+            "ALSO set `detail`. Use detail='fine' whenever the step turns on seeing SMALL "
+            "things — where fingers sit relative to a blade, whether a socket is square on "
+            "a nut, threads, label text, a gauge reading. Fine frames are 1024px and cost "
+            "about 40% more, so use detail='coarse' when only gross movement matters — "
+            "stirring, carrying, walking to a shelf, waiting for something to boil. "
+            "IMPORTANT: when the thing you needed fine detail for is done — the step "
+            "finished, the part is seated, you got your answer, the user moved on — call "
+            "this again with detail='coarse' (or an empty brief if the hands-on work is "
+            "over entirely). Do not leave it on fine out of habit; it is billed on every "
+            "single frame until you change it."
         ),
-        fn=lambda brief="": worlddoc.set_vision_focus(get_doc(), brief),
+        fn=lambda brief="", detail="fine": worlddoc.set_vision_focus(get_doc(), brief, detail),
         parameters={
             "brief": {"type": "string", "description": "One or two sentences: what the user is physically doing right now. Not a checklist. Empty string clears it.", "required": True},
+            "detail": {"type": "string", "enum": ["fine", "coarse"], "description": "fine = 1024px, for seeing grip/threads/labels/small detail. coarse = 640px, for gross movement. Revert to coarse when the close work is done.", "required": False},
         },
         needs_followup=False,
     ))

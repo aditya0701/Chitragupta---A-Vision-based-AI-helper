@@ -342,6 +342,20 @@ class LiveAgent:
         size and nothing else. It must never also gate whether questions are
         asked or whether the tick may speak.
         """
+        # 1. The model asked for it. It knows things the doc does not — that a
+        #    torque figure is about to be read, that this step turns on seeing
+        #    threads rather than gross movement. No rule over doc state
+        #    recovers that intent, which is what v1 got right and the first
+        #    version of this got wrong: a hands-on hammering task set a focus
+        #    and still captured at 640, because "is there an open watch" is a
+        #    poor proxy for "does this need resolution".
+        if worlddoc.focus_detail(doc) == "fine":
+            focus = doc.get("vision_focus") or {}
+            if int(focus.get("fine_frames") or 0) < config.MAX_FINE_FOCUS_FRAMES:
+                return "fine"
+
+        # 2. A discrete watch is open — reading a label is the case this was
+        #    built for, and it cannot be answered from a 640px frame.
         for exp in worlddoc.open_expectations(doc):
             if exp["anchor"] != "event" or not (exp.get("condition") or "").strip():
                 continue
@@ -439,6 +453,10 @@ class LiveAgent:
                     image_base64, vision_prompt,
                     max_tokens=config.VISION_MAX_TOKENS
                     + config.VISION_TOKENS_PER_QUESTION * len(questions))
+
+                # This frame was captured at whatever the last response asked
+                # for; if the focus is the reason it was fine, charge it.
+                worlddoc.charge_focus_frame(doc)
 
                 batch = worlddoc.add_recent(doc, caption)
                 if batch:
@@ -553,6 +571,16 @@ class LiveAgent:
             "as problems that do not exist. Do not create a watch per hazard either — that "
             "produces a dozen overlapping questions and the camera answers none of them "
             "well.",
+            "",
+            "Set detail='fine' on that focus whenever the step turns on seeing SMALL "
+            "things — finger position against a blade, whether a socket sits square, "
+            "threads, label text, a gauge. Use detail='coarse' when only gross movement "
+            "matters, like stirring or carrying. Fine frames cost about 40% more and are "
+            "billed on every frame until you change them, so when the close work is "
+            "finished — the part is seated, the cut is done, you have your answer — call "
+            "set_vision_focus again with detail='coarse', or with an empty brief if the "
+            "hands-on work is over. Reverting is your job; nothing else will do it for "
+            "you until a hard frame budget runs out.",
             "",
             "Cover both what could HURT them and what would merely come out BADLY, because "
             "the second is most of the value and the part that gets forgotten. A spanner "
