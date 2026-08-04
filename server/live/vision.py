@@ -67,6 +67,21 @@ def build_tick_vision_prompt(
             "legible or visibly distinctive (label text, shape, colour, markings) and "
             "let the reader decide. Do not judge whether the answer is good news.",
             "",
+            # Safety briefs live or die on this. "Is the grip safe?" gets a
+            # reassuring guess; "are the fingertips curled back or extended
+            # flat?" gets a fact the reasoning model can act on. Same
+            # observations-not-judgement rule as above (DECISIONS.md 6.3), but
+            # it needs saying for bodies specifically — a model asked about a
+            # person's hands reaches for reassurance far more readily than it
+            # does when asked about a jar.
+            "Some questions are about how something is being HELD or DONE — hands, grip, "
+            "body position, how a tool meets the work. For those, describe the physical "
+            "arrangement precisely and literally: which fingers are where, curled or "
+            "extended, what is in contact with what, which way a handle points, how close "
+            "one thing is to another. Never say something looks safe, correct, careful or "
+            "fine — that judgement is not yours to make and a wrong reassurance is the "
+            "most damaging answer you can give.",
+            "",
             "THEN, after the answers, describe the frame as follows.",
             "",
         ]

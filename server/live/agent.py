@@ -32,6 +32,15 @@ logger = logging.getLogger("chitragupt.live")
 
 SILENT_MARKER = "[SILENT]"
 
+# The counterpart to SILENT: this tick must reach the user NOW, politeness
+# budget and all. Reserved for physical risk and for work about to be ruined —
+# the cases where a 90-second wait makes the warning worthless.
+#
+# One flag, one consequence (DECISIONS.md 4.4): this bypasses the politeness
+# gate and nothing else. It does not change capture detail, does not affect
+# whether questions are asked, and does not itself resolve anything.
+URGENT_MARKER = "[URGENT]"
+
 PERSONA = (
     "You are Chitragupta, a live first-person assistant watching through the "
     "user's camera — an attentive record keeper. You track everything in a "
@@ -309,10 +318,22 @@ class LiveAgent:
             "- If a task visibly finished or started, call mark_task.",
             "",
             f"Then: if nothing needs saying to the user, your entire visible reply must be "
-            f"exactly {SILENT_MARKER} and nothing else. Speak only if: an event-anchored "
-            "expectation fired, something genuinely new and important for the active goal "
-            "happened, the user is about to make a mistake, or a trigger event below asks "
-            "you to.",
+            f"exactly {SILENT_MARKER} and nothing else. Speak when: an event-anchored "
+            "expectation fired; something genuinely new and important for the active goal "
+            "happened; the user is about to make a mistake; a trigger event below asks you "
+            "to; something is READY or DONE and they are looking elsewhere; or you can see "
+            "something they cannot because their attention is on their hands.",
+            "",
+            f"SAFETY OVERRIDE. If you can see a physical hazard — a hand in the path of a "
+            f"blade, fingers extended flat under a knife, a pan handle turned out over the "
+            f"edge, a tool about to slip, a loose fitting under load, something near a "
+            f"flame that should not be — say so IMMEDIATELY, in one short sentence, "
+            f"starting your reply with {URGENT_MARKER}. That marker skips the politeness "
+            f"delay and nothing else, so a warning arrives while it still matters. Lead "
+            f"with the action to take ('{URGENT_MARKER} curl your left fingertips back, "
+            f"they're flat under the blade'), not with an explanation. Use it only for "
+            "physical risk or work about to be ruined — on anything else it is noise, and "
+            "noise is how people learn to ignore you.",
         ]
         if events:
             lines += ["", "[Trigger events — these fired by arithmetic while you were away; "
@@ -341,8 +362,13 @@ class LiveAgent:
                 prompt = self._build_tick_prompt(doc, caption, events)
                 text, tool_results, response = await self._reason(prompt, think=False)
 
+                urgent = text.upper().startswith(URGENT_MARKER)
+                if urgent:
+                    text = text[len(URGENT_MARKER):].lstrip(" :—-")
                 if text.upper() == SILENT_MARKER or not text:
                     text = ""
+                elif urgent:
+                    logger.info("Urgent tick speech — politeness gate bypassed: %r", text[:80])
                 else:
                     # Politeness budget: trigger-driven and high-priority speech
                     # always passes; spontaneous commentary waits out the gap.
@@ -384,6 +410,7 @@ class LiveAgent:
                 worlddoc.save(doc)
                 return {
                     "text": text or None,
+                    "urgent": bool(urgent and text),
                     "caption": caption,
                     "triggers": [e["text"] for e in events],
                     "tool_calls": tool_results,
@@ -429,6 +456,20 @@ class LiveAgent:
             "session, and the user has to keep correcting the same thing. Take the "
             "correction at face value; the user is standing in front of the object and "
             "you are looking at a description of a photograph of it.",
+            "",
+            "When the task involves hands, blades, heat, power tools, or anything under "
+            "load, work out for YOURSELF what could hurt them or ruin the work, and set "
+            "event-anchored watches for those at priority='high' — in the same turn as "
+            "the plan, without being asked. You are the only one looking while their "
+            "attention is on the work.",
+            "",
+            "Those watches are questions put straight to the camera, so ask for OBSERVABLE "
+            "physical detail, never for a verdict. 'Is the hand not holding the knife "
+            "curled with fingertips tucked behind the knuckles, or extended flat toward "
+            "the blade?' — not 'is their grip safe?'. 'Is the pan handle turned inward "
+            "over the counter, or outward past the edge?' — not 'is the pan safe?'. The "
+            "camera reports what it sees; deciding whether that is dangerous is YOUR job, "
+            "and it cannot do it for you.",
             "",
             "Only set a time-anchored expectation for a step the user has actually "
             "STARTED. Deadlines attached to steps they haven't begun go overdue while "

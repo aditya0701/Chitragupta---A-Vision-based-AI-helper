@@ -71,6 +71,13 @@
     .msg.user { align-self: flex-end; background: #1f4b8f; }
     .msg.assistant { align-self: flex-start; background: #232a38; }
     .msg.trigger { align-self: flex-start; background: #3a2d16; border: 1px solid #6b5320; }
+    /* Safety warnings must survive a glance from across the room. */
+    .msg.urgent {
+      align-self: flex-start; background: #5c1520; border: 1px solid #e0405c;
+      color: #ffe3e7; font-weight: 600; max-width: 100%;
+      animation: urgentIn 320ms ease-out;
+    }
+    @keyframes urgentIn { from { transform: scale(0.97); opacity: 0; } to { transform: none; opacity: 1; } }
     .msg.system { align-self: center; background: none; color: #7c8598; font-size: 11px; padding: 2px; }
     .msg .ts { display: block; font-size: 10px; color: #9aa5bb; margin-top: 4px; }
     .caption-dot { align-self: center; color: #3f4a5f; font-size: 10px; padding: 0; cursor: default; }

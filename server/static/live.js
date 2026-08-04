@@ -211,10 +211,16 @@ async function sendTick(frame, sample) {
     if (data.frame_detail) { frameDetail = data.frame_detail; updateTierBadge(); }
     if (data.caption) addCaptionDot(data.caption);
     (data.triggers || []).forEach((t) => addMsg('trigger', `⚡ ${t}`));
-    if (data.text) { addMsg('assistant', data.text); speak(data.text); }
+    if (data.text) {
+      addMsg(data.urgent ? 'urgent' : 'assistant', data.urgent ? `⚠️ ${data.text}` : data.text);
+      // Urgent speech jumps any queued narration outright — a warning that
+      // arrives after the sentence it interrupted is a warning that arrived late.
+      if (data.urgent && synth) synth.cancel();
+      speak(data.text);
+    }
     updateDoc(data.doc);
     const lens = frameDetail === 'fine' ? ' · 🔍 looking closely' : '';
-    setStatus((data.text ? 'spoke' : 'silent tick') + lens);
+    setStatus((data.urgent ? '⚠️ warned' : data.text ? 'spoke' : 'silent tick') + lens);
   } catch (e) {
     setStatus(`tick failed: ${e.message}`);
   } finally {
