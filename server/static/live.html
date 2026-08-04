@@ -27,15 +27,21 @@
     /* Capture feedback. inset box-shadow rather than a border so the frame
        flash never reflows the video. Each colour is a distinct event, so a
        glance across the kitchen tells you what the loop just did. */
-    #camera-wrap {
-      background: #000; position: relative;
-      box-shadow: inset 0 0 0 4px transparent;
-      transition: box-shadow 140ms ease-out;
+    #camera-wrap { background: #000; position: relative; }
+    /* The flash MUST be an overlay on top of the video, not an inset shadow on
+       the wrapper. An inset box-shadow paints inside the wrapper but BEHIND its
+       children, and the <video> is an opaque child filling the whole box — so
+       every flash was drawn and then immediately covered up. It was invisible
+       from the first commit. A pointer-events:none ::after sits above the video
+       and cannot intercept taps. */
+    #camera-wrap::after {
+      content: ''; position: absolute; inset: 0; pointer-events: none; z-index: 2;
+      border: 4px solid transparent; transition: border-color 140ms ease-out;
     }
-    #camera-wrap.cap-coarse { box-shadow: inset 0 0 0 4px #2d6cd6; }  /* sent, 640  */
-    #camera-wrap.cap-fine   { box-shadow: inset 0 0 0 4px #e8a11c; }  /* sent, 1024 */
-    #camera-wrap.cap-user   { box-shadow: inset 0 0 0 4px #35c26a; }  /* your turn  */
-    #camera-wrap.cap-skip   { box-shadow: inset 0 0 0 4px #39445a; }  /* diff gate  */
+    #camera-wrap.cap-coarse::after { border-color: #2d6cd6; }  /* sent, 640  */
+    #camera-wrap.cap-fine::after   { border-color: #e8a11c; }  /* sent, 1024 */
+    #camera-wrap.cap-user::after   { border-color: #35c26a; }  /* your turn  */
+    #camera-wrap.cap-skip::after   { border-color: #39445a; }  /* diff gate  */
     #camera-video { width: 100%; max-height: 34dvh; display: block; object-fit: contain; }
     #camera-off { padding: 24px; text-align: center; color: #7c8598; font-size: 13px; }
     #controls {

@@ -67,10 +67,22 @@ SYSTEM_BRIEF = (
     "later tick and survives restarts, so a fact you log wrong will be repeated to "
     "you until you retract it, and a plan you write is the plan you will be held "
     "to. Nothing else maintains it.\n"
-    "Most ticks should change the document and produce no speech. Updating state "
-    "silently is the normal outcome and the bulk of the job; speaking is the "
-    "exception you make when the user genuinely needs to hear something."
+    "Most ticks should change the document and produce no speech — updating state "
+    "silently is the normal outcome and the bulk of the job. But that is about "
+    "IDLE ticks. The moment the user is waiting on something from you, silence "
+    "stops being polite and becomes a failure: they cannot see the document, they "
+    "have no idea you noticed, and their only recourse is to ask you whether you "
+    "did. Recording something is never the same as answering someone."
 )
+
+
+# Tools that put NEW INFORMATION into the document, as opposed to ones that
+# only read or search. If one of these fired while the user was waiting, there
+# is very likely something worth saying out loud.
+_RECORDING_TOOLS = frozenset({
+    "log_environment", "retract_environment_fact",
+    "mark_task", "update_tasks", "resolve_expectation",
+})
 
 
 # Text that trails off into something the user was clearly meant to receive
@@ -550,6 +562,36 @@ class LiveAgent:
                 events = triggers.check(doc)
                 prompt = self._build_tick_prompt(doc, caption, events)
                 text, tool_results, response = await self._reason(prompt, think=False)
+
+                # Second chance, only in the exact shape that keeps failing:
+                # the user asked for something a moment ago, this tick recorded
+                # new information about it, and the model still said nothing.
+                # Seen twice on live traffic — it read a frozen-meal label into
+                # the document and stayed silent while the user stood holding
+                # the packet up, then asked "do you want to say something to me"
+                # twice. Prompt wording alone has not fixed it, so this is a
+                # structural backstop rather than another instruction.
+                #
+                # Costs one extra call ONLY in that narrow case: never on an
+                # idle tick, never when the model already spoke, never when it
+                # recorded nothing.
+                recorded = [r["tool"] for r in tool_results
+                            if r["tool"] in _RECORDING_TOOLS]
+                if (not text.strip() or text.strip().upper() == SILENT_MARKER) \
+                        and recorded and triggers.in_followup_window(doc):
+                    logger.info("Tick recorded %s while the user was waiting — "
+                                "asking once whether it owes them an answer", recorded)
+                    text2, extra, response2 = await self._reason(
+                        f"{prompt}\n\n[You just recorded: {', '.join(recorded)} — and said "
+                        "nothing. The user asked you for something in the last few minutes "
+                        "and is still waiting on it. They cannot see the document. If what "
+                        "you just observed answers them, even partly, TELL THEM NOW in one "
+                        f"or two sentences. Only reply {SILENT_MARKER} if this genuinely "
+                        "has nothing to do with what they asked.]",
+                        think=False)
+                    if text2.strip():
+                        text, response = text2, response2
+                        tool_results.extend(extra)
 
                 urgent = text.upper().startswith(URGENT_MARKER)
                 if urgent:
