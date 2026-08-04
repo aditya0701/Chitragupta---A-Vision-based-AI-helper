@@ -81,6 +81,7 @@ def _empty_doc() -> dict:
         "session_started": _now(),
         "last_spoken_ts": 0.0,
         "last_user_turn_ts": 0.0,
+        "vision_focus": None,
         "tasks": [],
         "expectations": [],
         "environment": [],
@@ -279,6 +280,39 @@ def resolve_expectation(doc: dict, ref: str, outcome: str = "satisfied", note: s
 
 def open_expectations(doc: dict) -> list[dict]:
     return [e for e in doc["expectations"] if e["status"] == "open"]
+
+
+# ── Vision focus ─────────────────────────────────────────────────────────────
+
+def set_vision_focus(doc: dict, brief: str) -> str:
+    """The standing lens the camera looks through — one brief, replaced not
+    appended.
+
+    The counterpart to event-anchored watches, and better than them for form
+    and safety. A watch is a closed question with a definite answer, which is
+    right for a search ("is the lobhiya bag visible?") and wrong for technique:
+    we cannot know in advance what the camera will see, so a checklist written
+    before the frame arrives is guesswork, and anything not on it is invisible.
+
+    A brief instead says what the job is and which dimensions matter, and
+    leaves room to report the unanticipated — the thing a list can never do.
+
+    Replace-not-append is the whole point. Nine form watches accumulated on one
+    oil-filter plan, five of them restatements, because every planning pass
+    could add more and nothing could merge them. There is exactly one focus, so
+    duplicates are impossible by construction.
+    """
+    brief = (brief or "").strip()
+    if not brief:
+        doc["vision_focus"] = None
+        return "Vision focus cleared — the camera goes back to plain description."
+    doc["vision_focus"] = {"brief": brief, "ts": _now()}
+    return f"Camera focus set: {brief}"
+
+
+def get_vision_focus(doc: dict) -> Optional[str]:
+    focus = doc.get("vision_focus")
+    return (focus or {}).get("brief") or None
 
 
 # ── Environment facts & recent captions ──────────────────────────────────────

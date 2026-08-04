@@ -433,7 +433,8 @@ class LiveAgent:
                 prev = worlddoc.last_caption(doc)
                 questions = self._vision_questions(doc)
                 vision_prompt = build_tick_vision_prompt(
-                    prev, self._goal_hint(doc) or None, questions)
+                    prev, self._goal_hint(doc) or None, questions,
+                    focus=worlddoc.get_vision_focus(doc))
                 caption = await self.backend.vision(
                     image_base64, vision_prompt,
                     max_tokens=config.VISION_MAX_TOKENS
@@ -542,38 +543,33 @@ class LiveAgent:
             "correction at face value; the user is standing in front of the object and "
             "you are looking at a description of a photograph of it.",
             "",
-            "Whenever the task is done BY HAND, work out for yourself what the camera "
-            "should be watching about how it is being done, and register those watches in "
-            "the same turn as the plan, without being asked. Two kinds, and most hands-on "
-            "tasks want both:",
+            "Whenever the task is done BY HAND, call set_vision_focus in the same turn as "
+            "the plan, without being asked. ONE brief covering the step they are on: what "
+            "they are doing, and what physical detail you want reported — hand and finger "
+            "positions, how a tool is gripped and turned, what is underneath or nearby, "
+            "what is hot or under load, what is balanced. Then replace it as the work "
+            "moves on. Do NOT create a separate watch per hazard; that produces a dozen "
+            "overlapping questions and the camera answers none of them well.",
             "",
-            "  SAFETY (priority='high') — what could injure them. Hand in the path of a "
-            "blade, pan handle projecting past the edge, a tool that will slip, something "
-            "under load about to let go.",
+            "Cover both what could HURT them and what would merely come out BADLY, because "
+            "the second is most of the value and the part that gets forgotten. A spanner "
+            "pulled instead of pushed, or angled so it rounds the nut. A knife held with "
+            "the index finger on the spine, giving uneven slices. A screwdriver not seated "
+            "square. A crowded pan that steams instead of browning. None of those will "
+            "injure anyone; all of them decide whether the job comes out well, and the "
+            "user cannot watch their own hands. Do not restrict this to cooking and do not "
+            "wait for a task to look dangerous — any time someone is gripping, turning, "
+            "cutting, mixing, seating, aligning or applying force, there is a right way to "
+            "hold it that they may not know.",
             "",
-            "  FORM (priority='normal') — how well the technique is being executed, even "
-            "when nothing is remotely dangerous. This is most of the value and it is the "
-            "part that gets forgotten. A spanner pulled instead of pushed, or set at an "
-            "angle that will round the nut. A knife held with the index finger on the "
-            "spine instead of pinching the blade, giving uneven slices. Dough folded "
-            "rather than pushed. A screwdriver not seated square in the head. A pan "
-            "crowded so things steam instead of browning. Whisking from the wrist instead "
-            "of the elbow. None of these will hurt anyone; all of them decide whether the "
-            "job comes out well, and the user cannot see themselves doing them.",
+            "The camera reports what it sees; judging whether that is dangerous, or merely "
+            "wrong, is YOUR job. Ask it for arrangements and positions, never for a "
+            "verdict — you will get back things like 'left hand flat, fingertips 2cm from "
+            "the blade edge', and it is on you to recognise that as a problem and say so.",
             "",
-            "Do not restrict this to cooking, and do not wait for the task to look "
-            "dangerous. Any time someone is gripping, turning, cutting, mixing, seating, "
-            "aligning or applying force to something, there is a right way to hold it that "
-            "they may not know — ask about that.",
-            "",
-            "Every watch is a question put straight to the camera, so ask for OBSERVABLE "
-            "physical detail, never for a verdict. 'Is the free hand curled with "
-            "fingertips tucked behind the knuckles, or extended flat toward the blade?' — "
-            "not 'is their grip safe?'. 'Is the spanner's handle being pushed away from "
-            "the body or pulled toward it, and is the jaw square on the flats or angled "
-            "across the corners?' — not 'are they using the spanner correctly?'. The "
-            "camera reports what it sees; judging whether that is dangerous, or merely "
-            "wrong, is YOUR job and it cannot do it for you.",
+            "Keep set_expectation for discrete things that either are or are not true yet "
+            "— a search ('is the bag of lobhiya visible?'), a state change ('have the "
+            "onions gone past golden?'). Those have definite answers. Technique does not.",
             "",
             "Only set a time-anchored expectation for a step the user has actually "
             "STARTED. Deadlines attached to steps they haven't begun go overdue while "
@@ -593,7 +589,7 @@ class LiveAgent:
                     questions = self._vision_questions(doc)
                     vision_prompt = build_tick_vision_prompt(
                         worlddoc.last_caption(doc), self._goal_hint(doc) or None,
-                        questions)
+                        questions, focus=worlddoc.get_vision_focus(doc))
                     caption = await self.backend.vision(
                     image_base64, vision_prompt,
                     max_tokens=config.VISION_MAX_TOKENS

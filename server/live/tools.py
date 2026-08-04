@@ -168,6 +168,32 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
     ))
 
     registry.register(Tool(
+        name="set_vision_focus",
+        description=(
+            "Aim the camera at what matters for the CURRENT work — one standing brief, "
+            "read on every frame until you change it. This is how you get useful eyes on "
+            "technique and safety, and it is better than a set_expectation watch for that "
+            "purpose: you cannot know in advance what will be in frame, so a list of "
+            "specific questions makes everything you didn't think of invisible. Say what "
+            "the user is doing and which physical things you want reported — hand and "
+            "finger positions, how a tool is gripped and which way it is turned, what is "
+            "underneath or nearby, what is hot or under load, how stable something is. "
+            "Example: 'User is loosening an oil filter under a car on ramps. Watch hand "
+            "and forearm position relative to the filter, the exhaust and the oil path; "
+            "how the filter wrench is seated and which way it is turned; whether a drain "
+            "pan is underneath; whether the car sits level on the ramps.' "
+            "Ask for OBSERVATIONS — the camera reports, you judge. Replace it whenever the "
+            "work moves on to a different step; send an empty brief to clear it. Keep "
+            "set_expectation for discrete things that either are or aren't true yet."
+        ),
+        fn=lambda brief="": worlddoc.set_vision_focus(get_doc(), brief),
+        parameters={
+            "brief": {"type": "string", "description": "What the user is doing and what physical detail to report. Empty string clears it.", "required": True},
+        },
+        needs_followup=False,
+    ))
+
+    registry.register(Tool(
         name="log_environment",
         description=(
             "Record a durable fact about the physical environment worth remembering beyond this "

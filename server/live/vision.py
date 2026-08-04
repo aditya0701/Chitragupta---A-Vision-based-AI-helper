@@ -24,8 +24,58 @@ def build_tick_vision_prompt(
     prev_caption: Optional[str],
     goals: Optional[str] = None,
     questions: Optional[list[str]] = None,
+    focus: Optional[str] = None,
 ) -> str:
     parts = []
+    if focus:
+        # The standing lens, as opposed to `questions` which are closed asks.
+        #
+        # Discrete questions cannot cover technique, because we do not know
+        # what the frame will contain when we write them — a checklist composed
+        # in advance makes everything not on it invisible. A brief names the job
+        # and the dimensions that matter and then gets out of the way, which is
+        # what a capable vision model actually needs.
+        #
+        # The last clause is the part a question list can never provide: an open
+        # channel for whatever is wrong that nobody thought to ask about.
+        parts += [
+            "WHAT TO PAY ATTENTION TO in this frame:",
+            focus,
+            "",
+            "Report what you SEE on those points, concretely and physically — which "
+            "hand is where, how a tool is held and which way it is being turned, what "
+            "is touching or near what, what is underneath, how close things are, which "
+            "way something points, what is stable and what is balanced or leaning. "
+            "State positions and arrangements, not conclusions.",
+            "",
+            "Do NOT say whether any of it is safe, correct, proper, careful, stable or "
+            "fine — that judgement belongs to the reader and a wrong reassurance from "
+            "you is the most damaging thing you can write. Describe it; they decide.",
+            "",
+            # Observed live: given a pot whose handle plainly projected past the
+            # counter edge, the model wrote "the pot is stable and fully on the
+            # hob, no spillage or overhang". Banning positive verdicts is not
+            # enough — the same reassurance arrives as a confident denial, and
+            # an all-clear nobody checked is worse than no answer at all.
+            "That ban covers NEGATIVE claims too, which are the easier trap. Never write "
+            "'no spillage', 'nothing is overhanging', 'no hazards', 'all clear' or "
+            "similar. Absence is something you usually cannot establish from one frame. "
+            "Report only what you can positively SEE, and where you genuinely cannot tell "
+            "— the angle is wrong, it is out of frame, it is blurred or occluded — say "
+            "exactly that instead. 'Cannot see the pot handle from this angle' is a good "
+            "answer. 'The handle is not overhanging' is a claim you have to earn.",
+            "",
+            "Describe only what is actually in the picture. Do not add a hand, a tool, or "
+            "an action because the task implies one should be there — if no hand is "
+            "visible, say no hand is visible.",
+            "",
+            "Then, separately: if ANYTHING ELSE in the frame looks out of place, "
+            "unstable, spilling, overheating, about to fall or be knocked over, left "
+            "running, or otherwise wrong — say so in one sentence, even if it has "
+            "nothing to do with the focus above and nobody asked. You are the only one "
+            "looking at the whole frame.",
+            "",
+        ]
     if questions:
         # The reasoning model's own brief, asked FIRST and answered explicitly.
         #
