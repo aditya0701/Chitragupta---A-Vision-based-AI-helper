@@ -119,14 +119,24 @@ function flashCapture(kind) {
                           kind === 'skip' ? 220 : 450);
 }
 
+// Shows the dimensions frames are ACTUALLY captured at, derived the same way
+// captureFrame derives them. A bare "640" hid the shape of the frame entirely,
+// which is how 640x360 went unnoticed.
+function captureDims(detail) {
+  const dim = FRAME_DIM[detail] || FRAME_DIM.coarse;
+  if (!video.videoWidth) return `${dim}`;
+  const scale = Math.min(1, dim / Math.max(video.videoWidth, video.videoHeight));
+  return `${Math.round(video.videoWidth * scale)}×${Math.round(video.videoHeight * scale)}`;
+}
+
 function updateTierBadge() {
   const badge = $('tier-badge');
   const fine = frameDetail === 'fine';
-  badge.textContent = fine ? '1024 · fine 🔍' : '640 · coarse';
+  badge.textContent = `${captureDims(frameDetail)} · ${fine ? 'fine 🔍' : 'coarse'}`;
   badge.classList.toggle('fine', fine);
   badge.title = fine
-    ? 'Looking closely — a watch is open, so frames go at full resolution to read labels'
-    : 'Normal watching — 640px frames, ~28% cheaper per tick';
+    ? 'Looking closely — full-resolution frames so small detail and label text are readable'
+    : 'Normal watching — smaller frames, ~28% cheaper per tick';
 }
 
 function updateDoc(rendered) {
@@ -138,7 +148,26 @@ function updateDoc(rendered) {
 async function startCamera() {
   try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: 'environment', width: { ideal: 1280 } }, audio: false,
+      video: {
+        facingMode: 'environment',
+        // 4:3, not the 16:9 a phone gives you by default. Two reasons, and the
+        // second is the real one:
+        //
+        // 1. FRAME_DIM caps the LONGEST side, so 16:9 at coarse is 640x360 —
+        //    only 360px of vertical scene for a camera pointed down at a work
+        //    surface, where vertical is where the hands and the work are.
+        // 2. On most phone sensors 4:3 IS the native readout and 16:9 is a
+        //    vertical crop of it. Asking for 4:3 therefore gains real field of
+        //    view rather than trading it away — 640x480 sees more of the
+        //    counter than 640x360 does, for ~30% more image tokens.
+        //
+        // All `ideal`, never `exact`: a device that cannot do 4:3 should give
+        // its best match rather than failing to open the camera at all.
+        width: { ideal: 1280 },
+        height: { ideal: 960 },
+        aspectRatio: { ideal: 4 / 3 },
+      },
+      audio: false,
     });
   } catch (e) {
     addMsg('system', `Camera failed: ${e.message}`);
@@ -150,6 +179,19 @@ async function startCamera() {
   $('camera-btn').textContent = '🎥 Stop camera';
   $('camera-btn').classList.add('active');
   $('tick-btn').disabled = false;
+
+  // Report what the device actually negotiated, not what we asked for — the
+  // constraints above are all `ideal`, so a phone is free to hand back 16:9
+  // anyway and there is otherwise no way to tell that it did.
+  video.addEventListener('loadedmetadata', () => {
+    const w = video.videoWidth, h = video.videoHeight;
+    const ratio = (w / h).toFixed(2);
+    const shape = Math.abs(w / h - 4 / 3) < 0.05 ? '4:3'
+                : Math.abs(w / h - 16 / 9) < 0.05 ? '16:9 (asked for 4:3)'
+                : `${ratio}:1`;
+    addMsg('system', `Camera: ${w}×${h} — ${shape}`);
+    updateTierBadge();
+  }, { once: true });
 }
 
 function stopCamera() {
