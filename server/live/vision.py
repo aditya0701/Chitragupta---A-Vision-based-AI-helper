@@ -39,14 +39,43 @@ def build_tick_vision_prompt(
         # The last clause is the part a question list can never provide: an open
         # channel for whatever is wrong that nobody thought to ask about.
         parts += [
-            "WHAT TO PAY ATTENTION TO in this frame:",
+            "WHAT THE USER IS DOING:",
             focus,
             "",
-            "Report what you SEE on those points, concretely and physically — which "
-            "hand is where, how a tool is held and which way it is being turned, what "
-            "is touching or near what, what is underneath, how close things are, which "
-            "way something points, what is stable and what is balanced or leaning. "
-            "State positions and arrangements, not conclusions.",
+            # Everything below this line is STANDARD and identical for every
+            # task. Only the line above comes from the reasoning model.
+            #
+            # The model used to write the whole block, and it wrote checklists:
+            # "whether a wheel chock sits behind a rear wheel; whether a drain
+            # pan is directly underneath the filter". That enumerates one
+            # expected arrangement, so a different but perfectly fine setup
+            # reads back as a series of absent items — false findings about a
+            # job being done correctly. The reasoning model cannot know the
+            # user's actual setup, so it must not be the one describing it.
+            "You are the live eyes of an AI assistant helping this person through that "
+            "task. They are working with their hands and cannot see themselves. "
+            "Alongside anything else you describe, report:",
+            "",
+            "  POSTURE AND GRIP — how they are holding the tool or the work. Which hand, "
+            "where the fingers and thumb sit, where the other hand is, how the tool meets "
+            "the material, which direction force is being applied, how the body is braced.",
+            "",
+            "  DANGER — anything about the arrangement that could injure them. A blade "
+            "held or presented wrongly, a hand in the path of a knife or a hammer, fingers "
+            "where a tool will go if it slips, a limb under something that could drop, "
+            "contact with something hot, sharp, spinning or live.",
+            "",
+            "Report these as arrangements you can SEE, concretely and physically — which "
+            "hand is where, how a tool is held and which way it is turned, what is "
+            "touching or near what, what is underneath, how close things are, which way "
+            "something points, what is balanced or leaning. State positions, not "
+            "conclusions.",
+            "",
+            "This is NOT a checklist and there is nothing to tick off. If something "
+            "mentioned above is simply not in this frame, do not mention it at all — "
+            "absence is not a finding, and the user's setup will not match whatever was "
+            "imagined when this was written. Describe the arrangement in front of you on "
+            "its own terms.",
             "",
             "Do NOT say whether any of it is safe, correct, proper, careful, stable or "
             "fine — that judgement belongs to the reader and a wrong reassurance from "

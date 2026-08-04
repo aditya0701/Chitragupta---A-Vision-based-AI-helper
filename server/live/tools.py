@@ -170,25 +170,25 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
     registry.register(Tool(
         name="set_vision_focus",
         description=(
-            "Aim the camera at what matters for the CURRENT work — one standing brief, "
-            "read on every frame until you change it. This is how you get useful eyes on "
-            "technique and safety, and it is better than a set_expectation watch for that "
-            "purpose: you cannot know in advance what will be in frame, so a list of "
-            "specific questions makes everything you didn't think of invisible. Say what "
-            "the user is doing and which physical things you want reported — hand and "
-            "finger positions, how a tool is gripped and which way it is turned, what is "
-            "underneath or nearby, what is hot or under load, how stable something is. "
-            "Example: 'User is loosening an oil filter under a car on ramps. Watch hand "
-            "and forearm position relative to the filter, the exhaust and the oil path; "
-            "how the filter wrench is seated and which way it is turned; whether a drain "
-            "pan is underneath; whether the car sits level on the ramps.' "
-            "Ask for OBSERVATIONS — the camera reports, you judge. Replace it whenever the "
-            "work moves on to a different step; send an empty brief to clear it. Keep "
-            "set_expectation for discrete things that either are or aren't true yet."
+            "Tell the camera WHAT THE USER IS DOING right now. Call this on any hands-on "
+            "task, and update it as the work moves from step to step. "
+            "ONE OR TWO SENTENCES, plain description of the activity — 'User is loosening "
+            "the oil filter under a car that is up on ramps.' or 'User is dicing onions "
+            "on a board at the counter.' That is all. "
+            "Do NOT list things for it to check, and do NOT describe the setup you expect "
+            "— no 'whether a drain pan is underneath', no 'whether a chock is behind the "
+            "wheel'. You cannot see their kitchen or their garage, so any arrangement you "
+            "imagine will be wrong for someone whose setup is merely different, and the "
+            "camera will report your guesses back as problems that do not exist. "
+            "The instructions for reporting grip, posture and danger are already attached "
+            "automatically to every frame — you do not need to write them and you should "
+            "not try. Just say what the activity is, and keep it current. "
+            "Send an empty brief when the hands-on work is done. Keep set_expectation for "
+            "discrete things that either are or aren't true yet."
         ),
         fn=lambda brief="": worlddoc.set_vision_focus(get_doc(), brief),
         parameters={
-            "brief": {"type": "string", "description": "What the user is doing and what physical detail to report. Empty string clears it.", "required": True},
+            "brief": {"type": "string", "description": "One or two sentences: what the user is physically doing right now. Not a checklist. Empty string clears it.", "required": True},
         },
         needs_followup=False,
     ))

@@ -544,12 +544,15 @@ class LiveAgent:
             "you are looking at a description of a photograph of it.",
             "",
             "Whenever the task is done BY HAND, call set_vision_focus in the same turn as "
-            "the plan, without being asked. ONE brief covering the step they are on: what "
-            "they are doing, and what physical detail you want reported — hand and finger "
-            "positions, how a tool is gripped and turned, what is underneath or nearby, "
-            "what is hot or under load, what is balanced. Then replace it as the work "
-            "moves on. Do NOT create a separate watch per hazard; that produces a dozen "
-            "overlapping questions and the camera answers none of them well.",
+            "the plan, without being asked, and keep it current as the work moves on. One "
+            "or two plain sentences saying what the user is physically doing — nothing "
+            "more. The standing instructions that make the camera report grip, posture "
+            "and danger are attached to every frame automatically; you do not write those. "
+            "Do NOT list what it should check and do NOT describe the setup you expect: "
+            "you cannot see their kitchen or garage, so an imagined arrangement comes back "
+            "as problems that do not exist. Do not create a watch per hazard either — that "
+            "produces a dozen overlapping questions and the camera answers none of them "
+            "well.",
             "",
             "Cover both what could HURT them and what would merely come out BADLY, because "
             "the second is most of the value and the part that gets forgotten. A spanner "
