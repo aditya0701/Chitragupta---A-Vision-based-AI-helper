@@ -26,6 +26,7 @@ PY = [
     ("silence detection  ", "t_silence.py"),
     ("apology loop       ", "t_apology.py"),
     ("v2 live prompts    ", "t_live_prompts.py"),
+    ("v2 tick/chat overlap", "t_live_parallel.py"),
 ]
 
 results = []

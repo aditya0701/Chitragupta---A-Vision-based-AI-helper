@@ -478,32 +478,59 @@ class LiveAgent:
             lines.append(stale)
         return "\n".join(lines)
 
+    async def _vision_for(self, image_base64: str) -> tuple[str, str]:
+        """Caption a frame WITHOUT holding the world-doc lock.
+
+        The lock exists to keep the document single-writer — load, mutate,
+        save — and the vision call does none of that: it only reads a snapshot
+        (previous caption, goal, briefs, focus) to build its prompt. Holding
+        the lock across it meant a user speaking mid-tick queued behind a
+        network round trip that had nothing to do with them.
+
+        Vision and reasoning are also separate providers (Qwen on DeepInfra,
+        DeepSeek), so with the lock released here they genuinely overlap: a
+        chat turn's reasoning can run while a tick is still being captioned.
+        """
+        async with self._lock:
+            doc = worlddoc.load()
+            snapshot = (
+                worlddoc.last_caption(doc),
+                self._goal_hint(doc) or None,
+                self._vision_questions(doc, charge=False),
+                worlddoc.get_vision_focus(doc),
+            )
+        prev, goal, questions, focus = snapshot
+        vision_prompt = build_tick_vision_prompt(prev, goal, questions, focus=focus)
+        caption = await self.backend.vision(
+            image_base64, vision_prompt,
+            max_tokens=config.VISION_MAX_TOKENS
+            + config.VISION_TOKENS_PER_QUESTION * len(questions))
+        # The prompt rides back too: it is the single most useful thing in an
+        # exported session for judging why a caption came out as it did.
+        return caption, vision_prompt
+
     async def tick(self, image_base64: str) -> dict:
+        # Phase 1+2: caption the frame with the lock released. Anything urgent
+        # — a person talking — gets the document during this window.
+        caption, vision_prompt = await self._vision_for(image_base64)
+
+        # Phase 3: the write turn. Reload rather than reusing the snapshot,
+        # because a chat turn may well have run while we were captioning and
+        # its writes must not be lost. The caption stays valid either way: it
+        # describes a frame, not the document.
         async with self._lock:
             doc = worlddoc.load()
             self._doc = doc
             try:
-                prev = worlddoc.last_caption(doc)
-                questions = self._vision_questions(doc)
-                vision_prompt = build_tick_vision_prompt(
-                    prev, self._goal_hint(doc) or None, questions,
-                    focus=worlddoc.get_vision_focus(doc))
-                caption = await self.backend.vision(
-                    image_base64, vision_prompt,
-                    max_tokens=config.VISION_MAX_TOKENS
-                    + config.VISION_TOKENS_PER_QUESTION * len(questions))
-
-                # This frame was captured at whatever the last response asked
-                # for; if the focus is the reason it was fine, charge it.
+                # Charge the briefs and the focus now, against current state.
+                self._vision_questions(doc)
                 worlddoc.charge_focus_frame(doc)
 
-                # A person is mid-sentence and this tick is holding the lock
-                # they need. Keep the caption — it is already paid for and is
-                # the freshest thing we know — but skip the reasoning call and
-                # release, so the user waits ~1.5s for a vision call instead of
-                # 3-6s for a whole tick. Losing one tick's commentary costs
-                # nothing; a tick is disposable and a person waiting is not.
-                # Same "latest matters" logic as pendingFrame on the client.
+                # A person is waiting and this tick is about to spend seconds
+                # on a reasoning call. Keep the caption — already paid for, and
+                # the freshest thing we know — then release. A tick's
+                # commentary is disposable; a person waiting is not. Same
+                # "latest matters" logic as pendingFrame on the client.
                 if self._user_waiting:
                     worlddoc.add_recent(doc, caption)
                     worlddoc.save(doc)
@@ -675,21 +702,20 @@ class LiveAgent:
             self._user_waiting = False
 
     async def _chat_locked(self, prompt: str, image_base64: Optional[str] = None) -> dict:
+        # Caption the attached frame before taking the lock, same as tick —
+        # symmetric, and it keeps a tick from stalling behind a chat's vision
+        # call. Any tick that grabs the document during this window is welcome
+        # to it; we reload below.
+        caption, vision_prompt = (
+            await self._vision_for(image_base64) if image_base64 else (None, None))
+
         async with self._lock:
             doc = worlddoc.load()
             self._doc = doc
             try:
-                caption = None
-                vision_prompt = None
-                if image_base64:
-                    questions = self._vision_questions(doc)
-                    vision_prompt = build_tick_vision_prompt(
-                        worlddoc.last_caption(doc), self._goal_hint(doc) or None,
-                        questions, focus=worlddoc.get_vision_focus(doc))
-                    caption = await self.backend.vision(
-                    image_base64, vision_prompt,
-                    max_tokens=config.VISION_MAX_TOKENS
-                    + config.VISION_TOKENS_PER_QUESTION * len(questions))
+                if caption is not None:
+                    self._vision_questions(doc)
+                    worlddoc.charge_focus_frame(doc)
                     batch = worlddoc.add_recent(doc, caption)
                     if batch:
                         await compaction.compact(self.backend, doc, batch)
