@@ -16,6 +16,7 @@ let busy = false;            // a /v2 request is in flight
 let pendingFrame = null;     // latest frame captured while busy — flushed when free
 let queuedPrompt = null;     // user message spoken/typed while busy — flushed when free
 let lastSentFrame = null;    // grayscale sample of the last frame actually sent (diff gate)
+let lastCaptionAt = 0;       // when a caption last came back — how stale reuse would be
 // What the server told us the NEXT tick capture should be. It works a frame
 // ahead because resolution thrown away here can never be recovered server-side.
 let frameDetail = 'coarse';
@@ -86,7 +87,10 @@ function addMsg(kind, text) {
   $('transcript').scrollTop = $('transcript').scrollHeight;
 }
 
+// Every caption arrives through here — tick, yielded tick, or user turn — so
+// this is the one place that knows how fresh our picture of the world is.
 function addCaptionDot(caption) {
+  lastCaptionAt = Date.now();
   logEvent('caption', caption, { detail: frameDetail });
   const div = document.createElement('div');
   div.className = $('show-captions').checked ? 'msg system' : 'caption-dot';
@@ -397,16 +401,53 @@ async function sendMessage() {
   await deliverMessage(prompt);
 }
 
+// How stale a reused caption may be, however still the scene looks. The diff
+// gate samples 32x32, so it cannot see a label turned over or a dial nudged —
+// this is the backstop for the small change it misses.
+const CAPTION_REUSE_MS = 15000;
+
+// Should this turn pay for a fresh caption, or is the last one still true?
+//
+// A question used to cost a full 1024px vision round trip before DeepSeek was
+// even called — 2-5s of latency on top of the answer, on every single turn,
+// including "how long does dal take?" asked while standing perfectly still.
+//
+// The perceptual gate already answers this. If the frame is within threshold
+// of the last one we sent, the caption we got back for that frame still
+// describes what the camera sees; re-describing it buys a differently-worded
+// paragraph and nothing else. The doc carries that caption into the prompt
+// under [Recent observations] with its timestamp, so the model knows both what
+// is there and how old the knowledge is.
+//
+// When the scene HAS moved we still capture at fine — you asked, you get the
+// good look. The two cases are coherent: either the picture is the same and
+// looking again is free of information, or it changed and deserves the best
+// frame available.
+function needsFreshCaption() {
+  if (!stream) return false;
+  if (!lastSentFrame || !lastCaptionAt) return true;      // nothing to reuse
+  if (Date.now() - lastCaptionAt > CAPTION_REUSE_MS) return true;
+  return meanDelta(graySample(), lastSentFrame) >= Number($('sensitivity').value);
+}
+
 async function deliverMessage(prompt) {
   busy = true;
-  if (stream) flashCapture('user');
   setStatus('thinking…');
   try {
     const body = { prompt };
-    // Always fine: a question the user actually asked deserves the best frame,
-    // regardless of what the tick loop is currently sized at.
-    const frame = captureFrame('fine');
-    if (frame) body.image_base64 = frame;
+    if (needsFreshCaption()) {
+      const sample = graySample();
+      const frame = captureFrame('fine');
+      if (frame) {
+        body.image_base64 = frame;
+        lastSentFrame = sample;   // this frame IS now the reference for the gate
+        flashCapture('user');
+        logEvent('capture', 'user turn — scene changed, fresh 1024px frame');
+      }
+    } else if (stream) {
+      flashCapture('skip');
+      logEvent('capture', 'user turn — scene unchanged, reusing the last caption');
+    }
     const resp = await fetch('/v2/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

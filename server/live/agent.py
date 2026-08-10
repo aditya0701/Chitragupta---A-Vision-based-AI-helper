@@ -800,6 +800,19 @@ class LiveAgent:
         if caption:
             lines += [f"[Current camera frame, {worlddoc.fmt_ts(doc['recent'][-1]['ts'])}]",
                       caption, ""]
+        elif doc["recent"]:
+            # No fresh frame: the client's diff gate judged the scene unchanged
+            # since the last one, so re-describing it would have bought nothing
+            # but latency. Say so, because the alternative is the model assuming
+            # it is blind when it is merely not looking again.
+            lines += [
+                "[No new camera frame this turn — the scene has not visibly changed since "
+                f"the last observation above, timed {worlddoc.fmt_ts(doc['recent'][-1]['ts'])}. "
+                "That description still holds; answer from it. If you need to see something "
+                "it does not cover — a label, a small detail, the inside of something — say "
+                "so and call set_vision_focus, and the next camera frame will be aimed at "
+                "it.]", "",
+            ]
         lines += [
             f"[User says] {user_prompt}", "",
             "Answer the user directly — never reply with the silent marker on a user turn. "

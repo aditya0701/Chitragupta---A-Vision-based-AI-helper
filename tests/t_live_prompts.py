@@ -302,6 +302,23 @@ check("tick may only commit on a visibly started step",
       "visibly starting its first step" in tick_p)
 check("tick is told nothing else may commit", "Nothing else on a tick may commit" in tick_p)
 
+# ── 10. Answering without a fresh frame ──────────────────────────────────────
+print("\n[10] CAPTION REUSE (no new frame this turn)")
+nd = doc_with_focus()
+worlddoc.add_recent(nd, "User is standing at the counter, hands still.")
+
+with_frame = A._build_chat_prompt(nd, "how long does dal take?", "a fresh caption")
+no_frame = A._build_chat_prompt(nd, "how long does dal take?", None)
+check("a fresh frame is still labelled as current", "[Current camera frame" in with_frame)
+check("no-frame turn says why there is no frame", "[No new camera frame this turn" in no_frame)
+check("no-frame turn points at the last observation",
+      "still holds; answer from it" in no_frame)
+check("no-frame turn offers a way to look closer", "set_vision_focus" in no_frame)
+check("the note costs nothing when a frame IS attached",
+      "[No new camera frame" not in with_frame)
+check("no note when there is nothing to reuse either",
+      "[No new camera frame" not in A._build_chat_prompt(worlddoc._empty_doc(), "hi", None))
+
 print("\n[8] WORLD DOC RENDER")
 d = doc_with_focus()   # built here, not inherited — sections above reassign `d`
 r = worlddoc.render(d)
