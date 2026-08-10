@@ -40,6 +40,7 @@ for label, script in PY:
 for label, script, arg in [
     ("input race app.js  ", "t_race2.js", str(ROOT / "server/static/app.js")),
     ("input race debug.js", "t_race2.js", str(ROOT / "server/static/debug.js")),
+    ("v2 blank camera   ", "t_live_blank.js", str(ROOT / "server/static/live.js")),
 ]:
     try:
         p = subprocess.run(["node", str(HERE / script), arg],

@@ -193,13 +193,10 @@ async function startCamera() {
     addMsg('system', `Camera failed: ${e.message}`);
     return;
   }
-  video.srcObject = stream;
-  video.style.display = 'block';
-  $('camera-off').style.display = 'none';
-  $('camera-btn').textContent = '🎥 Stop camera';
-  $('camera-btn').classList.add('active');
-  $('tick-btn').disabled = false;
-
+  // Listener BEFORE srcObject: loadedmetadata can fire as soon as the stream is
+  // attached, and a `once` handler registered afterwards can miss it outright —
+  // which is silent, because its only job is a diagnostic message.
+  //
   // Report what the device actually negotiated, not what we asked for — the
   // constraints above are all `ideal`, so a phone is free to hand back 16:9
   // anyway and there is otherwise no way to tell that it did.
@@ -218,12 +215,37 @@ async function startCamera() {
     addMsg('system', `Camera: ${w}×${h} — ${shape}, capturing ${captureDims(frameDetail)}`);
     updateTierBadge();
   }, { once: true });
+
+  video.srcObject = stream;
+  video.style.display = 'block';
+  $('camera-off').style.display = 'none';
+  $('camera-btn').textContent = '🎥 Stop camera';
+  $('camera-btn').classList.add('active');
+  $('tick-btn').disabled = false;
+
+  // The element carries `autoplay`, but autoplay is refused often enough — a
+  // backgrounded tab, a browser that wants a gesture it didn't see — and when
+  // it is refused the element sits at its poster frame, which is BLACK. That
+  // looks exactly like a covered lens. play() is idempotent when it is already
+  // playing, so calling it costs nothing and removes one whole explanation.
+  try {
+    await video.play();
+  } catch (e) {
+    addMsg('system', `⚠️ Video playback was blocked (${e.name}) — tap the preview to start it.`);
+    video.addEventListener('click', () => video.play().catch(() => {}), { once: true });
+  }
+
+  // First frames out of a camera are routinely blank while it meters and
+  // focuses; that is normal and must not be reported as a fault. Only a camera
+  // still blank a couple of seconds in has actually failed.
+  setTimeout(() => { if (stream && frameIsFlat(graySample())) reportFlatFrame(); }, 2500);
 }
 
 function stopCamera() {
   stopTicks();
   if (stream) stream.getTracks().forEach((t) => t.stop());
   stream = null;
+  flatSince = 0;   // a stopped camera is not a faulty one; don't warn on restart
   video.srcObject = null;
   video.style.display = 'none';
   $('camera-off').style.display = 'block';
@@ -269,6 +291,57 @@ function meanDelta(a, b) {
   return sum / a.length;
 }
 
+// Is this frame a picture of anything at all?
+//
+// A covered lens, a camera another app has taken, a track that opened but never
+// delivered — all produce a FLAT frame, and a flat frame is byte-identical to
+// the last flat frame. So the diff gate reports "scene unchanged" and keeps
+// reporting it forever: every tick skipped, every caption reused, the assistant
+// silent, and nothing anywhere saying why. That is exactly the failure
+// DECISIONS.md 6.2 warns about — a filter whose "no" is indistinguishable from
+// having nothing to say.
+//
+// Standard deviation, not mean: a lens against a white worktop is as dead as
+// one against a black one, and both are as dead as a track stuck on grey. What
+// says "this is a photograph" is variation, not brightness.
+const FLAT_FRAME_STDDEV = 2.0;
+
+function frameIsFlat(gray) {
+  if (!gray) return false;                 // no sample at all is a different fault
+  let sum = 0;
+  for (let i = 0; i < gray.length; i++) sum += gray[i];
+  const mean = sum / gray.length;
+  let variance = 0;
+  for (let i = 0; i < gray.length; i++) variance += (gray[i] - mean) ** 2;
+  return Math.sqrt(variance / gray.length) < FLAT_FRAME_STDDEV;
+}
+
+// Warn once per episode, not once per tick — at a 4s interval a stuck camera
+// would otherwise write fifteen identical lines a minute into the transcript.
+let flatSince = 0;
+
+function reportFlatFrame() {
+  if (flatSince) return false;
+  flatSince = Date.now();
+  const track = stream && stream.getVideoTracks()[0];
+  const state = track
+    ? `track "${track.label || 'unnamed'}" readyState=${track.readyState} enabled=${track.enabled} muted=${track.muted}`
+    : 'no video track';
+  addMsg('system', `⚠️ Camera is delivering a blank frame — nothing to look at. `
+    + `Check the lens isn't covered and that no other app has the camera. (${state}, `
+    + `video ${video.videoWidth}×${video.videoHeight})`);
+  logEvent('camera-blank', state);
+  setStatus('camera blank — ticks paused');
+  return true;
+}
+
+function clearFlatFrame() {
+  if (!flatSince) return;
+  addMsg('system', `✅ Camera is showing a picture again (blank for `
+    + `${Math.round((Date.now() - flatSince) / 1000)}s).`);
+  flatSince = 0;
+}
+
 // ── Tick loop ────────────────────────────────────────────────────────────────
 
 function startTicks() {
@@ -300,6 +373,18 @@ function scheduleTick() {
 async function onTick() {
   if (!ticking) return;
   const sample = graySample();
+
+  // Checked BEFORE the diff gate, because a blank frame passes the gate — it
+  // is genuinely identical to the last blank one — and would be reported as a
+  // quiet kitchen rather than a camera fault.
+  if (frameIsFlat(sample)) {
+    reportFlatFrame();
+    flashCapture('blank');
+    scheduleTick();
+    return;
+  }
+  clearFlatFrame();
+
   const threshold = Number($('sensitivity').value);
   if (lastSentFrame && meanDelta(sample, lastSentFrame) < threshold) {
     flashCapture('skip');   // the gate working IS the main cost control — show it
@@ -425,9 +510,14 @@ const CAPTION_REUSE_MS = 15000;
 // frame available.
 function needsFreshCaption() {
   if (!stream) return false;
+  const sample = graySample();
+  // A blank frame is "unchanged" from the last blank frame, so without this the
+  // reuse path would answer every question from a stale caption while the
+  // camera showed nothing — and never say so.
+  if (frameIsFlat(sample)) { reportFlatFrame(); return false; }
   if (!lastSentFrame || !lastCaptionAt) return true;      // nothing to reuse
   if (Date.now() - lastCaptionAt > CAPTION_REUSE_MS) return true;
-  return meanDelta(graySample(), lastSentFrame) >= Number($('sensitivity').value);
+  return meanDelta(sample, lastSentFrame) >= Number($('sensitivity').value);
 }
 
 async function deliverMessage(prompt) {

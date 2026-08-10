@@ -42,6 +42,7 @@
     #camera-wrap.cap-fine::after   { border-color: #e8a11c; }  /* sent, 1024 */
     #camera-wrap.cap-user::after   { border-color: #35c26a; }  /* your turn  */
     #camera-wrap.cap-skip::after   { border-color: #39445a; }  /* diff gate  */
+    #camera-wrap.cap-blank::after  { border-color: #d62d43; }  /* dead frame */
     #camera-video { width: 100%; max-height: 34dvh; display: block; object-fit: contain; }
     #camera-off { padding: 24px; text-align: center; color: #7c8598; font-size: 13px; }
     #controls {
@@ -148,6 +149,7 @@
         <span><i style="background:#e8a11c"></i>sent 1024</span>
         <span><i style="background:#35c26a"></i>your turn</span>
         <span><i style="background:#39445a"></i>skipped</span>
+        <span><i style="background:#d62d43"></i>blank frame</span>
       </div>
       <div id="transcript"></div>
       <div id="status-line">idle</div>
