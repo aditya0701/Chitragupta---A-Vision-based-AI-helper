@@ -12,6 +12,9 @@ Trigger kinds:
   stale_task        an in_progress task hasn't been mentioned by any caption,
                     fact, or tool call in STALENESS_S — earns a check-in
                     question ("still on the chicken?")
+  proposal_pending  a plan was proposed and the user never said yes or no.
+                    Blocks everything downstream, so it re-asks rather than
+                    waiting to be noticed.
 
 Event-anchored expectations never appear here: their firing condition can
 only be judged by the model against the current frame, so they ride along in
@@ -43,6 +46,27 @@ def check(doc: dict) -> list[dict]:
                     f"Expectation '{exp['description']}' (set {worlddoc.fmt_ts(exp['created_ts'])}, "
                     f"due {worlddoc.fmt_ts(exp['due_ts'])}) has passed its deadline without being "
                     f"confirmed done."
+                ),
+            })
+
+    # A plan proposed and never answered. The assistant is blocked on the user
+    # and the user does not know it — the one silence that costs them something
+    # rather than sparing them. Re-armed each time, so it keeps asking rather
+    # than giving up on a plan that may just have been missed over a noisy hob.
+    proposal = doc.get("proposal")
+    if proposal:
+        raised = proposal.get("raised_ts") or proposal.get("ts") or now
+        if now - raised >= config.PROPOSAL_RERAISE_S:
+            proposal["raised_ts"] = now  # claim it, same as a fired expectation
+            events.append({
+                "kind": "proposal_pending",
+                "priority": "normal",
+                "proposal": proposal,
+                "text": (
+                    f"The plan '{proposal['title']}' ({len(proposal['steps'])} steps) was "
+                    f"proposed at {worlddoc.fmt_ts(proposal['ts'])} and the user has not "
+                    f"said yes or no. Nothing is being tracked until they do. Ask them "
+                    f"once, briefly — do not read the whole plan out again."
                 ),
             })
 

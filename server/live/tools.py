@@ -74,7 +74,11 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
     registry.register(Tool(
         name="update_tasks",
         description=(
-            "Create or fully replace the plan — the persistent record of what needs doing. "
+            "Fully replace the plan the user is ALREADY WORKING THROUGH — adding a step they "
+            "asked for, dropping one, reordering. "
+            "For a NEW plan, or a wholesale restructure, use propose_plan instead: a plan the "
+            "user has not agreed to should not be written here, because everything downstream "
+            "reads this as settled. "
             "Send the FULL list every time (items you omit are dropped). Statuses: pending, "
             "in_progress, completed (keep in list), skipped (say why in note). For changing "
             "ONE item's status, prefer mark_task instead of resending everything."
@@ -96,6 +100,74 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
                     "required": ["content", "status"],
                 },
             },
+        },
+        needs_followup=False,
+    ))
+
+    registry.register(Tool(
+        name="propose_plan",
+        description=(
+            "Put a multi-step plan to the user for approval BEFORE committing it. Use this "
+            "instead of update_tasks whenever you are creating a plan for the first time, or "
+            "restructuring an existing one — a recipe, a repair sequence, an order of work. "
+            "The steps do NOT go into the task list, nothing starts tracking them, and no "
+            "expectations are created until the user agrees. "
+            "IN THE SAME REPLY, say the plan out loud: how many steps, what the first one or "
+            "two are, and anything you had to assume or look up. Then ask them to confirm. "
+            "The user is listening and cannot see the document, so a proposal they were never "
+            "told about is just a silent guess. "
+            "When they agree — 'yes', 'go on', 'sounds good', or they simply start doing step "
+            "one — call commit_plan. If they want it different, call propose_plan again with "
+            "the change. If they say no or move on, call discard_plan. "
+            "Do NOT use this for adjusting a plan already committed: to change one step's "
+            "status use mark_task, and to add or drop a step on a plan they are already "
+            "working through use update_tasks."
+        ),
+        fn=lambda title, steps: worlddoc.propose_plan(get_doc(), title, steps),
+        parameters={
+            "title": {"type": "string", "description": "Name of the overall goal, e.g. 'Toor dal'", "required": True},
+            "steps": {
+                "type": "array",
+                "description": "The proposed steps, in order.",
+                "required": True,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "The step's text — always this exact key"},
+                        "note": {"type": "string", "description": "Optional: an assumption or timing worth stating"},
+                    },
+                    "required": ["content"],
+                },
+            },
+        },
+        needs_followup=False,
+    ))
+
+    registry.register(Tool(
+        name="commit_plan",
+        description=(
+            "The user agreed to the proposed plan — write it into the task list for real. "
+            "Call this the moment they assent, including implicitly: 'yes', 'ok', 'go', or "
+            "visibly starting the first step. After committing, set expectations for the "
+            "steps that need timings or watches, and mark the first step in_progress."
+        ),
+        fn=lambda note="": worlddoc.commit_proposal(get_doc(), note),
+        parameters={
+            "note": {"type": "string", "description": "Optional: anything the user changed or added while agreeing", "required": False},
+        },
+        needs_followup=False,
+    ))
+
+    registry.register(Tool(
+        name="discard_plan",
+        description=(
+            "Drop the proposed plan — the user rejected it, changed their mind, or moved on "
+            "to something else entirely. Leaving a stale proposal pending means you will keep "
+            "asking them about a plan they already declined."
+        ),
+        fn=lambda reason="": worlddoc.discard_proposal(get_doc(), reason),
+        parameters={
+            "reason": {"type": "string", "description": "Optional: why it was dropped", "required": False},
         },
         needs_followup=False,
     ))

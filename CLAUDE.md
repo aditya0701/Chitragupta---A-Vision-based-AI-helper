@@ -160,6 +160,7 @@ Each of these cost a real debugging session. Details in `DECISIONS.md`.
 | **Never add a pre-filter whose "no" looks like silence** | Cost a whole class of silently dropped frames. §6.2 |
 | **Don't add `check`/`start`/`look`/`find` to `_ACTION_CUE_RE`** | They appear inside the non-answers it exists to catch. §7.2 |
 | **Use `_locked` variants internally** | `_lock` is not reentrant. §4.3 |
+| **Never `await` a model call inside a v2 write window** | `_write_window` holds `LiveAgent._lock`; a network call inside one re-serializes ticks and chat and undoes the whole phase split. `compaction.compact` is the one deliberate exception. |
 | **Image cost scales with resolution, not JPEG quality** | Quality is not a lever. §1.2 |
 | **A failed tool must never render like an empty result** | DDG's CAPTCHA is HTTP 202, so a block was reported to the model as "nothing found". §3.6 |
 | **Flag network tools `blocking=True`** | They run on the event loop otherwise and stall every live tick. §3.7 |
@@ -232,13 +233,37 @@ A **separate, parallel** workflow — `/v2/*` API, `/live` page, own state
 side-effect. Ticks update the doc continuously; a zero-cost arithmetic trigger
 engine decides when to wake the reasoning model.
 
-- `worlddoc.py` — tasks, expectations, durable environment facts, compacted
-  narrative, raw recent captions. Section order is stability-first for prefix-cache hits.
-- `triggers.py` — overdue expectations + stale tasks, checked by arithmetic. A
-  politeness budget gates unprompted speech.
+- `worlddoc.py` — tasks, a pending plan proposal, expectations, durable
+  environment facts, compacted narrative, raw recent captions. Section order is
+  stability-first for prefix-cache hits.
+- `triggers.py` — overdue expectations, stale tasks, and unanswered plan
+  proposals, all checked by arithmetic. A politeness budget gates unprompted
+  speech.
 - `vision.py` — passes the previous caption back as text so the model describes
   *change*, not an isolated snapshot.
 - `compaction.py` — span-preserving summarisation when `recent` overflows.
+
+**The lock covers writes, not thinking.** `LiveAgent._lock` is held only inside
+`_write_window()` — reload, mutate, save, release, measured in milliseconds.
+Every model call happens outside it, including the reasoning that produces the
+tool calls: `_reason(deferred_writes=True)` hands them to `_apply`, which takes
+its own window. `tick()` runs five phases (caption → fold in → bookkeeping →
+speech worth asking? → speak/gate), and only the odd ones lock.
+
+It used to hold the lock across both DeepSeek round trips plus any `web_search`
+they made, so a question arriving mid-tick queued for seconds behind work that
+wasn't writing anything. `tests/t_live_parallel.py` measures both interruption
+points; `tests/t_live_writes.py` proves the deferred tool calls still land on
+disk. Every window **reloads** — never reuse a doc read before a model call.
+
+**Plans are proposed, not written.** `propose_plan` holds a plan in
+`doc["proposal"]` and out of `tasks`; `commit_plan` promotes it once the user
+agrees, `discard_plan` drops it. Observations (captions, `log_environment`,
+`resolve_expectation`, focus changes) still write silently and immediately —
+gating those would make every tick a permission prompt. The split is *what it
+saw* vs *what it decided*. An unanswered proposal re-raises every
+`PROPOSAL_RERAISE_S` (150s) rather than sitting silently, since the assistant is
+blocked on the user and the user doesn't know it.
 
 **Status: verified by a 27-check fake-backend smoke test, never run against live
 traffic.** v1 is what actually gets used. Building a feature in v2 means debugging

@@ -81,6 +81,7 @@ def _empty_doc() -> dict:
         "last_spoken_ts": 0.0,
         "last_user_turn_ts": 0.0,
         "vision_focus": None,
+        "proposal": None,
         "tasks": [],
         "expectations": [],
         "environment": [],
@@ -145,6 +146,97 @@ def set_tasks(doc: dict, title: str, items: list[dict]) -> str:
     doc["title"] = title or doc["title"]
     doc["tasks"] = normalized
     return f"Task list '{doc['title']}' updated ({len(normalized)} items)."
+
+
+# ── Proposed plans ───────────────────────────────────────────────────────────
+#
+# The plan the assistant WANTS to commit, held out of `tasks` until the user
+# says yes. This exists because of the asymmetry between the two kinds of thing
+# the model writes.
+#
+# Observations — a caption, an environment fact, a resolved watch — are reports
+# of what it saw. They should be written silently and immediately; gating them
+# on approval would turn every tick into a permission prompt and destroy the
+# whole point of a hands-free assistant.
+#
+# A PLAN is different. It is a decision about what the user is going to spend
+# the next hour doing, made from a photograph and a web search, and once it
+# lands in `tasks` it is re-injected into every subsequent prompt as settled
+# fact. The model then reads its own guess back as memory and holds the user to
+# it — the same "a wrong record survives correction" failure that
+# retract_environment_fact exists for, except a plan is much harder to unpick
+# because tasks, expectations and vision focus all get built on top of it.
+#
+# So: propose out loud, commit on assent. One proposal at a time, replaced
+# rather than appended (same reasoning as set_vision_focus — a second proposal
+# means the model changed its mind, not that there are now two plans).
+
+def propose_plan(doc: dict, title: str, steps: list) -> str:
+    """Put a plan up for the user's approval WITHOUT touching `tasks`."""
+    normalized = []
+    for item in steps or []:
+        if isinstance(item, dict):
+            content = (item.get("content") or item.get("task")
+                       or item.get("label") or "").strip()
+            note = (item.get("note") or "").strip() or None
+        else:
+            content, note = str(item).strip(), None
+        if content:
+            normalized.append({"content": content, "note": note})
+
+    if not normalized:
+        return "A proposal needs at least one step — nothing was proposed."
+
+    doc["proposal"] = {
+        "id": uuid.uuid4().hex[:8],
+        "title": (title or "").strip() or "Plan",
+        "steps": normalized,
+        "ts": _now(),
+        # When the user was last actually ASKED about it, which is not the same
+        # as when it was proposed: the re-raise trigger measures from here so a
+        # plan mentioned again on a tick doesn't get nagged about on a timer.
+        "raised_ts": _now(),
+    }
+    return (
+        f"Plan PROPOSED ({len(normalized)} steps) — NOT committed, and NOT in the task "
+        f"list. Nothing is tracking it and no expectations exist for it yet. Say it out "
+        f"loud now, briefly, and ask the user to confirm. Call commit_plan when they "
+        f"agree; propose_plan again if they want it changed."
+    )
+
+
+def get_proposal(doc: dict) -> Optional[dict]:
+    return doc.get("proposal") or None
+
+
+def commit_proposal(doc: dict, note: str = "") -> str:
+    """Promote the pending proposal into the real task list."""
+    proposal = doc.get("proposal")
+    if not proposal:
+        return ("No plan is pending approval — nothing to commit. If you want to write a "
+                "plan the user has already agreed to, use update_tasks.")
+    items = [{"content": s["content"], "status": "pending", "note": s.get("note")}
+             for s in proposal["steps"]]
+    result = set_tasks(doc, proposal["title"], items)
+    doc["proposal"] = None
+    return (f"Plan committed — {result} Now set expectations for the steps that need "
+            f"them, and mark_task the first one in_progress when they start it."
+            + (f" Note: {note}" if note else ""))
+
+
+def discard_proposal(doc: dict, reason: str = "") -> str:
+    proposal = doc.get("proposal")
+    if not proposal:
+        return "No plan is pending approval."
+    doc["proposal"] = None
+    return (f"Proposed plan '{proposal['title']}' discarded."
+            + (f" ({reason})" if reason else ""))
+
+
+def mark_proposal_raised(doc: dict):
+    """Record that the user has just been asked about the pending plan."""
+    if doc.get("proposal"):
+        doc["proposal"]["raised_ts"] = _now()
 
 
 def find_task(doc: dict, ref: str) -> Optional[dict]:
@@ -437,6 +529,26 @@ def render(doc: dict, recent_limit: Optional[int] = None) -> str:
             if t.get("note"):
                 line += f"  ({t['note']})"
             lines.append(line)
+
+    # Rendered right after the tasks it is NOT part of, and labelled hard.
+    # A proposal that reads like a task list is worse than no proposal at all —
+    # the model would act on it as though the user had agreed.
+    proposal = doc.get("proposal")
+    if proposal:
+        lines.append(f"\n[PROPOSED PLAN — NOT COMMITTED, proposed {fmt_ts(proposal['ts'])}]")
+        lines.append(f"Goal: {proposal['title']}")
+        for i, step in enumerate(proposal["steps"], 1):
+            line = f"  {i}. {step['content']}"
+            if step.get("note"):
+                line += f"  ({step['note']})"
+            lines.append(line)
+        lines.append(
+            "The user has NOT agreed to this. It is not the task list, nothing is "
+            "tracking it, and it has no expectations. If they have since agreed, call "
+            "commit_plan. If they changed something, call propose_plan again with the "
+            "change. If they said no or moved on, call discard_plan. Do not start "
+            "working through these steps and do not treat them as decided."
+        )
 
     # The model must be able to see its own standing focus, or it cannot know
     # whether to update it, and cannot tell that it left the camera on fine.

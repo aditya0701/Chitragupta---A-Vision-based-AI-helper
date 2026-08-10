@@ -1,7 +1,6 @@
 """LiveAgent — the tick-driven core of the parallel system.
 
-Three entry points, all serialized on one asyncio.Lock (same concurrency
-lesson as ChitraguptAgent):
+Three entry points:
 
   tick(image)   a live camera frame arrived on the interval. Vision caption
                 → doc update → arithmetic triggers → one reasoning call that
@@ -11,8 +10,26 @@ lesson as ChitraguptAgent):
   poll()        no frame, no user — pure trigger arithmetic (free), one
                 reasoning call only if something actually fired.
 
-The world doc is loaded at turn start, mutated in memory by tool calls (they
-close over `self._doc`), and persisted once at turn end.
+**Locking: the lock covers writes, not thinking.** One asyncio.Lock still
+serializes all mutation of the world document (same concurrency lesson as
+ChitraguptAgent — it is one JSON file and load → mutate → save must be
+atomic). But it is held only inside `_write_window()`, which reloads, applies,
+saves and releases in milliseconds. Every model call — vision, reasoning,
+speech decision — happens with the lock released.
+
+That is deliberate and it is the difference between a responsive assistant and
+one that ignores you. Holding the lock across the reasoning meant a tick owned
+the document for the two DeepSeek round trips it took to think, plus any
+web_search it decided to run: five seconds and more during which nothing was
+being written and a person asking a question simply queued. The write itself
+is a millisecond.
+
+The cost of releasing it is that a turn thinks about a document that may have
+moved by the time it writes. That is why every window RELOADS rather than
+reusing the doc it read earlier, and why the doc-mutating tools all degrade to
+a harmless "no match" string rather than raising when the thing they name is
+gone (see tools.py). Losing a tick's bookkeeping to a race is recoverable —
+the next frame re-derives it. Making the user wait is not.
 """
 
 from __future__ import annotations
@@ -20,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from ..agent import ConversationMemory
@@ -89,6 +107,11 @@ _RECORDING_TOOLS = frozenset({
 # next — "Here's the plan:", "Do this first —".
 _DANGLING_RE = re.compile(r"[:\-–—]\s*$")
 
+# Tools whose whole output is a plan the user needs told about out loud. A
+# reply that calls one of these and then says nothing useful has failed, no
+# matter how correct the document now looks.
+_PLAN_TOOLS = frozenset({"propose_plan", "update_tasks", "mark_task"})
+
 
 def _repair_dangling_plan(text: str, tool_results: list[dict], doc: dict) -> str:
     """Speak the plan when the model announced one and then wrote it into a tool.
@@ -106,12 +129,21 @@ def _repair_dangling_plan(text: str, tool_results: list[dict], doc: dict) -> str
     """
     if not text or not _DANGLING_RE.search(text):
         return text
-    if not any(r["tool"] in ("update_tasks", "mark_task") for r in tool_results):
+    if not any(r["tool"] in _PLAN_TOOLS for r in tool_results):
         return text
+    stem = text.rstrip(":-–— \t")
+
+    # A proposal dangling is the worse version of the same bug: the plan is not
+    # only unseen, it is waiting on an answer the user was never asked for.
+    proposal = worlddoc.get_proposal(doc)
+    if proposal and any(r["tool"] == "propose_plan" for r in tool_results):
+        return (f"{stem}: {len(proposal['steps'])} steps. "
+                f"First: {proposal['steps'][0]['content']}. Shall I go with that?")
+
     todo = [t for t in doc["tasks"] if t["status"] in ("pending", "in_progress")]
     if not todo:
         return text
-    return f"{text.rstrip(':-–— \t')}: {len(todo)} steps. First: {todo[0]['content']}."
+    return f"{stem}: {len(todo)} steps. First: {todo[0]['content']}."
 
 
 def _fallback_from_work(tool_results: list[dict], doc: dict) -> str:
@@ -122,8 +154,12 @@ def _fallback_from_work(tool_results: list[dict], doc: dict) -> str:
     succeeded, and they have no way to see the doc to know better. If the turn
     demonstrably did something, say what.
     """
-    if not any(r["tool"] in ("update_tasks", "mark_task") for r in tool_results or []):
+    if not any(r["tool"] in _PLAN_TOOLS for r in tool_results or []):
         return ""
+    proposal = worlddoc.get_proposal(doc)
+    if proposal and any(r["tool"] == "propose_plan" for r in tool_results):
+        return (f"I've worked out {len(proposal['steps'])} steps for {proposal['title']}, "
+                f"starting with: {proposal['steps'][0]['content']}. Want me to go with that?")
     todo = [t for t in doc["tasks"] if t["status"] in ("pending", "in_progress")]
     if not todo:
         return ""
@@ -172,8 +208,44 @@ class LiveAgent:
                             "needs_followup": tool.needs_followup})
         return results
 
+    @asynccontextmanager
+    async def _write_window(self):
+        """Hold the lock for exactly as long as it takes to write.
+
+        Reload → expose to tools via `self._doc` → yield → save → release.
+        Always reload: the whole point of releasing the lock across model calls
+        is that someone else may have written in the meantime, and reusing a
+        stale in-memory doc here would silently roll their write back.
+
+        The save is inside the try, so a raising body releases the lock without
+        persisting a half-applied mutation.
+        """
+        async with self._lock:
+            doc = worlddoc.load()
+            self._doc = doc
+            try:
+                yield doc
+                worlddoc.save(doc)
+            finally:
+                self._doc = None
+
+    async def _apply(self, tool_calls: list[dict], deferred: bool) -> list[dict]:
+        """Run tool calls, taking a write window only when we don't already hold one.
+
+        `deferred=True` is the path where reasoning ran unlocked, so the tools
+        need their own window. The empty case short-circuits before touching
+        the lock at all — a tick that calls no tools is the common outcome by
+        design, and it should cost nothing, not even contention.
+        """
+        if not deferred:
+            return self._run_tool_calls(tool_calls)
+        if not tool_calls:
+            return []
+        async with self._write_window():
+            return self._run_tool_calls(tool_calls)
+
     async def _reason(self, prompt: str, think: bool, history: Optional[list[dict]] = None,
-                      require_text: bool = False):
+                      require_text: bool = False, deferred_writes: bool = False):
         """One reasoning call + tool execution + at most one follow-up call
         (only when a tool surfaced new information), + one truncation retry.
 
@@ -222,7 +294,7 @@ class LiveAgent:
                 tools=self._native_tools(),
             )
 
-        tool_results = self._run_tool_calls(response.tool_calls)
+        tool_results = await self._apply(response.tool_calls, deferred_writes)
         text = (response.text or "").strip()
 
         followup_results = [r for r in tool_results if r.get("needs_followup")]
@@ -256,7 +328,7 @@ class LiveAgent:
                 conversation_history=history, think=False,
                 tools=self._native_tools(),
             )
-            extra_results = self._run_tool_calls(response2.tool_calls)
+            extra_results = await self._apply(response2.tool_calls, deferred_writes)
             tool_results.extend(extra_results)
             if (response2.text or "").strip():
                 text = response2.text.strip()
@@ -442,6 +514,14 @@ class LiveAgent:
         active = [t["content"] for t in doc["tasks"] if t["status"] == "in_progress"]
         if active:
             lines.append(f"[Current step] {'; '.join(active)}")
+        proposal = worlddoc.get_proposal(doc)
+        if proposal:
+            lines.append(
+                f"[Waiting on the user] You proposed a {len(proposal['steps'])}-step plan "
+                f"for '{proposal['title']}' at {worlddoc.fmt_ts(proposal['ts'])} and they "
+                f"have not said yes or no. Nothing is being tracked until they do, and they "
+                f"cannot see it — so if they have gone quiet, a short 'shall I go ahead with "
+                f"that plan?' is worth saying. Ask; don't read the steps out again.")
         lines += [
             f"[User last spoke] {ago(last_user)}",
             f"[You last spoke] {ago(last_spoke)}",
@@ -464,14 +544,24 @@ class LiveAgent:
         ]
         return "\n".join(lines)
 
-    async def _decide_speech(self, doc: dict, caption: str,
-                             tool_results: list[dict], events: list[dict]) -> str:
-        """Ask the speech question on its own. Returns '' for silence."""
-        prompt = self._build_speech_prompt(doc, caption, tool_results, events)
+    async def _ask_speech(self, prompt: str) -> str:
+        """Put the speech question to the model. Returns '' for silence.
+
+        Takes a prebuilt prompt rather than the doc, because the caller builds
+        it inside a write window and then makes this call with the lock
+        released — a prompt is an immutable snapshot, a doc is not.
+        """
         resp = await self.backend.chat(
             image_base64=None, prompt=prompt, think=False, tools=None)
         text = (resp.text or "").strip()
         return "" if text.upper().startswith(SILENT_MARKER) else text
+
+    async def _decide_speech(self, doc: dict, caption: str,
+                             tool_results: list[dict], events: list[dict]) -> str:
+        """Build-and-ask in one step. Used by poll() and the harnesses; tick()
+        splits the two so the model call falls outside its write window."""
+        return await self._ask_speech(
+            self._build_speech_prompt(doc, caption, tool_results, events))
 
     def _stale_brief_note(self, doc: dict) -> str:
         """Briefs that have been asked many times without ever being resolved."""
@@ -518,6 +608,11 @@ class LiveAgent:
             "is looking for something specific and you can only see a generic match, say "
             "what you can see and ask them to confirm, rather than announcing a find.",
             "- If a task visibly finished or started, call mark_task.",
+            "- If a plan is shown as PROPOSED and the frame shows the user visibly starting "
+            "its first step, that is them agreeing — call commit_plan. Nothing else on a "
+            "tick may commit one: a frame cannot tell you they said yes, and a plan "
+            "committed without their word is exactly what proposing it was meant to "
+            "prevent. If in doubt, leave it pending; they will be asked.",
             "",
             "Your ONLY job on this tick is to make the document match what is now "
             "true. Speaking is decided separately, afterwards, by another step — so do "
@@ -570,105 +665,133 @@ class LiveAgent:
         return caption, vision_prompt
 
     async def tick(self, image_base64: str) -> dict:
+        """One camera frame, all the way through.
+
+        Five phases, and only the odd-numbered ones hold the lock:
+
+          1+2  caption the frame                     UNLOCKED  ~1.5s
+          3a   fold the caption in, claim triggers   locked      ~1ms
+          3b   STAGE 1 — bookkeeping reasoning       UNLOCKED  ~2s + tools
+          3c   decide whether speech is worth asking locked      ~1ms
+          3d   STAGE 2 — the speech decision         UNLOCKED  ~1s
+          3e   politeness gate, record the utterance locked      ~1ms
+
+        Stage 1's tool calls are applied inside their own window by `_apply`
+        (see `_reason(deferred_writes=True)`), not here — which is why 3b can
+        sit outside the lock despite being the phase that does all the writing.
+        """
         # Phase 1+2: caption the frame with the lock released. Anything urgent
         # — a person talking — gets the document during this window.
         caption, vision_prompt = await self._vision_for(image_base64)
 
-        # Phase 3: the write turn. Reload rather than reusing the snapshot,
-        # because a chat turn may well have run while we were captioning and
-        # its writes must not be lost. The caption stays valid either way: it
-        # describes a frame, not the document.
-        async with self._lock:
-            doc = worlddoc.load()
-            self._doc = doc
-            try:
-                # Charge the briefs and the focus now, against current state.
-                self._vision_questions(doc)
-                worlddoc.charge_focus_frame(doc)
+        # Phase 3a: fold the caption in. Reload rather than reusing the
+        # snapshot, because a chat turn may well have run while we were
+        # captioning and its writes must not be lost. The caption stays valid
+        # either way: it describes a frame, not the document.
+        async with self._write_window() as doc:
+            # Charge the briefs and the focus now, against current state.
+            self._vision_questions(doc)
+            worlddoc.charge_focus_frame(doc)
 
-                # A person is waiting and this tick is about to spend seconds
-                # on a reasoning call. Keep the caption — already paid for, and
-                # the freshest thing we know — then release. A tick's
-                # commentary is disposable; a person waiting is not. Same
-                # "latest matters" logic as pendingFrame on the client.
-                if self._user_waiting:
-                    worlddoc.add_recent(doc, caption)
-                    worlddoc.save(doc)
-                    logger.info("Tick yielded mid-turn to a waiting user")
-                    return {"text": None, "caption": caption, "triggers": [],
-                            "tool_calls": [], "yielded": True,
-                            "model": None, "provider": None,
-                            "frame_detail": self._frame_detail(doc),
-                            "doc": worlddoc.render(doc)}
+            # A person is waiting and this tick is about to spend seconds on a
+            # reasoning call. Keep the caption — already paid for, and the
+            # freshest thing we know — then release. A tick's commentary is
+            # disposable; a person waiting is not. Same "latest matters" logic
+            # as pendingFrame on the client.
+            if self._user_waiting:
+                worlddoc.add_recent(doc, caption)
+                logger.info("Tick yielded before reasoning — user turn in flight")
+                return {"text": None, "caption": caption, "triggers": [],
+                        "tool_calls": [], "yielded": True,
+                        "model": None, "provider": None,
+                        "frame_detail": self._frame_detail(doc),
+                        "doc": worlddoc.render(doc)}
 
-                batch = worlddoc.add_recent(doc, caption)
-                if batch:
-                    await compaction.compact(self.backend, doc, batch)
+            batch = worlddoc.add_recent(doc, caption)
+            if batch:
+                # The one model call that stays inside a window. Compaction
+                # rewrites `recent` and `narrative` together, so it cannot be
+                # replayed against a doc that moved underneath it — and it runs
+                # once every RECENT_MAX frames, not every tick.
+                await compaction.compact(self.backend, doc, batch)
 
-                events = triggers.check(doc)
+            events = triggers.check(doc)
+            prompt = self._build_tick_prompt(doc, caption, events)
 
-                # STAGE 1 — bookkeeping. Tools only; whatever prose comes back
-                # is discarded. This call is judged on one thing: is the
-                # document now accurate?
-                prompt = self._build_tick_prompt(doc, caption, events)
-                _, tool_results, response = await self._reason(prompt, think=False)
+        # Phase 3b — UNLOCKED. Bookkeeping: tools only, whatever prose comes
+        # back is discarded. Judged on one thing: is the document now accurate?
+        _, tool_results, response = await self._reason(
+            prompt, think=False, deferred_writes=True)
 
-                # STAGE 2 — speech, asked as its own question with its own
-                # prompt. Skipped entirely when nothing happened that could
-                # possibly warrant speech, so an idle tick still costs exactly
-                # one call.
-                worth_asking = (bool(tool_results) or bool(events)
-                                or triggers.in_followup_window(doc))
+        # Phase 3c: is the speech question even worth asking? Skipped when
+        # nothing happened that could warrant speech, so an idle tick still
+        # costs exactly one call.
+        async with self._write_window() as doc:
+            worth_asking = (bool(tool_results) or bool(events)
+                            or triggers.in_followup_window(doc)
+                            or worlddoc.get_proposal(doc) is not None)
+            # Second yield point. The user started talking while we were doing
+            # bookkeeping — their own turn is about to answer them with more
+            # context than this tick has, so don't spend a call racing it.
+            if worth_asking and self._user_waiting:
+                logger.info("Tick yielded before its speech decision — user turn in flight")
+                worth_asking = False
+            speech_prompt = (
+                self._build_speech_prompt(doc, caption, tool_results, events)
+                if worth_asking else None)
+
+        # Phase 3d — UNLOCKED. The speech decision, on its own prompt.
+        text = await self._ask_speech(speech_prompt) if speech_prompt else ""
+
+        # Phase 3e: gate it and record it.
+        async with self._write_window() as doc:
+            urgent = text.upper().startswith(URGENT_MARKER)
+            if urgent:
+                text = text[len(URGENT_MARKER):].lstrip(" :—-")
+            if text.upper() == SILENT_MARKER:
                 text = ""
-                if worth_asking:
-                    text = await self._decide_speech(doc, caption, tool_results, events)
 
-                urgent = text.upper().startswith(URGENT_MARKER)
-                if urgent:
-                    text = text[len(URGENT_MARKER):].lstrip(" :—-")
-                if text.upper() == SILENT_MARKER:
+            if text and not urgent:
+                # Politeness budget still applies as a floor, but the decision
+                # above already weighed the timing, so anything trigger-driven,
+                # expectation-resolving or inside the follow-up window passes
+                # untouched.
+                important = (
+                    bool(events)
+                    or triggers.in_followup_window(doc)
+                    or any(r["tool"] == "resolve_expectation" for r in tool_results)
+                )
+                watch_priority = "high" if any(
+                    e["anchor"] == "event" and e["priority"] == "high"
+                    for e in worlddoc.open_expectations(doc)
+                ) else "normal"
+                if not important and not triggers.may_speak_unprompted(doc, watch_priority):
+                    logger.info("Politeness gate suppressed unprompted tick speech: %r",
+                                text[:80])
                     text = ""
+            elif urgent and text:
+                logger.info("Urgent tick speech — politeness gate bypassed: %r", text[:80])
 
-                if text and not urgent:
-                    # Politeness budget still applies as a floor, but the
-                    # decision above already weighed the timing, so anything
-                    # trigger-driven, expectation-resolving or inside the
-                    # follow-up window passes untouched.
-                    important = (
-                        bool(events)
-                        or triggers.in_followup_window(doc)
-                        or any(r["tool"] == "resolve_expectation" for r in tool_results)
-                    )
-                    watch_priority = "high" if any(
-                        e["anchor"] == "event" and e["priority"] == "high"
-                        for e in worlddoc.open_expectations(doc)
-                    ) else "normal"
-                    if not important and not triggers.may_speak_unprompted(doc, watch_priority):
-                        logger.info("Politeness gate suppressed unprompted tick speech: %r",
-                                    text[:80])
-                        text = ""
-                elif urgent and text:
-                    logger.info("Urgent tick speech — politeness gate bypassed: %r", text[:80])
+            if text:
+                triggers.mark_spoke(doc)
+                # A tick that just read the pending plan out loud has asked;
+                # don't let the re-raise trigger ask again in two minutes.
+                if worlddoc.get_proposal(doc):
+                    worlddoc.mark_proposal_raised(doc)
 
-                if text:
-                    triggers.mark_spoke(doc)
-
-                worlddoc.save(doc)
-                return {
-                    "text": text or None,
-                    "urgent": bool(urgent and text),
-                    "caption": caption,
-                    "triggers": [e["text"] for e in events],
-                    "tool_calls": tool_results,
-                    "model": response.model,
-                    "provider": response.provider,
-                    "frame_detail": self._frame_detail(doc),
-                    "doc": worlddoc.render(doc),
-                    "debug": {"vision_prompt": vision_prompt, "reason_prompt": prompt,
-                              "raw_text": response.text},
-                }
-            finally:
-                self._doc = None
+            return {
+                "text": text or None,
+                "urgent": bool(urgent and text),
+                "caption": caption,
+                "triggers": [e["text"] for e in events],
+                "tool_calls": tool_results,
+                "model": response.model,
+                "provider": response.provider,
+                "frame_detail": self._frame_detail(doc),
+                "doc": worlddoc.render(doc),
+                "debug": {"vision_prompt": vision_prompt, "reason_prompt": prompt,
+                          "raw_text": response.text},
+            }
 
     # ── Chat ─────────────────────────────────────────────────────────────────
 
@@ -681,12 +804,24 @@ class LiveAgent:
             f"[User says] {user_prompt}", "",
             "Answer the user directly — never reply with the silent marker on a user turn. "
             "Use the world document above as your memory: known environment facts answer "
-            "'where is X' questions; earlier-session narrative answers 'what happened'. "
-            "When you help plan anything with real-world timings, look them up with "
-            "web_search if unsure, write the plan with update_tasks, and set_expectation "
-            "for each step with a deadline or a watch-for condition — in this same turn, "
-            "without being asked. Don't recite the whole plan back; summarize and point "
-            "out only what to do first.",
+            "'where is X' questions; earlier-session narrative answers 'what happened'.",
+            "",
+            "PLANS ARE AGREED BEFORE THEY ARE RECORDED. When the user asks for help with "
+            "something multi-step, look up real timings with web_search if you are unsure, "
+            "then call propose_plan — NOT update_tasks — and in the same reply say the plan "
+            "out loud: how many steps, the first one or two, and anything you assumed or "
+            "substituted. Then ask them to confirm. It is their kitchen, their car and their "
+            "hour; a plan you write silently is a guess they never got to correct, and once "
+            "it is in the task list you will read it back to yourself as settled fact for the "
+            "rest of the session and hold them to it. "
+            "The moment they agree — 'yes', 'ok', 'go on', or they simply start doing step "
+            "one — call commit_plan, and THEN set_expectation for the steps that need a "
+            "deadline or a watch. Expectations belong to a committed plan, not a proposed "
+            "one. If they want it changed, call propose_plan again with the change; if they "
+            "drop the idea, call discard_plan. "
+            "Once a plan is committed, stop proposing: adjust it with mark_task and "
+            "update_tasks as the work moves. And never propose in order to stall — if the "
+            "user asked a direct question, answer it.",
             "",
             "The user is LISTENING to you, not reading. They cannot see your tool calls "
             "or the task list — writing a plan with update_tasks does not show it to "
@@ -756,11 +891,19 @@ class LiveAgent:
         # for a tick that already holds the lock to notice and yield.
         self._user_waiting = True
         try:
-            return await self._chat_locked(prompt, image_base64)
+            return await self._chat_turn(prompt, image_base64)
         finally:
             self._user_waiting = False
 
-    async def _chat_locked(self, prompt: str, image_base64: Optional[str] = None) -> dict:
+    async def _chat_turn(self, prompt: str, image_base64: Optional[str] = None) -> dict:
+        """Same phase split as tick(): windows for writes, everything else out.
+
+        A user turn is the one we most want to be fast, so it might look like
+        this path should just hold the lock and be done. It shouldn't — a chat
+        turn can run three reasoning calls plus a web_search, and holding the
+        document across all of that stalls every tick behind it. Then the
+        captions the user's *next* question depends on are minutes stale.
+        """
         # Caption the attached frame before taking the lock, same as tick —
         # symmetric, and it keeps a tick from stalling behind a chat's vision
         # call. Any tick that grabs the document during this window is welcome
@@ -768,93 +911,95 @@ class LiveAgent:
         caption, vision_prompt = (
             await self._vision_for(image_base64) if image_base64 else (None, None))
 
-        async with self._lock:
-            doc = worlddoc.load()
-            self._doc = doc
-            try:
-                if caption is not None:
-                    self._vision_questions(doc)
-                    worlddoc.charge_focus_frame(doc)
-                    batch = worlddoc.add_recent(doc, caption)
-                    if batch:
-                        await compaction.compact(self.backend, doc, batch)
+        async with self._write_window() as doc:
+            if caption is not None:
+                self._vision_questions(doc)
+                worlddoc.charge_focus_frame(doc)
+                batch = worlddoc.add_recent(doc, caption)
+                if batch:
+                    await compaction.compact(self.backend, doc, batch)
+            built = self._build_chat_prompt(doc, prompt, caption)
 
-                built = self._build_chat_prompt(doc, prompt, caption)
-                text, tool_results, response = await self._reason(
-                    built, think=should_think(prompt),
-                    history=self.memory.get_history(),
-                    require_text=True,  # a user turn is never allowed to be silent
-                )
-                text = _repair_dangling_plan(text, tool_results, doc)
-                if not text:
-                    text = (_fallback_from_work(tool_results, doc)
-                            or "(no reply — something went wrong, try again)")
+        text, tool_results, response = await self._reason(
+            built, think=should_think(prompt),
+            history=self.memory.get_history(),
+            require_text=True,  # a user turn is never allowed to be silent
+            deferred_writes=True,
+        )
 
-                self.memory.add("user", prompt)
-                self.memory.add("assistant", text)
-                triggers.mark_spoke(doc)      # suppresses stale-task nags
-                triggers.mark_user_turn(doc)  # but OPENS the tick follow-up window
-                worlddoc.save(doc)
-                return {
-                    "text": text,
-                    "caption": caption,
-                    "tool_calls": tool_results,
-                    "model": response.model,
-                    "provider": response.provider,
-                    "frame_detail": self._frame_detail(doc),
-                    "doc": worlddoc.render(doc),
-                    "debug": {"vision_prompt": vision_prompt, "reason_prompt": built,
-                              "raw_text": response.text},
-                }
-            finally:
-                self._doc = None
+        async with self._write_window() as doc:
+            text = _repair_dangling_plan(text, tool_results, doc)
+            if not text:
+                text = (_fallback_from_work(tool_results, doc)
+                        or "(no reply — something went wrong, try again)")
+
+            self.memory.add("user", prompt)
+            self.memory.add("assistant", text)
+            triggers.mark_spoke(doc)      # suppresses stale-task nags
+            triggers.mark_user_turn(doc)  # but OPENS the tick follow-up window
+            # If this turn put a plan up for approval, the reply just read it
+            # out — that counts as having asked.
+            if any(r["tool"] == "propose_plan" for r in tool_results):
+                worlddoc.mark_proposal_raised(doc)
+            return {
+                "text": text,
+                "caption": caption,
+                "tool_calls": tool_results,
+                "model": response.model,
+                "provider": response.provider,
+                "frame_detail": self._frame_detail(doc),
+                "doc": worlddoc.render(doc),
+                "debug": {"vision_prompt": vision_prompt, "reason_prompt": built,
+                          "raw_text": response.text},
+            }
 
     # ── Poll (no frame, no user — the free heartbeat) ────────────────────────
 
     async def poll(self) -> dict:
-        async with self._lock:
-            doc = worlddoc.load()
-            self._doc = doc
-            try:
-                events = triggers.check(doc)
-                # Politeness: overdue expectations are the product working as
-                # designed — only 'low' priority ones and stale-task nags wait
-                # for the gap.
-                speakable = [
-                    e for e in events
-                    if e["priority"] == "high"
-                    or (e["kind"] == "expectation_due" and e["priority"] != "low")
-                    or triggers.may_speak_unprompted(doc, e["priority"])
-                ]
-                if not events:
-                    return {"message": None, "doc": worlddoc.render(doc)}
-                worlddoc.save(doc)  # persist fired-status even if we stay quiet
-                if not speakable:
-                    return {"message": None, "doc": worlddoc.render(doc)}
+        # Same shape as tick(): a window to claim the events, the reasoning
+        # outside, a window to record what was said. Poll fires rarely, but it
+        # fires from a background heartbeat — the one caller with no user
+        # watching it, and so the worst one to let sit on the lock.
+        async with self._write_window() as doc:
+            events = triggers.check(doc)   # claims fired-status; the save persists it
+            # Politeness: overdue expectations are the product working as
+            # designed — only 'low' priority ones and stale-task nags wait
+            # for the gap.
+            speakable = [
+                e for e in events
+                if e["priority"] == "high"
+                or (e["kind"] == "expectation_due" and e["priority"] != "low")
+                or triggers.may_speak_unprompted(doc, e["priority"])
+            ]
+            if not speakable:
+                return {"message": None, "doc": worlddoc.render(doc)}
 
-                lines = [
-                    PERSONA, "", SYSTEM_BRIEF, "",
-                    worlddoc.render(doc), "",
-                    "[Trigger events — these just fired by arithmetic; no camera frame, no "
-                    "user message. Write ONE short message to the user addressing them. "
-                    "Update tasks/expectations via tools as appropriate.]",
-                ]
-                lines += [f"- {e['text']}" for e in speakable]
-                prompt = "\n".join(lines)
-                text, tool_results, response = await self._reason(prompt, think=False)
-                if text.upper() == SILENT_MARKER:
-                    text = ""
-                if text:
-                    triggers.mark_spoke(doc)
-                worlddoc.save(doc)
-                return {
-                    "message": text or None,
-                    "triggers": [e["text"] for e in speakable],
-                    "tool_calls": tool_results,
-                    "doc": worlddoc.render(doc),
-                }
-            finally:
-                self._doc = None
+            lines = [
+                PERSONA, "", SYSTEM_BRIEF, "",
+                worlddoc.render(doc), "",
+                "[Trigger events — these just fired by arithmetic; no camera frame, no "
+                "user message. Write ONE short message to the user addressing them. "
+                "Update tasks/expectations via tools as appropriate.]",
+            ]
+            lines += [f"- {e['text']}" for e in speakable]
+            prompt = "\n".join(lines)
+
+        text, tool_results, response = await self._reason(
+            prompt, think=False, deferred_writes=True)
+
+        async with self._write_window() as doc:
+            if text.upper() == SILENT_MARKER:
+                text = ""
+            if text:
+                triggers.mark_spoke(doc)
+                if worlddoc.get_proposal(doc):
+                    worlddoc.mark_proposal_raised(doc)
+            return {
+                "message": text or None,
+                "triggers": [e["text"] for e in speakable],
+                "tool_calls": tool_results,
+                "doc": worlddoc.render(doc),
+            }
 
     # ── Reset ────────────────────────────────────────────────────────────────
 

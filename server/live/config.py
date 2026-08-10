@@ -45,6 +45,13 @@ FOLLOWUP_WINDOW_S: int = int(os.getenv("LIVE_FOLLOWUP_WINDOW_S", "180"))
 # asking one stale question. At a 6s tick that is roughly four minutes.
 MAX_BRIEF_ASKS: int = int(os.getenv("LIVE_MAX_BRIEF_ASKS", "40"))
 
+# How long a proposed-but-unconfirmed plan may sit before the user is asked
+# about it again. A proposal the user never answered is the one state where
+# silence is actively harmful: the assistant is waiting on them, they have no
+# idea it is waiting, and nothing is being tracked in the meantime. Long enough
+# that it isn't nagging someone who is simply thinking about it.
+PROPOSAL_RERAISE_S: int = int(os.getenv("LIVE_PROPOSAL_RERAISE_S", "150"))
+
 # How many watches may be put to the camera on a single frame. A whole plan's
 # worth of watches is far too many to ask at once — they cannot all be answered
 # inside one vision reply, and every one is billed on every tick.

@@ -222,7 +222,88 @@ check("stage 2 is much cheaper than stage 1", len(stage2) < len(stage1) / 2,
 check("stage 2 omits the full doc", "[Recent observations]" not in stage2)
 check("stage 2 omits the system brief", "HOW THIS WORKS" not in stage2)
 
+# ── 9. Propose-then-commit ───────────────────────────────────────────────────
+print("\n[9] PROPOSE-THEN-COMMIT")
+from server.live import triggers
+from server.live.tools import build_live_tools
+from server.live.agent import _repair_dangling_plan, _fallback_from_work
+
+d = worlddoc._empty_doc()
+msg = worlddoc.propose_plan(d, "Toor dal", [
+    {"content": "Rinse and soak the dal", "note": "30 min"},
+    {"content": "Pressure cook 4 whistles"},
+    {"content": "Make the tadka"},
+])
+check("proposing does NOT write the task list", d["tasks"] == [], repr(d["tasks"]))
+check("proposal is held separately", worlddoc.get_proposal(d) is not None)
+check("tool result says it is not committed", "NOT committed" in msg)
+check("tool result tells it to say the plan aloud", "out loud" in msg)
+
+r = worlddoc.render(d)
+check("render flags it uncommitted", "[PROPOSED PLAN — NOT COMMITTED" in r)
+check("render states the user has not agreed", "has NOT agreed" in r)
+check("render names the three exits",
+      all(t in r for t in ["commit_plan", "propose_plan", "discard_plan"]))
+check("render forbids working through it", "do not treat them as decided" in r.lower())
+check("proposal renders before the camera focus",
+      "[PROPOSED PLAN" in r and (worlddoc.set_vision_focus(d, "User is at the hob.") or True)
+      and worlddoc.render(d).index("[PROPOSED PLAN") < worlddoc.render(d).index("[Camera focus"))
+
+# A dangling "here's the plan:" must become speech, and must ASK.
+spoken = _repair_dangling_plan("Right — here's the plan:",
+                               [{"tool": "propose_plan", "result": msg}], d)
+check("dangling proposal is spoken", "3 steps" in spoken)
+check("dangling proposal names the first step", "Rinse and soak" in spoken)
+check("dangling proposal asks for confirmation", spoken.rstrip().endswith("?"), spoken)
+fb = _fallback_from_work([{"tool": "propose_plan", "result": msg}], d)
+check("speechless proposal falls back to asking", fb.rstrip().endswith("?"), fb)
+
+# Unanswered proposals get re-raised rather than sitting silently.
+d["proposal"]["raised_ts"] = worlddoc._now() - config.PROPOSAL_RERAISE_S - 1
+ev = triggers.check(d)
+check("stale proposal fires a trigger",
+      any(e["kind"] == "proposal_pending" for e in ev))
+check("re-raise is claimed so it doesn't fire every tick",
+      not any(e["kind"] == "proposal_pending" for e in triggers.check(d)))
+check("re-raise tells it not to re-read the steps",
+      "do not read the whole plan out again"
+      in next(e["text"] for e in ev if e["kind"] == "proposal_pending").lower())
+check("speech step is told a plan is awaiting an answer",
+      "[Waiting on the user]" in A._build_speech_prompt(d, "cap", [], []))
+
+# Committing promotes it; nothing is lost and the proposal is cleared.
+out = worlddoc.commit_proposal(d)
+check("commit writes the real task list", [t["content"] for t in d["tasks"]]
+      == ["Rinse and soak the dal", "Pressure cook 4 whistles", "Make the tadka"])
+check("commit carries the note across", d["tasks"][0]["note"] == "30 min")
+check("commit leaves every step pending", {t["status"] for t in d["tasks"]} == {"pending"})
+check("commit clears the proposal", worlddoc.get_proposal(d) is None)
+check("commit prompts for expectations next", "set expectations" in out.lower())
+check("committing nothing is a no-op, not a crash",
+      "No plan is pending" in worlddoc.commit_proposal(d))
+check("discarding nothing is a no-op, not a crash",
+      "No plan is pending" in worlddoc.discard_proposal(d))
+
+names = {t["function"]["name"] for t in build_live_tools(lambda: d).to_openai_tools()}
+check("all three proposal tools are registered",
+      {"propose_plan", "commit_plan", "discard_plan"} <= names, sorted(names))
+
+chat_p = A._build_chat_prompt(worlddoc._empty_doc(), "help me make toor dal", None)
+check("chat prompt teaches propose-before-record",
+      "PLANS ARE AGREED BEFORE THEY ARE RECORDED" in chat_p)
+check("chat prompt routes new plans to propose_plan, not update_tasks",
+      "call propose_plan — NOT update_tasks" in chat_p)
+check("chat prompt defers expectations until commit",
+      "Expectations belong to a committed plan" in chat_p)
+check("chat prompt forbids proposing as a stall", "never propose in order to stall" in chat_p)
+
+tick_p = A._build_tick_prompt(doc_with_focus(), "User picks up the dal.", events=[])
+check("tick may only commit on a visibly started step",
+      "visibly starting its first step" in tick_p)
+check("tick is told nothing else may commit", "Nothing else on a tick may commit" in tick_p)
+
 print("\n[8] WORLD DOC RENDER")
+d = doc_with_focus()   # built here, not inherited — sections above reassign `d`
 r = worlddoc.render(d)
 check("current time header first", r.startswith("[Current time:"))
 check("goal rendered", "[Goal] Oil filter change" in r)

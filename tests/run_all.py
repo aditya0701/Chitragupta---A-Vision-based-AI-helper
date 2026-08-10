@@ -27,6 +27,7 @@ PY = [
     ("apology loop       ", "t_apology.py"),
     ("v2 live prompts    ", "t_live_prompts.py"),
     ("v2 tick/chat overlap", "t_live_parallel.py"),
+    ("v2 deferred writes ", "t_live_writes.py"),
 ]
 
 results = []

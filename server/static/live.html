@@ -106,6 +106,13 @@
       font-size: 12px; line-height: 1.55; white-space: pre-wrap; color: #b9c2d4;
     }
     #status-line { font-size: 11px; color: #7c8598; padding: 4px 12px; background: #12151c; }
+    /* A plan awaiting the user's yes/no — the only part of the doc that is
+       blocked on them rather than describing what happened. */
+    mark.pending-plan {
+      display: block; background: #3a2d16; color: #f0d9a8;
+      border-left: 3px solid #e8a11c; border-radius: 0 4px 4px 0;
+      padding: 6px 10px; margin: 4px 0;
+    }
 
     @media (max-width: 800px) {
       main { flex-direction: column; }

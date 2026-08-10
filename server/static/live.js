@@ -139,8 +139,24 @@ function updateTierBadge() {
     : 'Normal watching — smaller frames, ~28% cheaper per tick';
 }
 
+const escHtml = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+// A plan waiting on the user's yes/no is the one thing in the document that is
+// blocked ON THEM. Everything else is a record; this is a question. It gets
+// highlighted so a glance at the panel answers "is it waiting for me?" — the
+// spoken ask is still the primary channel, this is the backstop for when the
+// kitchen was too loud or the phone was face-down.
 function updateDoc(rendered) {
-  if (rendered != null) $('doc-panel').textContent = rendered || '(empty)';
+  if (rendered == null) return;
+  const panel = $('doc-panel');
+  const text = rendered || '(empty)';
+  const start = text.indexOf('[PROPOSED PLAN');
+  if (start < 0) { panel.textContent = text; return; }   // textContent: no escaping needed
+  let end = text.indexOf('\n\n[', start);
+  if (end < 0) end = text.length;
+  panel.innerHTML = escHtml(text.slice(0, start))
+    + '<mark class="pending-plan">' + escHtml(text.slice(start, end)) + '</mark>'
+    + escHtml(text.slice(end));
 }
 
 // ── Camera ───────────────────────────────────────────────────────────────────
