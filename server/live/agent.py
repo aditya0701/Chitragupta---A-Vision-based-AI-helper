@@ -617,7 +617,8 @@ class LiveAgent:
                 # prompt. Skipped entirely when nothing happened that could
                 # possibly warrant speech, so an idle tick still costs exactly
                 # one call.
-                worth_asking = bool(tool_results) or bool(events)                     or triggers.in_followup_window(doc)
+                worth_asking = (bool(tool_results) or bool(events)
+                                or triggers.in_followup_window(doc))
                 text = ""
                 if worth_asking:
                     text = await self._decide_speech(doc, caption, tool_results, events)
