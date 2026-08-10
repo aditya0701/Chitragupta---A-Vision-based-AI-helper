@@ -12,9 +12,27 @@ const POLL_INTERVAL_MS = 20000;
 let stream = null;
 let ticking = false;
 let tickTimer = null;
-let busy = false;            // a /v2 request is in flight
-let pendingFrame = null;     // latest frame captured while busy — flushed when free
-let queuedPrompt = null;     // user message spoken/typed while busy — flushed when free
+// Two independent in-flight flags, NOT one.
+//
+// A single `busy` covering both was the last thing forcing ticks and chat to
+// take turns. The server was restructured so they overlap — the lock now covers
+// writes only, and a tick yields outright when someone is waiting — and none of
+// that reached the user, because the browser refused to put their message on
+// the wire until the tick came back. The queue message they saw ("waiting for
+// the current tick to finish") was the client apologising for a constraint that
+// no longer existed anywhere else in the system.
+//
+// They protect genuinely different things:
+//   tickBusy  one frame in flight at a time, so frames cannot stack up
+//   chatBusy  one user turn at a time, so replies cannot interleave
+// Neither has any reason to block the other.
+let tickBusy = false;
+let chatBusy = false;
+let pendingFrame = null;     // latest frame captured while a tick was in flight
+let queuedPrompt = null;     // user message sent while another user turn was in flight
+// Highest doc revision already painted. Concurrency means responses can arrive
+// out of order; without this a slow tick's stale render overwrites a newer one.
+let lastDocRev = 0;
 let lastSentFrame = null;    // grayscale sample of the last frame actually sent (diff gate)
 let lastCaptionAt = 0;       // when a caption last came back — how stale reuse would be
 // What the server told us the NEXT tick capture should be. It works a frame
@@ -100,7 +118,15 @@ function addCaptionDot(caption) {
   $('transcript').scrollTop = $('transcript').scrollHeight;
 }
 
-function setStatus(text) { $('status-line').textContent = text; }
+// Two things can now be in flight at once, so the status line has two authors.
+// The user's own turn always wins the line — it is the thing they are actually
+// waiting on, and a tick narrating "silent tick" over the top of "thinking…"
+// reads as though their question was dropped.
+let tickStatus = '';
+let chatStatus = '';
+function renderStatus() { $('status-line').textContent = chatStatus || tickStatus || 'idle'; }
+function setStatus(text) { tickStatus = text; renderStatus(); }
+function setChatStatus(text) { chatStatus = text; renderStatus(); }
 
 // ── Capture feedback ─────────────────────────────────────────────────────────
 // Two separate signals, deliberately: the badge is STATE (what the next capture
@@ -150,8 +176,14 @@ const escHtml = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', 
 // highlighted so a glance at the panel answers "is it waiting for me?" — the
 // spoken ask is still the primary channel, this is the backstop for when the
 // kitchen was too loud or the phone was face-down.
-function updateDoc(rendered) {
+function updateDoc(rendered, rev) {
   if (rendered == null) return;
+  // Drop a render older than one already painted. A tick that started before a
+  // chat turn can finish after it, and its doc predates the chat's writes.
+  if (rev != null) {
+    if (rev < lastDocRev) return;
+    lastDocRev = rev;
+  }
   const panel = $('doc-panel');
   const text = rendered || '(empty)';
   const start = text.indexOf('[PROPOSED PLAN');
@@ -361,7 +393,7 @@ function stopTicks() {
   // still running, which reads as though the turn was cancelled — it never
   // was, and the reply still arrives. Toggling a control must not narrate
   // someone else's request.
-  if (!busy) setStatus('idle');
+  if (!tickBusy) setStatus('idle');   // chatStatus owns the line if a turn is live
 }
 
 function scheduleTick() {
@@ -394,7 +426,10 @@ async function onTick() {
   }
   const frame = captureFrame(frameDetail);
   if (!frame) { scheduleTick(); return; }
-  if (busy) {
+  // Only another TICK blocks a tick. A user turn in flight does not — the
+  // server yields the tick's reasoning itself when it sees someone waiting, and
+  // keeps the caption either way, so the frame is never wasted.
+  if (tickBusy) {
     pendingFrame = { frame, sample };  // keep only the latest; flushed when free
     scheduleTick();
     return;
@@ -404,7 +439,7 @@ async function onTick() {
 }
 
 async function sendTick(frame, sample) {
-  busy = true;
+  tickBusy = true;
   flashCapture(frameDetail === 'fine' ? 'fine' : 'coarse');
   setStatus(`tick → vision + reasoning… (${FRAME_DIM[frameDetail] || FRAME_DIM.coarse}px)`);
   try {
@@ -419,7 +454,7 @@ async function sendTick(frame, sample) {
     // waiting. Keep the caption, say nothing — it is not a silent tick.
     if (data.yielded) {
       if (data.caption) addCaptionDot(data.caption);
-      updateDoc(data.doc);
+      updateDoc(data.doc, data.doc_rev);
       setStatus('tick yielded — answering you first');
       return;
     }
@@ -437,32 +472,29 @@ async function sendTick(frame, sample) {
       if (data.urgent && synth) synth.cancel();
       speak(data.text);
     }
-    updateDoc(data.doc);
+    updateDoc(data.doc, data.doc_rev);
     const lens = frameDetail === 'fine' ? ' · 🔍 looking closely' : '';
     setStatus((data.urgent ? '⚠️ warned' : data.text ? 'spoke' : 'silent tick') + lens);
   } catch (e) {
     setStatus(`tick failed: ${e.message}`);
   } finally {
-    busy = false;
-    flushPending();
+    tickBusy = false;
+    flushPendingFrame();
   }
 }
 
-// A queued user message always goes before a buffered frame: the person is
-// waiting on an answer, the frame is only ever a few seconds of staleness.
-function flushPending() {
-  if (busy) return;
-  if (queuedPrompt) {
-    const prompt = queuedPrompt;
-    queuedPrompt = null;
-    deliverMessage(prompt);
-    return;
-  }
-  if (pendingFrame && ticking) {
-    const { frame, sample } = pendingFrame;
-    pendingFrame = null;
-    sendTick(frame, sample);
-  }
+function flushPendingFrame() {
+  if (tickBusy || !pendingFrame || !ticking) return;
+  const { frame, sample } = pendingFrame;
+  pendingFrame = null;
+  sendTick(frame, sample);
+}
+
+function flushQueuedPrompt() {
+  if (chatBusy || !queuedPrompt) return;
+  const prompt = queuedPrompt;
+  queuedPrompt = null;
+  deliverMessage(prompt);
 }
 
 // ── Chat ─────────────────────────────────────────────────────────────────────
@@ -473,14 +505,18 @@ async function sendMessage() {
   if (!prompt) return;
   input.value = '';
   addMsg('user', prompt);
-  // A tick holds `busy` for its whole vision+reasoning round trip, which on a
-  // 4s interval is most of the wall clock. Dropping the message here (the
-  // original behavior) meant speaking or hitting Enter mid-tick did nothing
-  // at all — no reply, no error, and with voice input no visible input box to
-  // notice it in. Queue it instead, exactly as pendingFrame does for frames.
-  if (busy) {
+  // Deliberately does NOT check tickBusy. A tick in flight is no reason to hold
+  // a question back: the two hit different models on different services, the
+  // server's lock covers writes only, and the tick abandons its own reasoning
+  // the moment it sees someone waiting. Queueing here made every question wait
+  // out a round trip it had no dependency on.
+  //
+  // Only another user turn queues, so replies cannot interleave. Speaking or
+  // hitting Enter mid-turn must never silently do nothing — with voice input
+  // there is no visible input box to notice a dropped message in.
+  if (chatBusy) {
     queuedPrompt = prompt;
-    setStatus('queued — waiting for the current tick to finish…');
+    setChatStatus('one moment — still answering the last one…');
     return;
   }
   await deliverMessage(prompt);
@@ -521,8 +557,8 @@ function needsFreshCaption() {
 }
 
 async function deliverMessage(prompt) {
-  busy = true;
-  setStatus('thinking…');
+  chatBusy = true;
+  setChatStatus('thinking…');
   try {
     const body = { prompt };
     if (needsFreshCaption()) {
@@ -551,21 +587,24 @@ async function deliverMessage(prompt) {
     if (data.caption) addCaptionDot(data.caption);
     addMsg('assistant', data.text || '(no reply)');
     if (data.text) speak(data.text);
-    updateDoc(data.doc);
-    setStatus(frameDetail === 'fine' ? 'idle · 🔍 looking closely' : 'idle');
+    updateDoc(data.doc, data.doc_rev);
+    setChatStatus('');   // hand the line back to the tick loop
   } catch (e) {
     addMsg('system', `Chat failed: ${e.message}`);
-    setStatus('idle');
+    setChatStatus('');
   } finally {
-    busy = false;
-    flushPending();
+    chatBusy = false;
+    flushQueuedPrompt();
   }
 }
 
 // ── Poll heartbeat (fired expectations while no ticks are running) ───────────
 
 async function pollTriggers() {
-  if (busy) return;
+  // Still skipped while anything else is running: poll is the free heartbeat
+  // for when NOTHING is happening, and firing it alongside a live turn just
+  // spends a reasoning call to re-derive what that turn is already handling.
+  if (tickBusy || chatBusy) return;
   try {
     const resp = await fetch('/v2/poll');
     const data = await resp.json();
@@ -574,7 +613,7 @@ async function pollTriggers() {
       addMsg('assistant', `⏰ ${data.message}`);
       speak(data.message);  // an expectation firing is the main thing worth hearing
     }
-    updateDoc(data.doc);
+    updateDoc(data.doc, data.doc_rev);
   } catch (_) { /* transient — next poll will catch up */ }
 }
 

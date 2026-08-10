@@ -222,6 +222,12 @@ class LiveAgent:
         """
         async with self._lock:
             doc = worlddoc.load()
+            # Bumped on entry, not on save: windows are serialized by the lock,
+            # so entry order IS write order, and a render taken inside the
+            # window then carries the rev it will be saved under. Bumping in
+            # save() would hand two concurrent responses the same rev and the
+            # client could not order them.
+            doc["rev"] = int(doc.get("rev") or 0) + 1
             self._doc = doc
             try:
                 yield doc
@@ -705,7 +711,7 @@ class LiveAgent:
                         "tool_calls": [], "yielded": True,
                         "model": None, "provider": None,
                         "frame_detail": self._frame_detail(doc),
-                        "doc": worlddoc.render(doc)}
+                        "doc": worlddoc.render(doc), "doc_rev": doc["rev"]}
 
             batch = worlddoc.add_recent(doc, caption)
             if batch:
@@ -788,7 +794,7 @@ class LiveAgent:
                 "model": response.model,
                 "provider": response.provider,
                 "frame_detail": self._frame_detail(doc),
-                "doc": worlddoc.render(doc),
+                "doc": worlddoc.render(doc), "doc_rev": doc["rev"],
                 "debug": {"vision_prompt": vision_prompt, "reason_prompt": prompt,
                           "raw_text": response.text},
             }
@@ -961,7 +967,7 @@ class LiveAgent:
                 "model": response.model,
                 "provider": response.provider,
                 "frame_detail": self._frame_detail(doc),
-                "doc": worlddoc.render(doc),
+                "doc": worlddoc.render(doc), "doc_rev": doc["rev"],
                 "debug": {"vision_prompt": vision_prompt, "reason_prompt": built,
                           "raw_text": response.text},
             }
@@ -985,7 +991,7 @@ class LiveAgent:
                 or triggers.may_speak_unprompted(doc, e["priority"])
             ]
             if not speakable:
-                return {"message": None, "doc": worlddoc.render(doc)}
+                return {"message": None, "doc": worlddoc.render(doc), "doc_rev": doc["rev"]}
 
             lines = [
                 PERSONA, "", SYSTEM_BRIEF, "",
@@ -1011,7 +1017,7 @@ class LiveAgent:
                 "message": text or None,
                 "triggers": [e["text"] for e in speakable],
                 "tool_calls": tool_results,
-                "doc": worlddoc.render(doc),
+                "doc": worlddoc.render(doc), "doc_rev": doc["rev"],
             }
 
     # ── Reset ────────────────────────────────────────────────────────────────

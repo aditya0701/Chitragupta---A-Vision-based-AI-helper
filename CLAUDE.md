@@ -161,6 +161,8 @@ Each of these cost a real debugging session. Details in `DECISIONS.md`.
 | **Don't add `check`/`start`/`look`/`find` to `_ACTION_CUE_RE`** | They appear inside the non-answers it exists to catch. §7.2 |
 | **Use `_locked` variants internally** | `_lock` is not reentrant. §4.3 |
 | **Never `await` a model call inside a v2 write window** | `_write_window` holds `LiveAgent._lock`; a network call inside one re-serializes ticks and chat and undoes the whole phase split. `compaction.compact` is the one deliberate exception. |
+| **Never gate a v2 chat send on `tickBusy`** | One shared `busy` flag in `live.js` kept the browser from sending a question until the tick returned — defeating the entire server-side overlap. Ticks and chat have separate in-flight flags and separate queues. `tests/t_live_concurrent.js`. |
+| **Apply a v2 doc render only if `doc_rev` is newer** | Concurrent turns reply out of order; a slow tick's render predates a chat's writes and will stamp over it. |
 | **Image cost scales with resolution, not JPEG quality** | Quality is not a lever. §1.2 |
 | **A failed tool must never render like an empty result** | DDG's CAPTCHA is HTTP 202, so a block was reported to the model as "nothing found". §3.6 |
 | **Flag network tools `blocking=True`** | They run on the event loop otherwise and stall every live tick. §3.7 |

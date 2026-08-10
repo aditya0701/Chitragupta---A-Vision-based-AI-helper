@@ -80,6 +80,13 @@ def _empty_doc() -> dict:
         "session_started": _now(),
         "last_spoken_ts": 0.0,
         "last_user_turn_ts": 0.0,
+        # Monotonic, bumped once per write window. Ticks and chat turns now run
+        # concurrently, so their responses can arrive out of order — a tick that
+        # started first can reply after a chat turn that started later, carrying
+        # an older render. The client drops any render whose rev it has already
+        # passed, which is the only thing stopping a stale doc from stamping
+        # over a fresh one in the panel.
+        "rev": 0,
         "vision_focus": None,
         "proposal": None,
         "tasks": [],
