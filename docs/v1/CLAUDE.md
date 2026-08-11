@@ -1,4 +1,12 @@
-# Vision Chitragupta
+# Vision Chitragupta — v1 (ARCHIVED)
+
+> **Superseded by v2.** This is the working reference for the **v1** system —
+> `server/agent/`, `/v1/*`, the `/` page — which still runs and is no longer
+> being developed. For current work see `CLAUDE.md` and `DECISIONS.md` in the
+> repo root.
+>
+> Kept because v1 is still live, and because the numbered sections in
+> `docs/v1/DECISIONS.md` are cited from comments throughout the v2 source.
 
 A hands-free, camera-equipped voice assistant for hands-on tasks — cooking,
 repairs, shopping, anything where you're working and can't look at a screen.

@@ -1,19 +1,23 @@
-# Vision Chitragupta
+# Vision Chitragupta — v2
 
 A hands-free, camera-equipped voice assistant for hands-on tasks — cooking,
 repairs, shopping, anything where you're working and can't look at a screen.
 Named for the Hindu record keeper who observes, records, and reports.
 
-It watches through a phone camera, reasons about what it sees, tracks everything
-in flight (steps, substitutions, parallel work, timers), and speaks back. The
-user is **listening, not reading** — that constraint drives most design choices.
+It watches through a phone camera, keeps a **world document** of everything it
+has seen and decided, and speaks only when speaking is worth it. The user is
+**listening, not reading** — that constraint drives most design choices.
 
-> **`HANDOFF.md` is where to start** — current status, what's confirmed against
-> live traffic, and what to do next.
+> **`HANDOFF.md` is where to start** — current status and what to do next.
 >
 > **`DECISIONS.md` holds the failure log and the reasoning behind every design
 > choice here.** Read the relevant section before changing an area — most of the
 > non-obvious code is scar tissue from a specific bug.
+>
+> **v1 is superseded.** It still runs (`/`, `/v1/*`) and is not being developed.
+> Its reference and failure log are archived at `docs/v1/`. Section references
+> in code comments — `DECISIONS.md §6.3`, `DECISIONS.md 4.4` — point at
+> **`docs/v1/DECISIONS.md`**, which is where those numbers live.
 
 ---
 
@@ -21,275 +25,412 @@ user is **listening, not reading** — that constraint drives most design choice
 
 ```bash
 uvicorn server.main:app --host 0.0.0.0 --port 8000     # from repo root
+# then open  http://localhost:8000/          ← v2, the default
 ```
 
-- Requires `TOOLS_ENABLED=true` in `server/.env` (defaults to `false`).
-- **Avoid `--reload`** when editing `server/agent/*.py` — WatchFiles has served
-  stale bytecode on Windows. Restart manually.
+**Deployed:** <https://chitragupta-k6ek.onrender.com/>
+
+**`/` serves v2.** `/live` still serves the same page and is kept as an alias
+so older links and docs do not break. **v1 is hidden, not removed** — its UI is
+at `/v1` and its API is unchanged on `/v1/*`; nothing links to it except one
+header link out of v2.
+
+- Requires `TOOLS_ENABLED=true`. `LIVE_BACKEND_MODE` defaults to `deepinfra`,
+  so it only needs setting to override.
+- **v2 refuses to start with vision on Groq** and says so at boot. If `/v2/*`
+  returns "v2 refuses to start with vision on Groq", the fix is almost always
+  *restart the server* — the config on disk was already right last time. §5.3.
+- The startup line to check:
+  `Initialized live agent | backend mode: … | VISION ON: … | reasoning: …`
+- **Avoid `--reload`** — WatchFiles has served stale bytecode on Windows.
+  Restart manually.
 - Camera/mic need HTTPS or the literal hostname `localhost`. A bare LAN IP over
   HTTP fails the browser's secure-context check.
-- Deployed on Render free tier (`render.yaml`) — public HTTPS, so any phone on
-  any connection works. Sleeps after ~15 min of no inbound traffic.
+- The service worker **does not touch v2** — `/`, `/live`, `/static/live*` and
+  `/v2/*` are excluded outright, so no `CACHE_NAME` bump is needed for ordinary
+  v2 work. It was bumped exactly once for v2, to `v20`, when `/` changed hands:
+  `/` was in `SHELL_URLS` and cached cache-first, so every browser that had ever
+  loaded v1 would have kept being served v1's `index.html` at the new default
+  address. v1's shell is now cached at `/v1` instead. `docs/v1/DECISIONS.md` 5.1.
 
 ---
 
-## Architecture
+## The shape of it
+
+**The world document is primary state; speech is a side-effect.** Ticks update
+the document continuously. A separate, zero-cost arithmetic engine decides when
+the user is owed something. This inversion is the whole design — v1 asked "what
+do I say about this frame?" on every frame, which is why it narrated.
 
 ```
-Phone/browser ──► /v1/chat  or  /v1/chat/stream  (FastAPI)
+Phone/browser ──► /v2/tick   (camera frame, on an interval)
+                  /v2/chat   (the user said something)
+                  /v2/poll   (heartbeat — arithmetic only, usually free)
                       │
-                      ├─► [Stage 1] Groq qwen3.6-27b — VISION ONLY
-                      │             image ──► short text description
+                      ├─► [Vision] Qwen3-VL-30B on DeepInfra
+                      │            frame + brief ──► plain-text caption
+                      │            (never reasons, never decides)
                       │
-                      ├─► [Stage 2] DeepSeek v4-flash — ALL reasoning + tools
-                      │             (never sees pixels)
+                      ├─► [Reasoning] DeepSeek v4-flash — text only, never
+                      │            sees pixels. Owns every decision and tool call.
                       │
-                      ├─► [Tools] native function calling
-                      │   start_timer · cancel_timer · update_task_list
-                      │   log_observation · retract_observation · request_camera
-                      │   request_live_search
-                      │   web_search · fetch_page · calculate · get_time
+                      ├─► [Triggers] pure arithmetic over the doc. No tokens.
                       │
-                      └─► text (+ think_blocks, tool_calls, goal_complete)
+                      └─► world document (+ optional speech)
 ```
 
-**Active backend is `hybrid`** — `BACKEND_MODE=hybrid` in `server/.env`. The split
-exists to get reasoning off Groq's 8K tokens/minute cap; only the small image-only
-prompt has to fit under it. See `DECISIONS.md` §1.1.
+### The tick, in five phases
 
-Other backends exist (`groq`, `gemini`, `openai`, `anthropic`, `colab`, `ollama`)
-and are selected by `BACKEND_MODE` / `API_PROVIDER` via `backends/factory.py`.
-They differ on two class flags: `SPLIT_VISION_REASONING` and
-`SUPPORTS_NATIVE_TOOLS`.
+Only the odd-numbered phases hold the lock.
 
-### Why ReAct, not an orchestrator
-The reasoning model orchestrates itself — it reads the scene, decides mid-thought
-whether to call a tool, and routes to the right response type. The thinking chain
-*is* the orchestration. Multi-agent designs were considered and rejected
-(`DECISIONS.md` §9).
+| | | lock | ~cost |
+|---|---|---|---|
+| 1+2 | caption the frame | **unlocked** | ~1.5s, one vision call |
+| 3a | fold the caption in, claim triggers | locked | ~1ms |
+| 3b | **Stage 1** — bookkeeping reasoning, tools only | **unlocked** | ~2s |
+| 3c | is the speech question even worth asking? | locked | ~1ms |
+| 3d | **Stage 2** — the speech decision | **unlocked** | ~1s |
+| 3e | politeness gate, record the utterance | locked | ~1ms |
+
+Stage 1 is scored on one thing: *is the document now accurate?* Its prose is
+discarded. Stage 2 gets a small, separate prompt — no tools, no system brief,
+no full document — and answers one question: *does the user need to hear
+something?* Splitting them fixed a failure reported three times, where one call
+scored on both objectives always chose silence. §6.1.
+
+An idle tick costs **one vision call and one reasoning call**, and phase 3d is
+skipped entirely when nothing happened.
+
+### The lock covers writes, not thinking
+
+`LiveAgent._lock` is held only inside `_write_window()`: reload → mutate →
+save → release, measured in milliseconds. **Every model call happens outside
+one**, including the reasoning that produces the tool calls —
+`_reason(deferred_writes=True)` hands them to `_apply`, which takes its own
+window.
+
+The cost of releasing it is that a turn reasons about a document that may have
+moved by the time it writes. That's why every window **reloads** — never reuse
+a doc read before a model call — and why the doc-mutating tools degrade to a
+harmless "no match" string rather than raising. Losing a tick's bookkeeping to
+a race is recoverable; the next frame re-derives it. Making the user wait is
+not. §2.
 
 ---
 
-## Persistent state
+## The world document
 
-Both under `server/data/` — gitignored, survives restarts **by design**.
+`server/data/live/worlddoc.json` — gitignored, survives restarts by design.
+Rendered into every prompt by `worlddoc.render()`, in this order:
 
-| File | Module | What |
-|---|---|---|
-| `timers.json` | `agent/timers.py` | Wall-clock `start_time + duration`, not `asyncio.sleep` — survives a Render restart. Due-checks are pure arithmetic, zero LLM cost. |
-| `document.json` | `agent/tasklist.py` | The task list. TodoWrite-style **full-list replace**. Items carry `status`, `note`, `observations[]`, `watch_for`, `detail`. |
-
-Both are injected into every reasoning prompt (`[Timers]`, `[Task list]`), so the
-model acts on them without being reminded.
-
-### Task item fields
-
-```jsonc
-{
-  "id": "a1b2c3d4",
-  "content": "Check broth base is compliant",   // exact key; aliases accepted
-  "status": "in_progress",                      // pending|in_progress|completed|skipped
-  "note": "used tofu instead of paneer",        // substitutions
-  "observations": ["..."],                      // max 5, oldest dropped
-  "watch_for": "Read the ingredient list and list any of: beef, gelatin, lard.",
-  "detail": "fine",                             // coarse (default) | fine
-  "fine_frames_used": 3,                        // server-managed, see below
-  "fine_budget_spent": false                    // server-managed
-}
+```
+[Current time: HH:MM:SS]
+[Goal] <title>
+[Tasks]                              [ ] pending  [~] in_progress  [x] completed  [-] skipped
+[PROPOSED PLAN — NOT COMMITTED]      ← only when awaiting the user
+[Camera focus — fine frames, N used]
+[Open expectations]                  time-anchored show a countdown; event-anchored show the watch
+[Looking for]                        the find list — still open, or found and where
+[Earlier this session]               compacted narrative, with time spans
+[Known environment facts]            durable spatial memory
+[Recent observations]                raw captions, newest last
 ```
 
-**`watch_for`** is the reasoning model's own brief to the vision stage. It cannot
-see the camera; a separate model looks on its behalf and reports only what it was
-asked for. Briefs must request **observations, not judgement** — the reasoning
-model supplies the critique. See `DECISIONS.md` §6.3.
+**Section order is stability-first** — title/tasks/narrative/environment change
+rarely, `recent` changes every tick — so DeepSeek's prefix cache gets the
+longest possible unchanged prefix across consecutive ticks.
 
-**`detail`** is how closely the camera must look. `fine` sends the frame at full
-resolution and lets the vision model read text — the only way label reading
-works, since resolution discarded in the browser can't be recovered later. It
-costs ~2.5x per frame, so it's opt-in and scoped to one in-progress item: when
-the step finishes, the cost stops.
+Every entry is timestamped in **the user's** zone (`DEFAULT_TIMEZONE`), not the
+server's. Render runs UTC; a naive `fromtimestamp()` once stamped the whole
+document — including the `[Current time]` header the model does all its
+temporal arithmetic against — two hours off, so "will this be done by four?"
+was answered about a different four.
 
-Scope alone didn't hold (the model set `fine` once and never reverted it, and
-the session hit the daily cap), so there is also a hard bound:
-**`MAX_FINE_FRAMES_PER_ITEM = 8`**, charged per item and persisted on it. On
-exhaustion the item is forced back to `coarse` and marked `fine_budget_spent`;
-only the model explicitly sending `detail: "coarse"` re-arms it. Both fields are
-server-managed — don't set them from the model. See `DECISIONS.md` §6.4.
+`rev` is monotonic, bumped on write-window **entry** (entry order *is* write
+order, since windows are serialized by the lock). Every response echoes it as
+`doc_rev`; the client drops any render older than one it has already painted.
 
-**Corrections are retractable.** `log_observation` is append-only, but
-`retract_observation(item, note_match, reopen)` removes a wrong note and can
-re-open an item completed because of it. Logged notes are re-injected into every
-prompt, so an uncorrected one gets repeated indefinitely — this is what stops
-that. See `DECISIONS.md` §6.6.
+### Overflow
+
+`recent` is bounded at `RECENT_MAX` (24). On overflow the oldest
+`COMPACT_BATCH` (16) captions are summarised into `narrative` by one cheap
+model call — **time spans preserved**, not just facts — plus any durable
+environment facts worth promoting. Raw captions are never silently dropped, and
+the freshest window is never compacted.
 
 ---
 
-## Live Watch
+## Plans are proposed, not written
 
-Camera samples on an interval with a **client-side perceptual diff gate** — if the
-scene hasn't meaningfully changed, no request leaves the browser. That gate is the
-main cost control.
+The split is **what it saw** vs **what it decided**.
 
-- Silent ticks: `LIVE_FRAME_DIM = 640`. Typed question riding along, or an active
-  `detail: "fine"` step: `MAX_FRAME_DIM = 1024`. The server echoes `frame_detail`
-  on every response and the client sizes its **next** capture from it.
-- A tick firing mid-request is buffered (`pendingLiveFrame`), not dropped.
-- **Silence protocol** — on a live tick with an active goal, if nothing is new the
-  entire reply must be exactly `[SILENT]`, stripped server-side. Direct user turns
-  are never allowed to go silent.
-- Each tick is given the **previous caption** as text, so it describes change
-  rather than contradicting itself frame to frame (`DECISIONS.md` §6.5).
-- `log_observation` runs on every relevant tick — text facts accumulate so "where
-  is X" can be answered from history, not just the current frame.
+Observations — captions, `log_environment`, `resolve_expectation`, focus
+changes — write **silently and immediately**. Gating those would turn every
+tick into a permission prompt.
 
-Full step-by-step pipeline: `DECISIONS.md` §6.7.
+A **plan** is a decision about how the user spends the next hour, made from a
+photograph and a web search. Once it lands in `tasks` it is re-injected into
+every later prompt as settled fact, and the model reads its own guess back as
+memory. So:
+
+```
+propose_plan  → doc["proposal"], NOT tasks. Nothing tracks it, no expectations.
+                Must be said out loud in the same reply — the user cannot see it.
+commit_plan   → promotes it to real tasks. Called on assent, including implicit
+                ("yes", "go on", or visibly starting step one).
+discard_plan  → drops it.
+```
+
+An unanswered proposal re-raises every `PROPOSAL_RERAISE_S` (150s) — the
+assistant is blocked on the user and the user has no idea. One proposal at a
+time, replaced rather than appended. §3.
+
+**A tick may only commit on visibly starting step one.** A frame cannot tell
+you someone said yes.
+
+---
+
+## The vision stage
+
+The reasoning model cannot see. It aims the camera two ways:
+
+**`set_vision_focus(brief, detail, mode)`** — the standing lens. One or two
+plain sentences saying *what the user is physically doing*. Replaced, never
+appended, so duplicates are impossible by construction.
+
+- The model writes **only the activity**. The grip/posture/danger instructions
+  are attached automatically to every frame. When the model wrote the whole
+  block it wrote checklists ("whether a drain pan is underneath"), which made
+  every different-but-fine setup read back as a list of absent items. §4.2
+- `mode="form"` → report posture, grip, danger, and anything else out of place.
+  `mode="read"` → transcribe text verbatim, say what's illegible and how to fix
+  it. Read mode forces `fine` and loads none of the form wording. Asked to read
+  a packet in form mode, the camera reported "hand position is not visible"
+  while the cooking instructions went untranscribed. §4.3
+- `detail="fine"` (1024px) vs `"coarse"` (640px). Bounded by
+  `MAX_FINE_FOCUS_FRAMES` (120) — a nudge-then-backstop, since v1 proved a
+  fine mode set once is never voluntarily reverted.
+
+**`set_expectation(anchor="event", condition=…)`** — a discrete watch. The
+condition is put to the camera **verbatim as a question on every frame** until
+resolved. Answers come back as `Q1: FOUND / NOT VISIBLE / UNCLEAR` lines, asked
+*first*, before the description.
+
+Both must ask for **observations, never judgement** — the reasoning stage
+decides. A model asked "is the grip safe?" returns a reassuring guess; asked
+"are the fingertips curled back or extended flat?" it returns a fact. §4.1
+
+At most `MAX_ACTIVE_BRIEFS` (4) watches reach any one frame, high-priority
+first, because the vision model cannot answer nine questions and describe the
+scene inside one reply.
+
+**Each tick is given the previous caption as text**, so it describes *change*
+rather than re-describing the scene. It is also forbidden from describing the
+camera itself — the user is holding it and knows they moved it. §4.4
+
+---
+
+---
+
+## The find list
+
+"Find the chicken and the onions" → `add_wanted(["chicken packet", "onions"])`.
+Every open item is put to the camera **by name, in one block, on every frame**,
+answered `<item>: FOUND / NOT VISIBLE / UNCLEAR`. One block, not one question
+per item, so the list never competes with `MAX_ACTIVE_BRIEFS` and a fourth
+search can't silently stop reaching the camera.
+
+**There is no tool that marks an item found.** The model can open a search and
+cancel one; only `worlddoc.fold_wanted()` — pure string matching over the
+caption, zero tokens — sets `status="found"`. That is what stops an inference
+standing in for an observation: the caption said "several bags of lentils" and
+the model once upgraded it to "I can see the beans". The found state now has no
+model-facing door. §8.1
+
+**A find forces speech.** `wanted_found` routes to its own prompt
+(`_build_announce_prompt`) that never offers `[SILENT]`, and if the model
+declines or errors anyway the server speaks a deterministic sentence built from
+the location the camera wrote. A forced path the model can talk its way out of
+is not forced. §8.2
+
+`found` and `announced` are **separate flags** — one is about the world, the
+other about speech. The announce trigger tests doc state, not this tick's
+caption, so a failed utterance simply re-fires next tick, and it fires from
+`poll()` too: a find that lands just as the camera goes dark still arrives.
+
+Matching is **by name, never by Q-index** — the index is positional over a list
+rebuilt each tick while the vision call runs unlocked, so `Q2: FOUND` would
+eventually announce one item's location under another item's name. §8.3
+
+---
+
+## Triggers and speech
+
+`triggers.check(doc)` is pure arithmetic — no tokens — and returns:
+
+| kind | fires when |
+|---|---|
+| `expectation_due` | a time-anchored expectation passed its deadline unresolved |
+| `stale_task` | an `in_progress` task unmentioned for `STALENESS_S` (480s) |
+| `proposal_pending` | a plan proposed and unanswered for `PROPOSAL_RERAISE_S` (150s) |
+| `wanted_found` | a find-list item was seen and the user hasn't been told (coalesced — one event for all of them) |
+| `wanted_stuck` | a search hit `WANTED_STUCK_ASKS` (40) misses or `WANTED_UNCLEAR_ASKS` (8) unclears — ask the user instead of failing silently |
+
+Each **claims** its state on firing (same double-fire lesson as v1's timers).
+
+Unprompted speech is gated by a politeness budget, `MIN_UNPROMPTED_GAP_S` (90s).
+Two things bypass it:
+
+- **`[URGENT]`** — physical risk, or work about to be ruined. Reaches the user
+  immediately. One flag, one consequence: it bypasses the gate and nothing else.
+- **The follow-up window**, `FOLLOWUP_WINDOW_S` (180s). Answering the user used
+  to *reset* the politeness gap, which silenced exactly the follow-up they were
+  waiting for — asked to find the onions, the assistant said "I'll point them
+  out when I see them", and that reply gagged it for the whole 90s search. It
+  found them at +27s, logged them silently, and said nothing until asked again.
+  A recent request is the one moment a follow-up is *solicited*. §6.2
+
+---
+
+## Tools (13)
+
+Doc-mutating tools close over the agent's current in-memory doc, so a turn's
+tool calls and the agent's own writes can never interleave on disk.
+
+| | |
+|---|---|
+| `propose_plan` · `commit_plan` · `discard_plan` | the approval cycle |
+| `add_wanted` · `drop_wanted` | the find list — open and cancel a search |
+| `update_tasks` · `mark_task` | a plan the user is **already** working through |
+| `set_expectation` · `resolve_expectation` | deadlines and camera watches |
+| `set_vision_focus` | the standing lens |
+| `log_environment` · `retract_environment_fact` | durable spatial memory, and undoing it |
+| `web_search` · `fetch_page` · `calculate` | inherited from v1 unchanged |
+
+**Deliberately absent:** `start_timer` (subsumed by a time-anchored
+expectation, which also has a resolution path timers never had) and
+`request_camera` / `request_live_search` (the live UI owns the camera; chat
+turns attach the current frame client-side).
+
+`retract_environment_fact` takes a `correction`, not just a deletion. The raw
+captions that produced the wrong inference are still in `recent` and will
+suggest it again on the very next tick — a hole in the fact list doesn't block
+that; a durable "the bag on the pantry shelf is NOT toor dal" does.
+
+---
+
+## The client (`live.js`)
+
+| | |
+|---|---|
+| `FRAME_DIM` | `{ coarse: 640, fine: 1024 }` — caps the **longest** side |
+| `JPEG_QUALITY` | 0.85. Cost scales with resolution, not quality — quality is not a lever |
+| `CAPTION_REUSE_MS` | 15000 — a chat turn reuses the last caption if the scene hasn't moved |
+| `FLAT_FRAME_STDDEV` | 2.0 — below this the frame is blank, not merely unchanged |
+| `POLL_INTERVAL_MS` | 20000 |
+
+**The diff gate** (32×32 grayscale, mean absolute delta) is the main cost
+control: if the scene hasn't meaningfully changed, no request leaves the
+browser. The server echoes `frame_detail` on every response and the client
+sizes its **next** capture from it — resolution discarded in the browser can't
+be recovered, so the decision has to run one frame ahead.
+
+**Blank-frame detection runs before the diff gate.** A black frame *is* an
+unchanged frame to a delta comparison, so a dead camera reported "nothing
+changed" indefinitely. Standard deviation is the liveness test. §7.2
+
+**`tickBusy` and `chatBusy` are separate flags** with separate queues.
 
 ---
 
 ## Hard rules
 
-Each of these cost a real debugging session. Details in `DECISIONS.md`.
+Each of these cost a real debugging session.
 
 | Rule | Why |
 |---|---|
-| **Bump `CACHE_NAME` in `sw.js`** whenever `index.html`/`app.js`/`style.css` change | Cache-first SW otherwise serves a stale shell forever. Currently `v19`. §8.1 |
-| **The live interval must never read `#prompt-input`** | It sent half-typed questions and cleared the box mid-keystroke. Commit via `queuedLivePrompt`. §8.5 |
-| **Mirror changes across `_process_locked` and `_process_stream_locked`** | They duplicate tool availability, recovery and response shape. A fix in one is a bug in the other. §5.2 |
-| **Mirror `app.js` ↔ `debug.js`** | Camera, frame and vision-log logic exist in both. §8.3 |
-| **One flag, one consequence** | `found` drove three unrelated outcomes and broke the camera. §4.4 |
-| **Never add a pre-filter whose "no" looks like silence** | Cost a whole class of silently dropped frames. §6.2 |
-| **Don't add `check`/`start`/`look`/`find` to `_ACTION_CUE_RE`** | They appear inside the non-answers it exists to catch. §7.2 |
-| **Use `_locked` variants internally** | `_lock` is not reentrant. §4.3 |
-| **Never `await` a model call inside a v2 write window** | `_write_window` holds `LiveAgent._lock`; a network call inside one re-serializes ticks and chat and undoes the whole phase split. `compaction.compact` is the one deliberate exception. |
-| **Never gate a v2 chat send on `tickBusy`** | One shared `busy` flag in `live.js` kept the browser from sending a question until the tick returned — defeating the entire server-side overlap. Ticks and chat have separate in-flight flags and separate queues. `tests/t_live_concurrent.js`. |
-| **Apply a v2 doc render only if `doc_rev` is newer** | Concurrent turns reply out of order; a slow tick's render predates a chat's writes and will stamp over it. |
-| **Image cost scales with resolution, not JPEG quality** | Quality is not a lever. §1.2 |
-| **A failed tool must never render like an empty result** | DDG's CAPTCHA is HTTP 202, so a block was reported to the model as "nothing found". §3.6 |
-| **Flag network tools `blocking=True`** | They run on the event loop otherwise and stall every live tick. §3.7 |
+| **Never `await` a model call inside a write window** | It holds `LiveAgent._lock` and re-serializes ticks and chat, undoing the whole phase split. `compaction.compact` is the one deliberate exception. §2.1 |
+| **Every write window reloads** | Reusing a doc read before a model call silently rolls back whoever wrote in the meantime. §2.2 |
+| **Never gate a chat send on `tickBusy`** | One shared `busy` flag in `live.js` kept the browser from sending a question until the tick returned — defeating every server-side overlap. §7.3 |
+| **Apply a doc render only if `doc_rev` is newer** | Concurrent turns reply out of order; a slow tick's render predates a chat's writes and will stamp over it. §7.4 |
+| **A brief must ask for observations, not judgement** | "Is the grip safe?" gets a reassuring guess. §4.1 |
+| **Nothing but the camera may mark a find** | No tool sets `status="found"`. An inference reached it once and reported beans that were lentils. §8.1 |
+| **Stage 2 gets the user's words, not just a timestamp** | It was asked "does this answer what they wanted?" while never being shown what they wanted. Cost 65s with the chicken on screen. §8.2 |
+| **Never add a pre-filter whose "no" looks like silence** | Cost a whole class of silently dropped frames. `docs/v1/DECISIONS.md` §6.2 |
+| **One flag, one consequence** | `found` drove three unrelated outcomes and broke the camera. `docs/v1/DECISIONS.md` §4.4 |
+| **A failed tool must never render like an empty result** | DDG's CAPTCHA is HTTP 202, so a block was reported as "nothing found". `docs/v1/DECISIONS.md` §3.6 |
+| **Flag network tools `blocking=True`** | They run on the event loop otherwise and stall every live tick. `docs/v1/DECISIONS.md` §3.7 |
+| **Image cost scales with resolution, not JPEG quality** | Quality is not a lever. §5.1 |
 
 ---
 
 ## Constraints
 
-- **Groq: 8,000 tokens/min and 200,000 tokens/day.** The daily cap is what kills
-  long sessions — one 47-minute run died at ~198k. In the hybrid, Groq does vision
-  only, so **image tokens are essentially the whole budget**.
-  `deepseek_backend.vision()` logs `Groq vision usage:` per frame.
-- **Render sleeps after ~15 min** with no *inbound* traffic. Frontend polling keeps
-  it warm during use; a timer firing while the phone is closed is delayed.
-- **`TOOLS_ENABLED` defaults to `false`.** Nothing above works until it's `true`.
-- **`DEFAULT_TIMEZONE` defaults to `Europe/Berlin`** — what `get_time` answers in
-  when the model names no zone. Must be an IANA name, never an abbreviation:
-  `Europe/Berlin` handles the CET/CEST switch, `CEST` is wrong half the year.
-  Needs `tzdata` (pinned) since `zoneinfo` otherwise falls back to UTC on hosts
-  with no system tz database. Per-user preference is the eventual shape.
-- **`web_search` has no hard dependency on a key**, but every keyless provider in
-  its chain is scraping on sufferance, and Render's datacenter IP gets bot-
-  challenged far harder than a home connection. Set `BRAVE_API_KEY` (2,000/month
-  free) to front the chain with a real API. `DECISIONS.md` §3.6.
-- **`SEARCH_EXCLUDED_DOMAINS` defaults to `wikipedia.org`** — dropped from search
-  results and refused by `fetch_page`. Set it to an empty string to allow
-  everything. Note this leaves the DuckDuckGo Instant Answer rung mostly empty
-  (5/5 of its abstracts were Wikipedia); the primary provider is unaffected.
-  `DECISIONS.md` §3.8.
+- **v2 cannot run on Groq's free tier.** A tick is ~1,440 tokens against an
+  8,000 TPM cap — one tick per 11s, versus a 4s default interval — and the
+  200,000 TPD cap is ~139 ticks *total per day*. This is now enforced rather
+  than documented: `LIVE_BACKEND_MODE` defaults to `deepinfra`, and a
+  Groq-vision backend raises at startup unless `LIVE_ALLOW_GROQ_VISION=true`.
+  §5.2, §5.3
+- **DeepInfra Qwen3-VL-30B-A3B is ~$0.26 per 1,000 ticks.** Matching Groq's
+  entire free daily allowance costs about four cents. Watch
+  `DeepInfra vision usage:` — in this split the vision call is the *only* image
+  cost, so its `prompt_tokens` **is** the per-frame bill.
+- **Render sleeps after ~15 min** with no *inbound* traffic. `/v2/poll` on a
+  20s interval keeps it warm during use.
+- **`DEFAULT_TIMEZONE`** must be an IANA name (`Europe/Berlin`, never `CEST`).
+  Needs `tzdata` (pinned), or `zoneinfo` falls back to UTC on hosts with no
+  system tz database.
+- **`SEARCH_EXCLUDED_DOMAINS` defaults to `wikipedia.org`.**
 
 ---
 
 ## Layout
 
 ```
-CLAUDE.md          this file — working reference
+CLAUDE.md          this file — v2 working reference
 HANDOFF.md         current status + what to do next
-DECISIONS.md       failure log + design reasoning
+DECISIONS.md       v2 failure log + design reasoning
+docs/v1/           the superseded system's reference and failure log
 render.yaml
 server/
-├── main.py                FastAPI app, /v1/* routes
-├── config.py              settings from .env
-├── agent/
-│   ├── agent.py           ChitraguptAgent — prompt building, tool execution, recovery
-│   ├── __init__.py        Tool/ToolRegistry, built-in tools, ConversationMemory
-│   ├── timers.py          persisted wall-clock timers
-│   └── tasklist.py        persisted task document
+├── main.py                FastAPI app; includes both routers
+├── config.py              shared settings
+├── live/                  ── v2 ──────────────────────────────────
+│   ├── agent.py           LiveAgent — tick/chat/poll, write windows, prompts
+│   ├── worlddoc.py        the document: state, mutation, render()
+│   ├── tools.py           13 tools
+│   ├── triggers.py        the zero-cost arithmetic engine
+│   ├── vision.py          tick vision prompts (form / read / questions)
+│   ├── compaction.py      span-preserving summarisation
+│   ├── config.py          v2 settings, all env-overridable
+│   └── routes.py          /v2/* and the /live page
 ├── backends/
-│   ├── __init__.py        VisionBackend ABC, VisionResponse, should_think()
-│   ├── deepseek_backend.py   ACTIVE — Groq vision + DeepSeek reasoning
-│   ├── groq_backend.py, gemini_, openai_, anthropic_, colab.py, ollama_
-│   └── factory.py         get_backend()
-├── live/                  PARALLEL v2 system — see below
-└── static/                no build step
-    ├── index.html, app.js, style.css      main UI
-    ├── debug.html, debug.js               raw pipeline view
-    ├── live.html, live.js                 v2 UI
-    └── sw.js, manifest.json               PWA
+│   ├── deepinfra_backend.py  ACTIVE for v2 — DeepInfra vision + DeepSeek reasoning
+│   ├── deepseek_backend.py   ACTIVE for v1 — Groq vision + DeepSeek reasoning
+│   └── factory.py            get_backend()
+├── agent/                 ── v1, superseded but running ──────────
+└── static/
+    ├── live.html, live.js        v2 UI
+    ├── index.html, app.js        v1 UI
+    └── sw.js                     PWA shell — excludes v2 entirely
 ```
-
----
-
-## The v2 system (`server/live/`)
-
-A **separate, parallel** workflow — `/v2/*` API, `/live` page, own state
-(`data/live/worlddoc.json`). Shares only the backend classes and `Tool`/
-`ToolRegistry`. Nothing in `server/live/` is imported by v1.
-
-**Design inversion:** the world document is primary state and speech is a
-side-effect. Ticks update the doc continuously; a zero-cost arithmetic trigger
-engine decides when to wake the reasoning model.
-
-- `worlddoc.py` — tasks, a pending plan proposal, expectations, durable
-  environment facts, compacted narrative, raw recent captions. Section order is
-  stability-first for prefix-cache hits.
-- `triggers.py` — overdue expectations, stale tasks, and unanswered plan
-  proposals, all checked by arithmetic. A politeness budget gates unprompted
-  speech.
-- `vision.py` — passes the previous caption back as text so the model describes
-  *change*, not an isolated snapshot.
-- `compaction.py` — span-preserving summarisation when `recent` overflows.
-
-**The lock covers writes, not thinking.** `LiveAgent._lock` is held only inside
-`_write_window()` — reload, mutate, save, release, measured in milliseconds.
-Every model call happens outside it, including the reasoning that produces the
-tool calls: `_reason(deferred_writes=True)` hands them to `_apply`, which takes
-its own window. `tick()` runs five phases (caption → fold in → bookkeeping →
-speech worth asking? → speak/gate), and only the odd ones lock.
-
-It used to hold the lock across both DeepSeek round trips plus any `web_search`
-they made, so a question arriving mid-tick queued for seconds behind work that
-wasn't writing anything. `tests/t_live_parallel.py` measures both interruption
-points; `tests/t_live_writes.py` proves the deferred tool calls still land on
-disk. Every window **reloads** — never reuse a doc read before a model call.
-
-**Plans are proposed, not written.** `propose_plan` holds a plan in
-`doc["proposal"]` and out of `tasks`; `commit_plan` promotes it once the user
-agrees, `discard_plan` drops it. Observations (captions, `log_environment`,
-`resolve_expectation`, focus changes) still write silently and immediately —
-gating those would make every tick a permission prompt. The split is *what it
-saw* vs *what it decided*. An unanswered proposal re-raises every
-`PROPOSAL_RERAISE_S` (150s) rather than sitting silently, since the assistant is
-blocked on the user and the user doesn't know it.
-
-**Status: verified by a 27-check fake-backend smoke test, never run against live
-traffic.** v1 is what actually gets used. Building a feature in v2 means debugging
-two new things at once.
 
 ---
 
 ## Current state
 
-Working and exercised in real sessions: the hybrid pipeline, native tool calling,
-timers, task tracking, live watching with silence, voice in (Web Speech
-`SpeechRecognition`) and out (`speechSynthesis`), PWA install.
+**v2 has been run against live traffic once** — a ~18-minute chicken-curry
+session on 2026-08-10. Propose-then-commit, caption reuse, the urgent path and
+the blank-camera report all behaved correctly. The session ended on a **Groq**
+rate limit, which v2 should never touch. See `HANDOFF.md`.
 
-Recent work (see `git log`): the `found`/`alert` split, `watch_for` + the
-coarse/fine detail tier, running the vision stage on the streaming path (it never
-did — images on typed turns were silently discarded), the `request_camera`
-double-fire fix, camera-ready frame capture, generalisation away from
-cooking-only wording, and `cancel_timer`.
+Verification is `tests/run_all.py` (13 ad-hoc harnesses) plus reading exported
+sessions. There is no automated test suite. The JS harnesses drive the real
+`live.js` in a stubbed DOM rather than reimplementing it — note that top-level
+`let` is not a property of a `vm` sandbox, so state must be poked via
+`runInContext`.
 
-**Next up, in order:** adaptive poll backoff, then attaching the live frame
-directly in `sendMessage`. Full list with rationale: `DECISIONS.md` §10.
-
-There is no automated test suite — verification is ad-hoc harnesses plus reading
-exported sessions. An export now carries every Qwen prompt and answer, silent
-ticks included (`DECISIONS.md` §8.2), which is the highest-value artifact for
-judging a real run. `DECISIONS.md` "Testing notes" explains why the wire
-log is the highest-value artifact.
+**The export is the highest-value artifact.** It carries every vision prompt
+and answer, silent ticks included. Reading it top to bottom is how the
+flip-flops were found — no single turn shows them, only the sequence does.

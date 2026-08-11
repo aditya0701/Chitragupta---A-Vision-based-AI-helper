@@ -1,4 +1,16 @@
-# Failure log & design decisions
+# Failure log & design decisions — v1 (ARCHIVED)
+
+> **This is v1's log.** v2's is `DECISIONS.md` in the repo root.
+>
+> **Do not renumber anything in this file.** Comments throughout the v2 source
+> cite these sections as `DECISIONS.md §6.3`, `DECISIONS.md 4.4` and so on —
+> those references were written before v2 had a log of its own and they all
+> resolve here.
+>
+> Still worth reading: §3.6 (a blocked search that reported "nothing found"),
+> §3.7 (blocking tools stalling the event loop), §4.4 (one flag, one
+> consequence) and §6.2 (a pre-filter whose "no" looked like silence) are cited
+> as hard rules by v2 and were never re-derived there.
 
 Why the system is shaped the way it is. Every entry below is a real bug or a
 real constraint hit in testing — not hypotheticals. **Read the relevant section
