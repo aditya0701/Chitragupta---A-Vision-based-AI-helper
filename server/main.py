@@ -45,6 +45,27 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(live_router)
 app.include_router(live_page_router)
 
+
+@app.on_event("startup")
+async def _warm_live_agent():
+    """Build v2's agent at boot so its config is validated before anyone cooks.
+
+    v2 refuses to start on a Groq-vision backend (live/routes.py). Left lazy,
+    that check first runs on the first tick — which is the moment someone has
+    already propped their phone up. Running it here turns a misconfiguration
+    into a startup line instead.
+
+    Deliberately does NOT re-raise. v1 is a separate, working system on the
+    same process, and taking the whole server down over v2's config would make
+    this fix worse than the bug. v2's own routes still raise, so it fails
+    loudly where it matters and stays silent where it doesn't.
+    """
+    from .live.routes import get_live_agent
+    try:
+        get_live_agent()
+    except Exception as e:
+        logger.error("v2 live system UNAVAILABLE — /v2/* and /live will error: %s", e)
+
 # ─── Agent singleton ──────────────────────────────────────────────────────────
 
 agent: Optional[ChitraguptAgent] = None
@@ -222,6 +243,25 @@ async def service_worker():
 
 @app.get("/")
 async def web_ui():
+    """v2 is the default. `/` serves the live tick UI.
+
+    v1 is not removed — it still runs on `/v1/*` and its page is still served
+    below — it is just no longer what anyone reaches by accident.
+
+    Moving this required a service-worker change, and that is the part worth
+    knowing about: `sw.js` is cache-first for the app shell and had `/` in
+    SHELL_URLS, so every browser that had ever loaded v1 would have kept
+    serving v1's cached index.html here through any number of deploys. `/` is
+    now excluded from the worker and the cache key is bumped. See
+    docs/v1/DECISIONS.md 5.1 — this is exactly the bug that cost a session.
+    """
+    return FileResponse(STATIC_DIR / "live.html")
+
+
+@app.get("/v1")
+async def web_ui_v1():
+    """v1's UI, kept reachable but unlinked. Superseded, not deleted: it is the
+    control the v2 argument is made against, and it still works."""
     return FileResponse(STATIC_DIR / "index.html")
 
 

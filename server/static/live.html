@@ -4,6 +4,16 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Chitragupta Live — world-doc system</title>
+  <!-- v2 is what `/` serves now, so it has to be the installable one. These
+       moved here from index.html's head when the default changed: without a
+       manifest on the default page, a phone-first assistant loses "add to home
+       screen" entirely. No service worker is registered from here on purpose —
+       v2 is excluded from it (sw.js), and an offline shell for a system that
+       needs the network on every tick would cache a page that cannot work. -->
+  <meta name="theme-color" content="#0f1115">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <link rel="manifest" href="/static/manifest.json">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
@@ -126,7 +136,7 @@
   <header>
     <h1>📜 Chitragupta Live</h1>
     <span class="tag">world-doc tick system (v2)</span>
-    <a href="/">← classic UI</a>
+    <a href="/v1">v1 (superseded)</a>
     <button id="save-btn" title="Download this session as markdown">💾 Save</button>
     <button id="reset-btn" title="Clear world doc + conversation">Reset</button>
   </header>

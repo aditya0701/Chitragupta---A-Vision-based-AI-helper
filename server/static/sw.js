@@ -1,6 +1,9 @@
-const CACHE_NAME = 'chitragupt-shell-v19';
+// v20: `/` now serves v2's live UI, so it left the shell. Every browser that
+// had ever loaded v1 held v1's index.html cached under `/` cache-first, and
+// without this bump they would keep being served it through any deploy.
+const CACHE_NAME = 'chitragupt-shell-v20';
 const SHELL_URLS = [
-  '/',
+  '/v1',
   '/static/style.css',
   '/static/app.js',
   '/static/manifest.json',
@@ -31,7 +34,12 @@ self.addEventListener('fetch', (event) => {
   // /v2 + /live (the parallel live tick system) are excluded from the SW
   // entirely, page and assets included, so iterating on it never fights
   // the shell cache.
+  //
+  // `/` is on that list because it IS the live UI now. v1's shell lives at
+  // `/v1`, which is still cached, so the PWA keeps working offline — it just
+  // is not what the bare origin resolves to any more.
   if (
+    url.pathname === '/' ||
     url.pathname.startsWith('/v1/') ||
     url.pathname.startsWith('/v2/') ||
     url.pathname === '/health' ||
