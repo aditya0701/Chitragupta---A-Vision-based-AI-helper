@@ -56,7 +56,15 @@ check("read mode demands exact numbers/units", "EXACTLY as shown" in r)
 check("read mode says how to fix an unreadable frame", "rotate it upright" in r)
 check("read mode forbids guessing characters", "Never guess at a character" in r)
 check("read mode drops the grip block entirely", "POSTURE AND GRIP" not in r)
-check("read mode is shorter than form mode", len(r) < len(p_form))
+# There used to be a `len(r) < len(p_form)` check here. It was only ever a
+# proxy for "read mode does not load the form wording", which the line above
+# tests directly — and it went stale the moment read mode earned a block form
+# mode has no equivalent of: refusing to assert that an ingredient is absent
+# off a partially-legible label. Length is not the invariant; not lying about
+# what was read is.
+check("read mode refuses absence off a partial read", "legible end to end" in r)
+check("read mode says which part was unreadable", "which part you could not read" in r)
+check("read mode names the stakes", "about to eat this" in r)
 
 plain = build_tick_vision_prompt(None, None, None)
 check("no focus set -> no form block at all", "POSTURE AND GRIP" not in plain)

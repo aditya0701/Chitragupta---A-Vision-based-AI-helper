@@ -137,6 +137,44 @@ const flush = () => new Promise((r) => setImmediate(r));
   check('no second tick went out', !calls.some((u) => u.includes('/v2/tick')), JSON.stringify(calls));
   check('the frame was buffered instead', get('pendingFrame') !== null);
 
+  console.log('\n[5] a failed tick must not look like a silent one');
+  // /v2/tick answers 200 with an `error` field, so the fetch catch never fires.
+  // A backend refusal (DECISIONS.md 5.3) returns this on EVERY frame — if it
+  // falls through to 'silent tick' the user watches a dead system behave
+  // exactly like a working, quiet one.
+  const msgs = [];
+  vm.runInContext('addMsg = (kind, text) => { __msgs.push(kind + "|" + text); };', sandbox);
+  sandbox.__msgs = msgs;
+  // pendingFrame MUST be cleared: section [4] deliberately left one buffered,
+  // and the finally-block flush would re-enter onTick and overwrite the status
+  // line before it could be read — making the status assertion below pass for
+  // a reason that has nothing to do with what it claims to test.
+  vm.runInContext(
+    'tickBusy = false; pendingFrame = null; lastSentFrame = null; lastTickError = null;',
+    sandbox);
+  calls.length = 0; resolvers.length = 0;
+  vm.runInContext('onTick();', sandbox);
+  await flush();
+  resolvers[0]({ text: null, error: 'v2 refuses to start with vision on Groq' });
+  await flush();
+  check('the failure is reported to the user',
+        msgs.some((m) => m.includes('refuses to start')), JSON.stringify(msgs));
+  // Read the status LINE, not the message list — 'silent tick' is written by
+  // setStatus, so asserting against addMsg output would pass vacuously and
+  // prove nothing about the failure this section exists for.
+  check('the status line does not claim a silent tick',
+        !/silent/i.test(get('tickStatus')), get('tickStatus'));
+
+  // Every frame carries the same refusal; one line per tick would bury the log.
+  const seen = msgs.length;
+  vm.runInContext('tickBusy = false; lastSentFrame = null;', sandbox);
+  vm.runInContext('onTick();', sandbox);
+  await flush();
+  resolvers[1]({ text: null, error: 'v2 refuses to start with vision on Groq' });
+  await flush();
+  check('an identical repeat is not re-announced', msgs.length === seen,
+        JSON.stringify(msgs.slice(seen)));
+
   console.log('\n' + (FAIL.length ? 'FAILURES: ' + FAIL.join(', ') : 'ALL CONCURRENCY CHECKS PASSED'));
   process.exit(FAIL.length ? 1 : 0);
 })();

@@ -62,6 +62,12 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
     def _drop_wanted(item: str) -> str:
         return worlddoc.drop_wanted(get_doc(), item)
 
+    def _mark_found(item: str, evidence: str, where: str = "") -> str:
+        return worlddoc.mark_found(get_doc(), item, evidence, where)
+
+    def _unmark_found(item: str, correction: str = "") -> str:
+        return worlddoc.unmark_found(get_doc(), item, correction)
+
     def _log_environment(fact: str) -> str:
         return worlddoc.add_environment_fact(get_doc(), fact)
 
@@ -279,7 +285,20 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
             "glare), instead of describing grip and posture — which is useless when what "
             "you actually need is the words. Do not try to get a label read with a form "
             "brief; ask for read mode and you will get the text back. Switch to mode='form' "
-            "once you have what you needed. "
+            "once you have what you needed.\n"
+            "CHECKING A LABEL AGAINST A RESTRICTION — allergies, a vegetarian or halal or "
+            "Jain diet, an ingredient someone is avoiding — ask for a ROLL-CALL, not a "
+            "verdict and not a full transcription: 'Read the ingredient list on the packet "
+            "and list any of: beef, pork, lard, gelatin, animal rennet.' Name every "
+            "substance you care about explicitly. Two reasons this exact shape matters. "
+            "The camera does not know what any diet permits, so asked 'is this suitable?' "
+            "it returns a reassuring guess; asked which of five named words appear, it "
+            "returns a fact and YOU judge compliance. And a whole ingredient list will not "
+            "fit in the reply budget — it truncates silently, and a half-read list reported "
+            "as 'none of those are present' is the most dangerous answer this system can "
+            "produce. A roll-call costs a few tokens and cannot truncate the same way. "
+            "Never tell the user a food is safe on a reading that came back partial or "
+            "illegible: say what was unreadable and ask them to reposition it."
             "IMPORTANT: when the thing you needed fine detail for is done — the step "
             "finished, the part is seated, you got your answer, the user moved on — call "
             "this again with detail='coarse' (or an empty brief if the hands-on work is "
@@ -296,16 +315,6 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
         needs_followup=False,
     ))
 
-    # Note what is NOT registered here: anything that marks a wanted item
-    # found. The reasoning model can open a search and cancel one; it cannot
-    # declare success. Only worlddoc.fold_wanted sets status="found", and only
-    # from a labelled answer produced by the stage that saw the pixels.
-    #
-    # That is the structural fix for the black-eyed beans: the caption said
-    # "several bags of lentils", and the reasoning model — reading prose with
-    # no answer to work from — upgraded it into "I can see the beans". An
-    # inference cannot reach the found state if the found state has no
-    # model-facing door.
     registry.register(Tool(
         name="add_wanted",
         description=(
@@ -313,20 +322,80 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
             "this the MOMENT they ask you to find, locate, spot, or keep an eye out for "
             "anything — before you reply to them. Saying you will watch for something is "
             "not watching for it; this is the only thing that actually starts a search. "
-            "Pass every item from one request in a single call. The camera is then asked "
-            "about each item BY NAME on every single frame, and you are told automatically "
-            "the instant one is seen — you do not need to check, and you must never claim "
-            "to have found something yourself. Use short, concrete, visually distinctive "
-            "names ('red chicken packet', 'onions'), not categories ('ingredients')."
+            "Pass every item from one request in a single call.\n"
+            "For EACH item give both a short name and `looks_like` — what it physically "
+            "looks like to someone who has never seen it: colour, size, shape, markings, "
+            "packaging, the text on the label. This is the most important part of the "
+            "call. The camera cannot see what something IS, only what it looks like, so "
+            "a category name alone gets you a guess: asked for 'black-eyed beans' it "
+            "reported 'several bags of lentils' and a wrong find was claimed. Asked for "
+            "'small cream-white beans, each with a distinct black spot, usually in a "
+            "clear plastic bag' it can actually check.\n"
+            "Once an item is on the list the camera is asked about it on every single "
+            "frame and you are told automatically the instant it is seen."
         ),
         fn=_add_wanted,
         parameters={
-            "items": {"type": "array", "items": {"type": "string"},
-                      "description": "The objects to look for, e.g. ['onions', 'chicken packet']",
+            "items": {"type": "array",
+                      "items": {"type": "object", "properties": {
+                          "item": {"type": "string"},
+                          "looks_like": {"type": "string"}}},
+                      "description": (
+                          "Objects to look for, e.g. [{'item': 'black-eyed beans', "
+                          "'looks_like': 'small cream-white beans each with a black spot, "
+                          "in a clear bag'}, {'item': 'chicken packet', 'looks_like': "
+                          "'red vacuum-sealed plastic tray of raw meat'}]"),
                       "required": True},
             "because": {"type": "string",
                         "description": "What the user actually said, verbatim if you have it",
                         "required": False},
+        },
+        needs_followup=False,
+    ))
+
+    registry.register(Tool(
+        name="mark_found",
+        description=(
+            "Record that something on the find list is visible in THIS frame, when the "
+            "observation says so in prose rather than in a labelled answer line. If the "
+            "observation already carried '<item>: FOUND', it is recorded for you and you "
+            "must not call this.\n"
+            "`evidence` must be the camera's own words, copied EXACTLY from this frame's "
+            "observation — it is checked against the text, and a paraphrase is rejected. "
+            "Only claim a find the evidence actually supports: a generic description is "
+            "not a specific identification. 'Several bags of lentils' does not establish "
+            "that the black-eyed beans are there; if all you have is a generic match, say "
+            "what you can see and ask the user to confirm instead of calling this. A wrong "
+            "find sends them to the wrong place and closes the search."
+        ),
+        fn=_mark_found,
+        parameters={
+            "item": {"type": "string", "description": "Which find-list item", "required": True},
+            "evidence": {"type": "string",
+                         "description": "Exact words from this frame's observation that show it",
+                         "required": True},
+            "where": {"type": "string", "description": "Where it is, in plain words",
+                      "required": False},
+        },
+        needs_followup=False,
+    ))
+
+    registry.register(Tool(
+        name="unmark_found",
+        description=(
+            "Undo a find that turned out to be wrong. Call this the moment the user says "
+            "it isn't the right thing — 'no, those aren't the beans', 'that's not the "
+            "chicken, that's the mince', 'wrong shelf'. Pass what they told you as "
+            "`correction`. This reopens the search AND tells the camera to rule that "
+            "thing out from now on, which is what stops it being re-found and "
+            "re-announced on the very next frame."
+        ),
+        fn=_unmark_found,
+        parameters={
+            "item": {"type": "string", "description": "Which find-list item", "required": True},
+            "correction": {"type": "string",
+                           "description": "What the user said it actually is / is not",
+                           "required": False},
         },
         needs_followup=False,
     ))

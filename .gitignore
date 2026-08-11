@@ -37,3 +37,6 @@ server/data/
 
 # Local HTTPS dev certs (mkcert)
 server/.certs/
+
+# Claude Code local settings/state
+.claude/

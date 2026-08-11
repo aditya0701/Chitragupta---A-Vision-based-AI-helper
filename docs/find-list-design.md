@@ -48,15 +48,65 @@ with a model.
 
 ## 2. The keystone
 
-> **There is no tool for marking something found.**
+> **Ask the camera for an appearance, never a category.**
 
-The model cannot claim a find. `add_wanted` opens a search; nothing lets DeepSeek
-write `status="found"`. Only the caption parser sets it, and only from an
-explicit labelled answer produced by the thing that actually saw the pixels.
+*Revised 2026-08-11.* The first version of this section said the model may
+never mark a find at all, and put the whole weight on a parser. That was
+containment aimed at a symptom. The beans failure — *"several bags of lentils"*
+read back as *"I can see the beans"* — is a **vision-briefing** failure: the
+camera was asked for a category it has no way to verify. A camera cannot see
+what a thing *is*, only what it looks like.
 
-This is what structurally prevents the beans failure — *"several bags of
-lentils"* upgraded into *"I can see the beans"*. An inference can no longer
-reach the found state, because the found state has no model-facing door.
+So `add_wanted` carries `looks_like` per item, and the vision prompt states the
+rule where the decision happens: *a bag of something that could be the right
+kind of thing is UNCLEAR, not FOUND.* That is the fix. Everything below is
+containment around it, and containment is allowed to be imperfect once the
+briefing is right.
+
+Two paths may now mark a find:
+
+| | how | when it earns its place |
+|---|---|---|
+| `fold_wanted` | parses the camera's `<item>: FOUND` line | free, no judgement, no tokens |
+| `mark_found(item, evidence, where)` | the model declares it from prose | a caption that answered in words; a drifted format; a judgement no label expresses |
+
+`mark_found` **validates `evidence` against the current caption** and rejects a
+paraphrase. That does not make a wrong identification impossible — a determined
+model can still quote "several bags of lentils" — but it anchors the claim in
+text the camera really wrote rather than in the model's memory of the scene,
+and it leaves the justification in the export where it can be read back.
+
+The second path also closes the hole the first one had on its own: if Qwen's
+labelled block ever drifts, the parser fails **silently and forever**. A model
+reading the prose every tick is the backstop.
+
+---
+
+## 2b. Undoing a wrong find
+
+`unmark_found(item, correction)` reopens the search — and the reason it works
+is what it *records*.
+
+Clearing the flag alone cannot hold: the caption that produced the mistake is
+still sitting in `recent` and re-justifies the same find on the very next tick.
+Storing only the user's correction does not help either, because *"those are
+toor dal"* and *"several bags of lentils"* share no words — there is nothing to
+match on. **This was a live bug, caught by the harness rather than by reading.**
+
+So all three go into `ruled_out`: the wrong location, the wrong evidence, and
+the user's words. From then on it appears in the vision prompt as
+`NOT this — already checked and rejected: …`, and blocks both find paths.
+
+Matching is substring **plus distinctive-word overlap** (≥2 shared tokens of 3+
+characters, stopwords removed) — because the same wrong object is re-described
+in slightly different words on the next frame, and a literal match would let
+the loop run anyway. Three characters, not four: the words that actually
+distinguish one container of pulses from another are short — *dal*, *jar*,
+*tin*, *red*.
+
+Deliberately tuned to err toward **keep looking**. A false match leaves the item
+open with its misses climbing, which eventually fires `wanted_stuck` and asks
+the user. A missed match re-announces something they already said was wrong.
 
 ---
 
