@@ -128,6 +128,90 @@ lock, so entry order *is* write order, and a render taken inside the window
 carries the rev it will be saved under. Bumping it in `save()` instead would
 hand two concurrent responses the same rev and the client could not order them.
 
+### 2.6 Proposed: pipeline the two stages across frames
+
+**Not built. This is a design note, written while the reasoning was fresh.**
+
+The proposal, in its original form: run the two models *in parallel* against a
+shared world document, and lock only for writes — borrowing the read/write
+concurrency discipline used in compilers and chip design, where reads are free
+and only stores are ordered.
+
+Two separate claims are buried in that, and they have different answers.
+
+**The parallelism cannot live inside one frame.** `tick()` awaits
+`_vision_for()` and then awaits `_reason()`, and there is no `asyncio.gather`,
+`create_task` or `TaskGroup` anywhere in `server/live/`. That is not an
+oversight — the reasoning stage's *input is* the vision stage's output. The
+caption is the only thing the reasoning model will ever know about the frame,
+so the dependency is real and no amount of restructuring removes it.
+
+**It can live across frames.** At steady state, vision captions frame N+1 while
+reasoning digests frame N. That is software pipelining, and it is what would
+make "two models running at once" literally true. Throughput goes from
+`vision + reasoning` to `max(vision, reasoning)` — roughly 3.5s down to 2s.
+
+The concrete argument for doing it: the interval slider is `min="2"`
+([live.html](../server/static/live.html)) but an idle tick costs ~1.5s of vision
+plus ~2s of reasoning. **The fast half of our own slider cannot keep up**, and
+`live.js` schedules the next tick only after the current one returns. Pipelining
+is what would make the 2s setting mean anything.
+
+#### The locking half is not needed, and that is the useful finding
+
+The lock is held for three windows of ~1ms inside a ~3.5s tick, and the measured
+contention cost is the 0.01s in the table above. Making reads lock-free — an
+immutable snapshot with pointer-swap on write, i.e. RCU — is real work that
+would measure as approximately zero.
+
+More to the point, **the existing lock already handles this shape of
+concurrency**, because it was built for it. Tick-overlapping-chat and
+tick-N-overlapping-tick-N+1 are the same problem, and the machinery is already
+in place: every window reloads on entry (§2.2), `rev` is bumped on entry so
+writes are orderable (§2.5), and the doc-mutating tools already degrade to a
+harmless "no match" rather than raising (§2.3). That last one is exactly the
+retry-tolerant semantics an optimistic scheme needs; it exists already, for a
+different reason.
+
+So pipelining requires **no change to the locking model at all**. It requires
+the client to stop serializing whole ticks.
+
+#### What it would actually cost
+
+Tick N's tool writes could interleave with tick N+1's caption fold-in, a race
+that cannot happen today because ticks do not overlap.
+
+Most of that is harmless by construction, because the document already has an
+ownership split — it is the same "what it saw vs what it decided" line §3 is
+built on:
+
+| | owner |
+|---|---|
+| `recent`, `wanted[].found` | the camera. Only `fold_wanted()` sets `found`, §8.1 |
+| `tasks`, `proposal`, `expectations`, `focus`, `environment` | the reasoning model |
+
+Two writers on disjoint sections do not conflict. **The one genuinely shared
+section is `wanted`**: the camera sets `found` while the model may `add_wanted`
+or `drop_wanted` on the same list. Note that matching is already by name and
+never by index for a closely related reason (§8.3) — the failure mode there was
+a list rebuilt underneath a positional read, which is the same hazard one turn
+earlier.
+
+The risk the harnesses cannot cover is the usual one: they can prove the writes
+land, and they cannot tell us whether the *model* behaves when the document
+moves under it mid-turn. That needs a live run.
+
+#### If it gets built
+
+- `live.js` only: let a frame be captured and captioned while the previous
+  tick's reasoning is still in flight. Keep a hard cap on how many ticks may be
+  in flight — pipelining with no bound is just a queue that grows during a
+  simmer, and §7.1's `pendingFrame` already establishes "latest matters".
+- Nothing in `agent.py` or the lock changes.
+- A timed harness alongside `t_live_parallel.py`, driving tick N+1's capture
+  into tick N's reasoning window.
+- Rollback is one flag on the client, since the server is unchanged.
+
 ---
 
 ## 3. Plans are proposed, not written
@@ -720,6 +804,12 @@ the user is still waiting on is worse than asking one stale question.
 - **`fine` detail has never been used live.** Every caption in the one real
   session is `coarse`, including reading a patent binder and searching a
   fridge. The tier passes its harness; the model never reaches for it.
+- **Pipeline the two stages across frames** (§2.6) — vision captioning frame
+  N+1 while reasoning digests frame N, taking a tick from `vision + reasoning`
+  to `max(vision, reasoning)`. Designed, not built. The finding worth keeping is
+  that it needs **no locking change**: the lock already handles overlapping
+  turns, so the work is entirely client-side. Pairs with the backoff item below
+  — one raises the ceiling, the other lowers the floor.
 - **Adaptive tick backoff** — nothing throttles a 20-minute simmer, and the
   diff gate is useless while walking (§7.1).
 - **Partial-evidence task completion** — a compound step ("Prep: dice onions,

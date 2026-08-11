@@ -35,6 +35,7 @@ let queuedPrompt = null;     // user message sent while another user turn was in
 let lastDocRev = 0;
 let lastSentFrame = null;    // grayscale sample of the last frame actually sent (diff gate)
 let lastCaptionAt = 0;       // when a caption last came back — how stale reuse would be
+let lastTickError = null;    // last /v2/tick error text, so a repeat isn't re-announced
 // What the server told us the NEXT tick capture should be. It works a frame
 // ahead because resolution thrown away here can never be recovered server-side.
 let frameDetail = 'coarse';
@@ -449,6 +450,26 @@ async function sendTick(frame, sample) {
       body: JSON.stringify({ image_base64: frame }),
     });
     const data = await resp.json();
+    // /v2/tick answers 200 with an `error` field rather than an HTTP status,
+    // so the catch below never sees this. Without an explicit check a tick
+    // that failed outright falls through to 'silent tick' — indistinguishable
+    // from a tick that worked and had nothing to say. That is exactly the
+    // "never let a 'no' look like silence" rule, and a refused backend
+    // (DECISIONS.md 5.3) hits it on every single frame.
+    //
+    // De-duplicated on the message text: a config refusal repeats forever at
+    // the tick interval, and one line per tick would bury the transcript. The
+    // status line keeps showing it, so it stays visible after the message
+    // scrolls away.
+    if (data.error) {
+      if (data.error !== lastTickError) {
+        lastTickError = data.error;
+        addMsg('system', `⚠️ Tick failed: ${data.error}`);
+      }
+      setStatus('tick failing — see the message above');
+      return;
+    }
+    lastTickError = null;
     if (data.skipped) { setStatus('tick throttled by server'); return; }
     // The server dropped this tick's reasoning because a user turn was
     // waiting. Keep the caption, say nothing — it is not a silent tick.

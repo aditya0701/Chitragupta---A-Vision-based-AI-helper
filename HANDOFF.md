@@ -122,6 +122,11 @@ callback, **not** a second parallel function. v1's
 
 Full reasoning in `DECISIONS.md` §9.
 
+- **Pipelining, designed but not built** (`DECISIONS.md` §2.6) — caption frame
+  N+1 while frame N is still being reasoned about. The tick interval slider goes
+  down to 2s and a tick costs ~3.5s, so the fast half of it currently cannot
+  keep up. Needs **no locking change** — the lock already handles overlapping
+  turns — so the work is entirely in `live.js`.
 - **Adaptive tick backoff** — nothing throttles a 20-minute simmer.
 - **The diff gate dies while walking** — every frame differs, so it skips
   nothing. The export shows this clearly during the fridge/pantry search.
