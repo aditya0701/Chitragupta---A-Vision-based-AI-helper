@@ -47,6 +47,7 @@ VISION_PROMPT = (
 class DeepSeekBackend(VisionBackend):
     SPLIT_VISION_REASONING = True  # Groq sees the image; DeepSeek never does
     SUPPORTS_NATIVE_TOOLS = True   # DeepSeek's API is OpenAI-compatible function calling
+    VISION_PROVIDER = "groq"       # fine for v1's cadence; v2 rejects this — DECISIONS.md §5.2
 
     # Ceiling on a reasoning reply. A cap, not a charge — raising it costs
     # nothing unless the model actually generates more. Subclasses raise it

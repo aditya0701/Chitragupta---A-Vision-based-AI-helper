@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 import time
 import uuid
@@ -87,10 +88,20 @@ def _empty_doc() -> dict:
         # passed, which is the only thing stopping a stale doc from stamping
         # over a fresh one in the panel.
         "rev": 0,
+        # The words of the last user turn, not just its clock time. Stage 2's
+        # speech prompt used to get only `last_user_turn_ts`, so it was asked
+        # "does this answer what they wanted?" while having no idea what they
+        # had wanted. Observed live 2026-08-10: the camera reported "boneless
+        # chicken breast is present and within reach", Stage 2 read that
+        # sentence, could not connect it to a request it had never seen, judged
+        # itself to be narrating, and stayed silent for 65s until the user
+        # asked again. DECISIONS.md §6.4.
+        "last_user_msg": "",
         "vision_focus": None,
         "proposal": None,
         "tasks": [],
         "expectations": [],
+        "wanted": [],
         "environment": [],
         "narrative": [],
         "recent": [],
@@ -344,6 +355,181 @@ def open_expectations(doc: dict) -> list[dict]:
     return [e for e in doc["expectations"] if e["status"] == "open"]
 
 
+# ── The find list ────────────────────────────────────────────────────────────
+#
+# Objects the user asked to have found. The camera is asked about all of them
+# by name on every frame, and a labelled FOUND answer — not a model's reading
+# of a description — is the only thing that can tick one off.
+#
+# THERE IS DELIBERATELY NO TOOL THAT MARKS AN ITEM FOUND. `add_wanted` opens a
+# search and `drop_wanted` cancels one; nothing lets the reasoning model write
+# status="found". Only fold_wanted() can, and it does it by string-matching an
+# explicit answer produced by the stage that actually saw the pixels.
+#
+# That asymmetry is the whole point. The failure it prevents is on record: the
+# user wanted black-eyed beans, the caption said "several bags of lentils", and
+# the reasoning model — with no answer to read — upgraded that into "I can see
+# the beans". An inference stood in for an observation. Under this design an
+# inference cannot reach the found state, because the found state has no
+# model-facing door.
+
+
+def add_wanted(doc: dict, items: list[str], because: str = "") -> str:
+    """Open a search for one or more objects. Takes a list, so "find the
+    chicken and the onions" is one call rather than two."""
+    names = [str(i).strip() for i in (items or []) if str(i).strip()]
+    if not names:
+        return "add_wanted needs at least one item to look for."
+
+    existing = {w["item"].lower() for w in doc["wanted"] if w["status"] == "open"}
+    added, dupes = [], []
+    for name in names:
+        if name.lower() in existing:
+            dupes.append(name)
+            continue
+        doc["wanted"].append({
+            "id": uuid.uuid4().hex[:8],
+            "item": name,
+            "asked_ts": _now(),
+            "asked_text": (because or "").strip(),
+            "status": "open",
+            "found_ts": None,
+            "where": None,
+            "misses": 0,
+            "unclears": 0,
+            # Kept separate from status="found" on purpose. `found` is a fact
+            # about the world; `announced` is a fact about speech. If the
+            # utterance fails — the model returns [SILENT], the network drops,
+            # the tick dies — the item is still found and the user is still
+            # owed it, and fusing the two would make a failed announcement
+            # indistinguishable from a delivered one. Because the announce
+            # trigger tests doc state rather than this tick's caption, it
+            # simply re-fires next tick until the words land.
+            "announced": False,
+            "stuck_raised": False,
+        })
+        existing.add(name.lower())
+        added.append(name)
+
+    # Cap on OPEN items only — a found item costs the camera nothing.
+    open_now = [w for w in doc["wanted"] if w["status"] == "open"]
+    if len(open_now) > config.MAX_WANTED:
+        for stale in open_now[: len(open_now) - config.MAX_WANTED]:
+            stale["status"] = "dropped"
+
+    if not added:
+        return f"Already looking for: {', '.join(dupes)}. The camera is asked every frame."
+    msg = f"Now looking for on every frame: {', '.join(added)}."
+    if dupes:
+        msg += f" (Already watching for {', '.join(dupes)}.)"
+    return msg + " You will be told the moment any of them is seen — do not promise to look, you already are."
+
+
+def find_wanted(doc: dict, ref: str) -> Optional[dict]:
+    ref_l = (ref or "").strip().lower()
+    if not ref_l:
+        return None
+    return next(
+        (w for w in doc["wanted"]
+         if w["id"] == ref or w["item"].lower() == ref_l or ref_l in w["item"].lower()),
+        None,
+    )
+
+
+def drop_wanted(doc: dict, ref: str) -> str:
+    item = find_wanted(doc, ref)
+    if not item:
+        return f"Not looking for anything matching '{ref}'."
+    item["status"] = "dropped"
+    return f"Stopped looking for {item['item']}."
+
+
+def open_wanted(doc: dict) -> list[dict]:
+    return [w for w in doc.get("wanted", []) if w["status"] == "open"]
+
+
+def wanted_names(doc: dict) -> list[str]:
+    """The item names put to the camera this frame, in one question."""
+    return [w["item"] for w in open_wanted(doc)][: config.MAX_WANTED]
+
+
+_VERDICTS = ("FOUND", "NOT VISIBLE", "UNCLEAR")
+
+
+def _verdict_re(item: str) -> re.Pattern:
+    # Anchored at line start and requiring the item name followed by a
+    # separator and a verdict token, so the word "onions" appearing in the
+    # prose description below the answers can never be mistaken for an answer
+    # about onions.
+    return re.compile(
+        r"^\s*[-*\u2022]?\s*" + re.escape(item) + r"\s*[:\-\u2013\u2014]+\s*"
+        r"(FOUND|NOT[ _]VISIBLE|UNCLEAR)\b[\s:\-\u2013\u2014]*(.*)$",
+        re.IGNORECASE,
+    )
+
+
+def fold_wanted(doc: dict, caption: str) -> list[dict]:
+    """Match the camera's labelled answers against the open find list.
+
+    Pure string matching, zero tokens, no judgement. Returns the items newly
+    moved to `found` so the caller can promote their locations into durable
+    environment facts.
+
+    Matching is BY NAME, never by position. An earlier draft numbered the
+    questions Q1/Q2/Q3 and mapped answers back by index — but that list is
+    rebuilt every tick from open state, priority-sorted, while the vision call
+    runs unlocked for ~1.5s. Close one watch or add a high-priority safety one
+    mid-search and every index shifts, so `Q2: FOUND` would be attributed to
+    the wrong object: right location, wrong item, stated as fact, and then
+    written into durable memory. Names have no such failure mode.
+    """
+    text = caption or ""
+    if not text.strip():
+        return []
+    lines = text.splitlines()
+    newly_found = []
+
+    for item in open_wanted(doc):
+        pattern = _verdict_re(item["item"])
+        match = next((m for m in (pattern.match(ln) for ln in lines) if m), None)
+        if not match:
+            # Absent from the answer block is NOT a miss. A truncated reply or
+            # a model that answered only some items must never be able to drive
+            # a give-up: silence is not evidence, which is the same rule that
+            # makes NOT VISIBLE an explicit result rather than an omission.
+            continue
+        verdict = match.group(1).upper().replace("_", " ")
+        detail = (match.group(2) or "").strip()
+        if verdict == "FOUND":
+            # Claims the item, exactly as triggers.check claims a fired
+            # expectation: this caption sits in `recent` for another 24 frames
+            # and must not be able to re-fire the announcement.
+            item["status"] = "found"
+            item["found_ts"] = _now()
+            item["where"] = detail or "seen in frame, no location given"
+            newly_found.append(item)
+        elif verdict == "NOT VISIBLE":
+            item["misses"] = int(item.get("misses") or 0) + 1
+        elif verdict == "UNCLEAR":
+            item["unclears"] = int(item.get("unclears") or 0) + 1
+
+    return newly_found
+
+
+def unannounced_finds(doc: dict) -> list[dict]:
+    """Found, but the user has not actually been told yet."""
+    return [w for w in doc.get("wanted", [])
+            if w["status"] == "found" and not w.get("announced")]
+
+
+def mark_wanted_announced(doc: dict, items: list[dict]):
+    """Called only after speech has actually survived the gate."""
+    ids = {w["id"] for w in items}
+    for w in doc.get("wanted", []):
+        if w["id"] in ids:
+            w["announced"] = True
+
+
 # ── Vision focus ─────────────────────────────────────────────────────────────
 
 VALID_FOCUS_MODES = {"form", "read"}
@@ -577,6 +763,33 @@ def render(doc: dict, recent_limit: Optional[int] = None) -> str:
                 lines.append(f"- ({e['id']}, {e['priority']}) {e['description']} — {when}")
             else:
                 lines.append(f"- ({e['id']}, {e['priority']}) {e['description']} — fires when: {e['condition']}")
+
+    # Between expectations and the narrative: it changes more often than tasks
+    # and less often than `recent`, which keeps the stability-first ordering
+    # (and so the prefix cache) intact.
+    wanted = [w for w in doc.get("wanted", []) if w["status"] in ("open", "found")]
+    if wanted:
+        lines.append("\n[Looking for — the camera is asked about these by name every frame]")
+        for w in wanted:
+            if w["status"] == "found":
+                told = "already told the user" if w.get("announced") else "NOT YET TOLD"
+                lines.append(f"- {w['item']} — FOUND {fmt_ts(w['found_ts'])}: "
+                             f"{w['where']}  ({told})")
+            else:
+                seen = []
+                if w.get("misses"):
+                    seen.append(f"not visible in {w['misses']} frames")
+                if w.get("unclears"):
+                    seen.append(f"unclear in {w['unclears']}")
+                detail = "; ".join(seen) or "just started looking"
+                lines.append(f"- {w['item']} — still looking "
+                             f"(asked {fmt_ts(w['asked_ts'])}, {detail})")
+        lines.append(
+            "You do not need to do anything to search for these — the camera is "
+            "already asked about every one of them on every frame, and you will be "
+            "told the moment one is seen. Never say you will 'keep an eye out' as if "
+            "it were a future action."
+        )
 
     if doc["narrative"]:
         lines.append("\n[Earlier this session]")

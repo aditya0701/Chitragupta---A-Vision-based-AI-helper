@@ -26,6 +26,7 @@ def build_tick_vision_prompt(
     questions: Optional[list[str]] = None,
     focus: Optional[str] = None,
     focus_mode: str = "form",
+    wanted: Optional[list[str]] = None,
 ) -> str:
     parts = []
     if focus and focus_mode == "read":
@@ -127,6 +128,53 @@ def build_tick_vision_prompt(
             "looking at the whole frame.",
             "",
         ]
+    if wanted:
+        # The find list — the user asked to be told when these appear.
+        #
+        # ONE block for the whole list, not one question per item. Per-item
+        # questions competed for MAX_ACTIVE_BRIEFS, so a third search plus a
+        # safety watch filled the budget and a fourth item silently never
+        # reached the camera at all — a permanent blind spot on something the
+        # user had explicitly asked for.
+        #
+        # Answers are labelled BY NAME rather than by Q-index because the
+        # index is positional over a list rebuilt every tick, and the vision
+        # call runs unlocked while the document can move. See
+        # worlddoc.fold_wanted for the full reasoning.
+        n_w = len(wanted)
+        parts += [
+            f"A STANDING SEARCH. The user has asked to be told the moment these "
+            f"{n_w} thing(s) come into view. Answer for EVERY one of them, before "
+            f"anything else in your reply:",
+            "",
+        ]
+        parts += [f"  - {w}" for w in wanted]
+        parts += [
+            "",
+            f"Answer format — exactly {n_w} line(s), one per item, item name first:",
+            "  <item>: FOUND — <exactly where it is in the frame, plus any label text you can read>",
+            "  <item>: NOT VISIBLE — <what is in that part of the frame instead>",
+            "  <item>: UNCLEAR — <what you can make out, and what blocks a confident answer>",
+            "",
+            "Write each item name EXACTLY as written above — not a synonym, not a "
+            "plural, not a rephrasing. These answers are read back by exact name, "
+            "and a renamed item is an answer nobody receives.",
+            "",
+            # The beans lesson, stated at the moment of the decision rather
+            # than in the abstract. A wrong FOUND does not merely misinform:
+            # it closes the search and sends the user to a specific spot.
+            "NOT VISIBLE is a real and useful answer — say it rather than "
+            "stretching. NEVER answer FOUND for something merely plausible: a bag "
+            "that might be onions is UNCLEAR or NOT VISIBLE, never FOUND. FOUND "
+            "ends the search and sends the user to the exact place you name, so a "
+            "wrong FOUND costs them far more than an honest NOT VISIBLE. Report "
+            "what is actually legible or visibly distinctive — label text, shape, "
+            "colour, markings — and let the reader decide.",
+            "",
+        ]
+        if not questions:
+            parts += ["THEN, after those lines, describe the frame as follows.", ""]
+
     if questions:
         # The reasoning model's own brief, asked FIRST and answered explicitly.
         #
@@ -148,8 +196,9 @@ def build_tick_vision_prompt(
         # the model answered "Q1/Q2/Q3", inventing two more to hang the rest of
         # its observations on — harmless to read but it makes the answer block
         # unparseable and pads every caption.
+        lead = "THEN" if wanted else "FIRST"
         parts += [
-            f"FIRST, answer the {n} question(s) below about this frame. Answer before "
+            f"{lead}, answer the {n} question(s) below about this frame. Answer before "
             f"the description, exactly one line each, using the exact labels below. "
             f"There are exactly {n} — never invent extra questions; anything else you "
             f"noticed belongs in the description that follows.",

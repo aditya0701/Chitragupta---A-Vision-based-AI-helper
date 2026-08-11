@@ -29,6 +29,11 @@ class GroqBackend(VisionBackend):
     # of the model hand-writing JSON into free text.
     SUPPORTS_NATIVE_TOOLS = True
 
+    # One multimodal model, so the image goes to Groq in the ordinary chat
+    # call rather than a separate vision stage — but it is still Groq's free
+    # tier, and v2 rejects it for the same reason. DECISIONS.md §5.2.
+    VISION_PROVIDER = "groq"
+
     # This backend also exposes chat_stream() (see below) — agent.py checks
     # for that method's presence (duck-typed, not a class flag) to decide
     # whether a turn can stream live or has to fall back to one blocking

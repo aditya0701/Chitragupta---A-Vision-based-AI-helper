@@ -52,6 +52,16 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
     def _resolve_expectation(ref: str, outcome: str = "satisfied", note: str = "") -> str:
         return worlddoc.resolve_expectation(get_doc(), ref, outcome, note)
 
+    def _add_wanted(items: list, because: str = "") -> str:
+        # Tolerate a bare string — models pass "onions" for a one-item search
+        # often enough that rejecting it would just cost a turn.
+        if isinstance(items, str):
+            items = [p.strip() for p in items.split(",")]
+        return worlddoc.add_wanted(get_doc(), items, because)
+
+    def _drop_wanted(item: str) -> str:
+        return worlddoc.drop_wanted(get_doc(), item)
+
     def _log_environment(fact: str) -> str:
         return worlddoc.add_environment_fact(get_doc(), fact)
 
@@ -282,6 +292,55 @@ def build_live_tools(get_doc: Callable[[], dict]) -> ToolRegistry:
             "brief": {"type": "string", "description": "One or two sentences: what the user is physically doing right now. Not a checklist. Empty string clears it.", "required": True},
             "detail": {"type": "string", "enum": ["fine", "coarse"], "description": "fine = 1024px, for seeing grip/threads/labels/small detail. coarse = 640px, for gross movement. Revert to coarse when the close work is done.", "required": False},
             "mode": {"type": "string", "enum": ["form", "read"], "description": "form = watch how the work is being done (grip, posture, danger). read = TRANSCRIBE text in frame verbatim — labels, instructions, gauges, screens. Forces fine frames.", "required": False},
+        },
+        needs_followup=False,
+    ))
+
+    # Note what is NOT registered here: anything that marks a wanted item
+    # found. The reasoning model can open a search and cancel one; it cannot
+    # declare success. Only worlddoc.fold_wanted sets status="found", and only
+    # from a labelled answer produced by the stage that saw the pixels.
+    #
+    # That is the structural fix for the black-eyed beans: the caption said
+    # "several bags of lentils", and the reasoning model — reading prose with
+    # no answer to work from — upgraded it into "I can see the beans". An
+    # inference cannot reach the found state if the found state has no
+    # model-facing door.
+    registry.register(Tool(
+        name="add_wanted",
+        description=(
+            "Start looking for one or more physical objects the user wants found. Call "
+            "this the MOMENT they ask you to find, locate, spot, or keep an eye out for "
+            "anything — before you reply to them. Saying you will watch for something is "
+            "not watching for it; this is the only thing that actually starts a search. "
+            "Pass every item from one request in a single call. The camera is then asked "
+            "about each item BY NAME on every single frame, and you are told automatically "
+            "the instant one is seen — you do not need to check, and you must never claim "
+            "to have found something yourself. Use short, concrete, visually distinctive "
+            "names ('red chicken packet', 'onions'), not categories ('ingredients')."
+        ),
+        fn=_add_wanted,
+        parameters={
+            "items": {"type": "array", "items": {"type": "string"},
+                      "description": "The objects to look for, e.g. ['onions', 'chicken packet']",
+                      "required": True},
+            "because": {"type": "string",
+                        "description": "What the user actually said, verbatim if you have it",
+                        "required": False},
+        },
+        needs_followup=False,
+    ))
+
+    registry.register(Tool(
+        name="drop_wanted",
+        description=(
+            "Stop looking for something. Call this when the user says never mind, tells "
+            "you they already have it, tells you where it is, or the search stops "
+            "mattering. An abandoned search costs a question on every frame forever."
+        ),
+        fn=_drop_wanted,
+        parameters={
+            "item": {"type": "string", "description": "The item name to stop looking for", "required": True},
         },
         needs_followup=False,
     ))

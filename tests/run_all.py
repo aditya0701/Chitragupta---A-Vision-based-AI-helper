@@ -28,6 +28,8 @@ PY = [
     ("v2 live prompts    ", "t_live_prompts.py"),
     ("v2 tick/chat overlap", "t_live_parallel.py"),
     ("v2 deferred writes ", "t_live_writes.py"),
+    ("v2 backend guard   ", "t_live_backend.py"),
+    ("v2 find list       ", "t_live_wanted.py"),
 ]
 
 results = []

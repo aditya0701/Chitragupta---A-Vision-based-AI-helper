@@ -70,6 +70,18 @@ class VisionBackend(ABC):
     # every backend the same way regardless of which path it takes.
     SUPPORTS_NATIVE_TOOLS: bool = False
 
+    # Which provider actually receives the image. Declared rather than
+    # inferred because v2 has a hard requirement on it and could not check:
+    # a hybrid backend's vision half is a Groq client built in a base class
+    # __init__ and silently replaced by a subclass, so "which provider gets
+    # the pixels" is not visible from the class name or the mode string.
+    #
+    # v2's tick loop cannot run on Groq's free tier at all (DECISIONS.md
+    # §5.2). Before this existed the failure surfaced as a 429 eighteen
+    # minutes into a live session, with every config file in the repo
+    # claiming the right provider. §5.3.
+    VISION_PROVIDER: str = "unknown"
+
     @abstractmethod
     async def chat(
         self,

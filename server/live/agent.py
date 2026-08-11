@@ -90,7 +90,15 @@ SYSTEM_BRIEF = (
     "IDLE ticks. The moment the user is waiting on something from you, silence "
     "stops being polite and becomes a failure: they cannot see the document, they "
     "have no idea you noticed, and their only recourse is to ask you whether you "
-    "did. Recording something is never the same as answering someone."
+    "did. Recording something is never the same as answering someone.\n"
+    "FINDING THINGS. If the user asks you to find, locate, spot or watch out for a "
+    "physical object, call add_wanted with every item they named, before you reply. "
+    "Telling them you will keep an eye out is not keeping an eye out — add_wanted is "
+    "the only thing that actually looks. Once an item is on that list the camera is "
+    "asked about it by name on every single frame and you are told automatically the "
+    "instant it is seen, so never promise to watch for something you have not added, "
+    "and never claim to have found something yourself: you cannot see, and the only "
+    "valid find is one the camera reported."
 )
 
 
@@ -528,6 +536,16 @@ class LiveAgent:
                 f"have not said yes or no. Nothing is being tracked until they do, and they "
                 f"cannot see it — so if they have gone quiet, a short 'shall I go ahead with "
                 f"that plan?' is worth saying. Ask; don't read the steps out again.")
+        # The words, not just the clock. The SPEAK rule below has always read
+        # "they asked you for something and this answers it" — and until now
+        # this prompt carried only "[User last spoke] 143s ago", so that test
+        # had no operand and could not be applied. On 2026-08-10 the camera
+        # reported "boneless chicken breast is present and within reach", this
+        # stage read it with no idea anyone had asked about chicken, correctly
+        # concluded it would be narrating, and stayed silent for 65s.
+        last_msg = (doc.get("last_user_msg") or "").strip()
+        if last_msg and last_user:
+            lines += [f"[What they asked you, {ago(last_user)}]", f'"{last_msg}"', ""]
         lines += [
             f"[User last spoke] {ago(last_user)}",
             f"[You last spoke] {ago(last_spoke)}",
@@ -549,6 +567,55 @@ class LiveAgent:
             "nothing else. Do not explain your decision; the reply IS the speech.",
         ]
         return "\n".join(lines)
+
+    def _build_announce_prompt(self, doc: dict, found: list[dict]) -> str:
+        """Not a decision — a wording job.
+
+        Everything else in phase 3d asks "should you speak?". This does not.
+        The user asked for these things, the camera has now seen them, and they
+        are going to be told; the only open question is the sentence. [SILENT]
+        is not offered, because offering it is exactly how the 2026-08-10
+        session lost 65 seconds with the chicken already on screen.
+        """
+        lines = [
+            "You are the voice of a live assistant watching someone work through a "
+            "camera. They asked you to find something and the camera has just seen "
+            "it. Tell them — right now, in one or two short spoken sentences.",
+            "",
+        ]
+        asked = next((w.get("asked_text") for w in found if w.get("asked_text")), "")
+        if asked:
+            lines += [f'[They asked you] "{asked}"', ""]
+        lines.append("[Just seen]")
+        for w in found:
+            lines.append(f"- {w['item']} — {w['where']}")
+        lines += [
+            "",
+            "Lead with WHERE it is, because that is the only part they can act on. "
+            "Use the location words the camera used. If there is more than one, put "
+            "them in ONE sentence — not one message each.",
+            "",
+            "Do not ask whether they want to know. Do not say you will keep looking "
+            "for it. Do not describe the frame. Do not use markdown.",
+            "",
+            "Reply with the exact words to say aloud and nothing else.",
+        ]
+        return "\n".join(lines)
+
+    @staticmethod
+    def _announce_fallback(found: list[dict]) -> str:
+        """What the user hears if the announce call returns [SILENT], returns
+        nothing, or fails outright.
+
+        A forced path that the model can still talk its way out of is not
+        forced. This is deliberately plain and deterministic — the location
+        strings the camera wrote, joined — because the alternative on that path
+        is the silence this whole mechanism exists to prevent.
+        """
+        parts = [f"{w['item']} — {w['where']}" for w in found]
+        if len(parts) == 1:
+            return f"Found the {parts[0]}."
+        return "Found these: " + "; ".join(parts) + "."
 
     async def _ask_speech(self, prompt: str) -> str:
         """Put the speech question to the model. Returns '' for silence.
@@ -583,6 +650,45 @@ class LiveAgent:
         lines += [f"- ({e['id']}) {e['description']} — asked {e['asks']} times" for e in stale]
         return "\n".join(lines)
 
+    # Find-shaped words, checked against the user's own message. Deliberately
+    # NOT used to open a search — parsing intent from natural language is
+    # brittle and a wrong parse would start the camera hunting for nothing.
+    # It only decides whether to REMIND the model, which is safe when wrong.
+    _FIND_WORDS = ("find", "look for", "looking for", "locate", "where is",
+                   "where are", "spot", "keep an eye", "watch out for", "search")
+
+    def _unwatched_request_note(self, doc: dict) -> str:
+        """The user asked for something and nothing is being watched for.
+
+        The SYSTEM_BRIEF rule says to call add_wanted, and prompt rules get
+        ignored — on 2026-08-10 the model was asked to find the chicken and the
+        onions and reached for set_vision_focus instead, writing the search into
+        the standing brief as prose. Nothing was ever actually asked of the
+        camera, and the whole search ran on luck.
+
+        So this is the backstop: a missed opening is recovered on the NEXT tick
+        rather than lost for the session. Suppressed once anything is on the
+        list, and once the follow-up window closes — by then the request is old
+        enough that re-raising it would be nagging about something the user has
+        probably moved on from.
+        """
+        if worlddoc.open_wanted(doc) or worlddoc.unannounced_finds(doc):
+            return ""
+        if not triggers.in_followup_window(doc):
+            return ""
+        msg = (doc.get("last_user_msg") or "").strip()
+        if not msg or not any(w in msg.lower() for w in self._FIND_WORDS):
+            return ""
+        ago = int(worlddoc._now() - (doc.get("last_user_turn_ts") or 0))
+        return (
+            f"\n[Nothing is being looked for — check this]\n"
+            f'{ago}s ago the user said: "{msg}"\n'
+            f"If that asked you to find or locate a physical object, the camera is "
+            f"NOT currently being asked about it and nobody is looking. Call "
+            f"add_wanted now with the item names. If it was not a request to find "
+            f"something, ignore this line."
+        )
+
     def _build_tick_prompt(self, doc: dict, caption: str, events: list[dict]) -> str:
         lines = [
             PERSONA, "", SYSTEM_BRIEF, "",
@@ -613,6 +719,12 @@ class LiveAgent:
             "support. 'Lentils on the shelf' is not 'the black-eyed beans'. If the user "
             "is looking for something specific and you can only see a generic match, say "
             "what you can see and ask them to confirm, rather than announcing a find.",
+            "- The observation may also open with '<item>: FOUND / NOT VISIBLE / "
+            "UNCLEAR' lines. Those are the find list and they are handled for you — "
+            "the answer is already recorded and the user is already being told. Do "
+            "not call anything for them, do not repeat them, and never treat a NOT "
+            "VISIBLE or UNCLEAR as a find. If the user has said they no longer need "
+            "an item, call drop_wanted.",
             "- If a task visibly finished or started, call mark_task.",
             "- If a plan is shown as PROPOSED and the frame shows the user visibly starting "
             "its first step, that is them agreeing — call commit_plan. Nothing else on a "
@@ -635,6 +747,9 @@ class LiveAgent:
         stale = self._stale_brief_note(doc)
         if stale:
             lines.append(stale)
+        unwatched = self._unwatched_request_note(doc)
+        if unwatched:
+            lines.append(unwatched)
         return "\n".join(lines)
 
     async def _vision_for(self, image_base64: str) -> tuple[str, str]:
@@ -658,14 +773,18 @@ class LiveAgent:
                 self._vision_questions(doc, charge=False),
                 worlddoc.get_vision_focus(doc),
                 worlddoc.focus_mode(doc) or "form",
+                worlddoc.wanted_names(doc),
             )
-        prev, goal, questions, focus, focus_mode = snapshot
+        prev, goal, questions, focus, focus_mode, wanted = snapshot
         vision_prompt = build_tick_vision_prompt(prev, goal, questions, focus=focus,
-                                                 focus_mode=focus_mode)
+                                                 focus_mode=focus_mode, wanted=wanted)
         caption = await self.backend.vision(
             image_base64, vision_prompt,
+            # Find-list items need their own answer line just as questions do.
+            # Without the extra budget the answers truncate mid-block, which
+            # reads exactly like "not found" and silently stalls every search.
             max_tokens=config.VISION_MAX_TOKENS
-            + config.VISION_TOKENS_PER_QUESTION * len(questions))
+            + config.VISION_TOKENS_PER_QUESTION * (len(questions) + len(wanted)))
         # The prompt rides back too: it is the single most useful thing in an
         # exported session for judging why a caption came out as it did.
         return caption, vision_prompt
@@ -698,6 +817,20 @@ class LiveAgent:
             # Charge the briefs and the focus now, against current state.
             self._vision_questions(doc)
             worlddoc.charge_focus_frame(doc)
+
+            # Fold the find-list answers in BEFORE the yield check. This is
+            # pure string matching against the caption — no tokens, no model,
+            # microseconds — so even a tick that is about to abandon its own
+            # reasoning still banks what the camera saw. A find detected here
+            # is announced by the next tick or the next poll, because the
+            # trigger reads document state rather than this caption.
+            for item in worlddoc.fold_wanted(doc, caption):
+                # A found location IS durable spatial memory, so promote it for
+                # free and answer "where were the onions again?" later without
+                # another search.
+                worlddoc.add_environment_fact(
+                    doc, f"{item['item']}: {item['where']}")
+                logger.info("Find list: %r seen — %s", item["item"], item["where"])
 
             # A person is waiting and this tick is about to spend seconds on a
             # reasoning call. Keep the caption — already paid for, and the
@@ -733,21 +866,42 @@ class LiveAgent:
         # nothing happened that could warrant speech, so an idle tick still
         # costs exactly one call.
         async with self._write_window() as doc:
+            # Something the user asked to have found has been seen and they
+            # have not been told. That is not a judgement call, so it does not
+            # go to the prompt that is allowed to answer [SILENT] — it takes
+            # its own path and it is not skippable. Deliberately checked BEFORE
+            # the yield below: a user starting to talk is a reason to skip
+            # commentary, never a reason to swallow the answer to their own
+            # earlier question.
+            announcing = [e for e in events if e["kind"] == "wanted_found"]
+            found_items = announcing[0]["items"] if announcing else []
+
             worth_asking = (bool(tool_results) or bool(events)
                             or triggers.in_followup_window(doc)
                             or worlddoc.get_proposal(doc) is not None)
             # Second yield point. The user started talking while we were doing
             # bookkeeping — their own turn is about to answer them with more
             # context than this tick has, so don't spend a call racing it.
-            if worth_asking and self._user_waiting:
+            if worth_asking and self._user_waiting and not found_items:
                 logger.info("Tick yielded before its speech decision — user turn in flight")
                 worth_asking = False
-            speech_prompt = (
-                self._build_speech_prompt(doc, caption, tool_results, events)
-                if worth_asking else None)
+
+            if found_items:
+                speech_prompt = self._build_announce_prompt(doc, found_items)
+            elif worth_asking:
+                speech_prompt = self._build_speech_prompt(doc, caption, tool_results, events)
+            else:
+                speech_prompt = None
 
         # Phase 3d — UNLOCKED. The speech decision, on its own prompt.
         text = await self._ask_speech(speech_prompt) if speech_prompt else ""
+
+        # The announcement is not allowed to come back empty. If the model
+        # returned [SILENT], returned nothing, or errored, the server says it
+        # itself from the locations the camera wrote.
+        if found_items and (not text.strip() or text.strip().upper() == SILENT_MARKER):
+            text = self._announce_fallback(found_items)
+            logger.info("Announce call declined or failed — using deterministic fallback")
 
         # Phase 3e: gate it and record it.
         async with self._write_window() as doc:
@@ -763,7 +917,8 @@ class LiveAgent:
                 # expectation-resolving or inside the follow-up window passes
                 # untouched.
                 important = (
-                    bool(events)
+                    bool(found_items)
+                    or bool(events)
                     or triggers.in_followup_window(doc)
                     or any(r["tool"] == "resolve_expectation" for r in tool_results)
                 )
@@ -780,6 +935,12 @@ class LiveAgent:
 
             if text:
                 triggers.mark_spoke(doc)
+                # Claimed only now, on speech that actually survived the gate.
+                # If it did not, `announced` stays False and the trigger fires
+                # again next tick — or on the next poll, which needs no frame.
+                # A find is permanent; its announcement retries until it lands.
+                if found_items:
+                    worlddoc.mark_wanted_announced(doc, found_items)
                 # A tick that just read the pending plan out loud has asked;
                 # don't let the re-raise trigger ask again in two minutes.
                 if worlddoc.get_proposal(doc):
@@ -954,8 +1115,8 @@ class LiveAgent:
 
             self.memory.add("user", prompt)
             self.memory.add("assistant", text)
-            triggers.mark_spoke(doc)      # suppresses stale-task nags
-            triggers.mark_user_turn(doc)  # but OPENS the tick follow-up window
+            triggers.mark_spoke(doc)            # suppresses stale-task nags
+            triggers.mark_user_turn(doc, prompt)  # but OPENS the tick follow-up window
             # If this turn put a plan up for approval, the reply just read it
             # out — that counts as having asked.
             if any(r["tool"] == "propose_plan" for r in tool_results):
@@ -984,9 +1145,15 @@ class LiveAgent:
             # Politeness: overdue expectations are the product working as
             # designed — only 'low' priority ones and stale-task nags wait
             # for the gap.
+            # wanted_found is unconditional here for the same reason it bypasses
+            # phase 3e's gate: the user asked for this and is waiting on it, so
+            # the politeness budget has no standing. This path matters when the
+            # camera found something and then went dark or idle — the tick that
+            # would have announced it may never come, but the heartbeat does.
             speakable = [
                 e for e in events
                 if e["priority"] == "high"
+                or e["kind"] == "wanted_found"
                 or (e["kind"] == "expectation_due" and e["priority"] != "low")
                 or triggers.may_speak_unprompted(doc, e["priority"])
             ]
@@ -1009,8 +1176,16 @@ class LiveAgent:
         async with self._write_window() as doc:
             if text.upper() == SILENT_MARKER:
                 text = ""
+            # Same rule as the tick: an announcement may not come back empty.
+            poll_found = [w for e in speakable if e["kind"] == "wanted_found"
+                          for w in e["items"]]
+            if poll_found and not text.strip():
+                text = self._announce_fallback(poll_found)
+                logger.info("Poll announce declined — using deterministic fallback")
             if text:
                 triggers.mark_spoke(doc)
+                if poll_found:
+                    worlddoc.mark_wanted_announced(doc, poll_found)
                 if worlddoc.get_proposal(doc):
                     worlddoc.mark_proposal_raised(doc)
             return {

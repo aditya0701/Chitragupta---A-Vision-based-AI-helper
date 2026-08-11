@@ -4,11 +4,28 @@ old system's config surface is untouched. All env-overridable."""
 import os
 
 # Which backend the live system uses, independent of the old system's
-# BACKEND_MODE. Defaults to hybrid (Groq vision + DeepSeek reasoning) —
-# the tick loop's growing text history is exactly what DeepSeek's prefix
-# cache discounts, and it keeps reasoning off Groq's 8K TPM cap.
+# BACKEND_MODE. Reasoning is DeepSeek either way — the tick loop's growing
+# text history is exactly what its prefix cache discounts. What this picks is
+# where the PIXELS go.
+#
+# Defaults to deepinfra, and that default is load-bearing rather than a
+# preference. It used to default to "hybrid" (Groq vision), which v2 cannot
+# run on at all — ~139 ticks per day against the TPD cap, see
+# deepinfra_backend.py for the arithmetic. So the safe-looking default was the
+# one configuration guaranteed to fail, and it failed *late*: a live session on
+# 2026-08-10 ran for eighteen minutes and died on a 429 while every config file
+# in the repo said "deepinfra". A default nobody sets must be the one that
+# works. DECISIONS.md §5.3.
+#
 # Set LIVE_BACKEND_MODE=same to follow the old system's BACKEND_MODE.
-LIVE_BACKEND_MODE: str = os.getenv("LIVE_BACKEND_MODE", "hybrid")
+LIVE_BACKEND_MODE: str = os.getenv("LIVE_BACKEND_MODE", "deepinfra")
+
+# Escape hatch for the startup check that refuses a Groq-vision backend for
+# v2. Exists for deliberate experiments — a one-off comparison, a debugging
+# run against v1's exact vision path — where taking the 429 is the point.
+# It has to be set explicitly and per-run, which is the whole distinction:
+# choosing Groq is fine, arriving there by accident is not.
+ALLOW_GROQ_VISION: bool = os.getenv("LIVE_ALLOW_GROQ_VISION", "").lower() in ("1", "true", "yes")
 
 # ── World doc bounds ─────────────────────────────────────────────────────────
 # Raw tick captions kept verbatim before the oldest are compacted away.
@@ -56,6 +73,25 @@ PROPOSAL_RERAISE_S: int = int(os.getenv("LIVE_PROPOSAL_RERAISE_S", "150"))
 # worth of watches is far too many to ask at once — they cannot all be answered
 # inside one vision reply, and every one is billed on every tick.
 MAX_ACTIVE_BRIEFS: int = int(os.getenv("LIVE_MAX_ACTIVE_BRIEFS", "4"))
+
+# ── The find list ────────────────────────────────────────────────────────────
+# Items the camera may be asked to scan for on one frame. They ride in a SINGLE
+# question (see vision.build_tick_vision_prompt), so this does not compete with
+# MAX_ACTIVE_BRIEFS — but the vision model still cannot sweep a frame for a
+# dozen objects and describe it inside one reply.
+MAX_WANTED: int = int(os.getenv("LIVE_MAX_WANTED", "6"))
+
+# NOT VISIBLE answers for one item before the user is asked where it is. A
+# search that never resolves is otherwise silent forever: the assistant looks,
+# fails, looks again, and the user hears nothing until they think to ask. At a
+# 6s tick this is roughly four minutes, the same scale as MAX_BRIEF_ASKS.
+WANTED_STUCK_ASKS: int = int(os.getenv("LIVE_WANTED_STUCK_ASKS", "40"))
+
+# UNCLEAR answers before asking the user to steady the camera. Much lower than
+# the miss threshold on purpose: repeated UNCLEAR is not "it isn't here", it is
+# "I keep half-seeing it", and that is fixable in one second by the person
+# holding the phone — but only if they are told.
+WANTED_UNCLEAR_ASKS: int = int(os.getenv("LIVE_WANTED_UNCLEAR_ASKS", "8"))
 
 # Frames a single vision focus may spend at fine before being forced back to
 # coarse. The model is told to drop to coarse itself when a step is done; this

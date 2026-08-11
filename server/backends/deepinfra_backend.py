@@ -61,6 +61,11 @@ class DeepInfraHybridBackend(DeepSeekBackend):
     # needs the room. Scoped to the subclass so v1 keeps its own ceiling.
     REASONING_MAX_TOKENS = 8192
 
+    # Overrides DeepSeekBackend's "groq". This is the whole reason this class
+    # exists, and it is what lets v2 verify at startup that the pixels are
+    # going somewhere that can afford them.
+    VISION_PROVIDER = "deepinfra"
+
     def __init__(self):
         # Builds the DeepSeek reasoning client (self.client / self.model) and
         # a Groq vision client we immediately replace — cheap, no network.
