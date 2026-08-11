@@ -240,12 +240,33 @@ answered `<item>: FOUND / NOT VISIBLE / UNCLEAR`. One block, not one question
 per item, so the list never competes with `MAX_ACTIVE_BRIEFS` and a fourth
 search can't silently stop reaching the camera.
 
-**There is no tool that marks an item found.** The model can open a search and
-cancel one; only `worlddoc.fold_wanted()` — pure string matching over the
-caption, zero tokens — sets `status="found"`. That is what stops an inference
-standing in for an observation: the caption said "several bags of lentils" and
-the model once upgraded it to "I can see the beans". The found state now has no
-model-facing door. §8.1
+**Ask for an appearance, never a category.** `add_wanted` takes a `looks_like`
+per item — *"small cream-white beans, each with a distinct black spot, in a
+clear bag"*, not *"black-eyed beans"*. A camera cannot see what a thing **is**,
+only what it looks like, so a category name gets you a guess: asked for
+black-eyed beans it reported "several bags of lentils" and a find was claimed
+off that. The vision prompt states the rule at the point of decision — *a bag
+of something that could be the right kind of thing is UNCLEAR, not FOUND*. This
+is the actual fix for that failure; everything below is containment. §8.1
+
+**Two paths can mark a find, and neither is free of the other.**
+`worlddoc.fold_wanted()` reads the camera's labelled `<item>: FOUND` answer —
+zero tokens, no judgement. `mark_found(item, evidence, where)` lets the
+reasoning model declare one from prose, which is what covers a caption that
+answered in words, a drifted format, and judgements no label can express. Its
+`evidence` **must appear verbatim in the current caption and is checked**; a
+paraphrase is rejected, and the quote is stored and rendered so an exported
+session shows what justified every find. §8.1
+
+**`unmark_found(item, correction)` closes the loop.** A retraction that only
+clears the flag cannot hold — the caption that caused the mistake is still in
+`recent` and re-justifies it next tick. So the wrong *evidence*, the wrong
+*location* and the user's words all go into `ruled_out`, which rides in the
+vision prompt as `NOT this — already checked and rejected: …` and blocks both
+find paths. Matching is substring **plus distinctive-word overlap**, because
+the same wrong bag gets re-described in slightly different words. Tuned to err
+toward "keep looking": a false match leaves the item open and the misses
+climbing, which eventually asks the user. §8.4
 
 **A find forces speech.** `wanted_found` routes to its own prompt
 (`_build_announce_prompt`) that never offers `[SILENT]`, and if the model
@@ -301,6 +322,7 @@ tool calls and the agent's own writes can never interleave on disk.
 |---|---|
 | `propose_plan` · `commit_plan` · `discard_plan` | the approval cycle |
 | `add_wanted` · `drop_wanted` | the find list — open and cancel a search |
+| `mark_found` · `unmark_found` | declare a find from prose (evidence-checked), and undo a wrong one |
 | `update_tasks` · `mark_task` | a plan the user is **already** working through |
 | `set_expectation` · `resolve_expectation` | deadlines and camera watches |
 | `set_vision_focus` | the standing lens |
@@ -354,7 +376,9 @@ Each of these cost a real debugging session.
 | **Never gate a chat send on `tickBusy`** | One shared `busy` flag in `live.js` kept the browser from sending a question until the tick returned — defeating every server-side overlap. §7.3 |
 | **Apply a doc render only if `doc_rev` is newer** | Concurrent turns reply out of order; a slow tick's render predates a chat's writes and will stamp over it. §7.4 |
 | **A brief must ask for observations, not judgement** | "Is the grip safe?" gets a reassuring guess. §4.1 |
-| **Nothing but the camera may mark a find** | No tool sets `status="found"`. An inference reached it once and reported beans that were lentils. §8.1 |
+| **Brief the camera on appearance, not category** | It cannot see what a thing *is*. "Black-eyed beans" got "several bags of lentils" read back as a find. §8.1 |
+| **A model-declared find must quote the caption** | `mark_found` validates `evidence` against the real text and stores it, so every find is auditable in the export. §8.1 |
+| **A retraction must record the wrong evidence, not just the correction** | They share no words, so the next tick re-found it from the same caption. §8.4 |
 | **Stage 2 gets the user's words, not just a timestamp** | It was asked "does this answer what they wanted?" while never being shown what they wanted. Cost 65s with the chicken on screen. §8.2 |
 | **Never add a pre-filter whose "no" looks like silence** | Cost a whole class of silently dropped frames. `docs/v1/DECISIONS.md` §6.2 |
 | **One flag, one consequence** | `found` drove three unrelated outcomes and broke the camera. `docs/v1/DECISIONS.md` §4.4 |

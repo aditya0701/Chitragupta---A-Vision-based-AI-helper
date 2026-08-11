@@ -719,12 +719,17 @@ class LiveAgent:
             "support. 'Lentils on the shelf' is not 'the black-eyed beans'. If the user "
             "is looking for something specific and you can only see a generic match, say "
             "what you can see and ask them to confirm, rather than announcing a find.",
-            "- The observation may also open with '<item>: FOUND / NOT VISIBLE / "
-            "UNCLEAR' lines. Those are the find list and they are handled for you — "
-            "the answer is already recorded and the user is already being told. Do "
-            "not call anything for them, do not repeat them, and never treat a NOT "
-            "VISIBLE or UNCLEAR as a find. If the user has said they no longer need "
-            "an item, call drop_wanted.",
+            "- CHECK THE FIND LIST against this observation, every tick. Any "
+            "'<item>: FOUND' line is already recorded for you and already being "
+            "announced — do not call anything for those. But the camera does not "
+            "always answer in that format, and it often mentions something in the "
+            "description instead. If the observation shows an item on the "
+            "[Looking for] list and no FOUND line covered it, call mark_found with "
+            "the camera's exact words as evidence. Judge it against the 'looks like' "
+            "description, not the name: a generic mention is not an identification, "
+            "and NOT VISIBLE or UNCLEAR is never a find. If the user has said an item "
+            "no longer matters, call drop_wanted; if they say a find was wrong, call "
+            "unmark_found.",
             "- If a task visibly finished or started, call mark_task.",
             "- If a plan is shown as PROPOSED and the frame shows the user visibly starting "
             "its first step, that is them agreeing — call commit_plan. Nothing else on a "
@@ -773,7 +778,7 @@ class LiveAgent:
                 self._vision_questions(doc, charge=False),
                 worlddoc.get_vision_focus(doc),
                 worlddoc.focus_mode(doc) or "form",
-                worlddoc.wanted_names(doc),
+                worlddoc.wanted_briefs(doc),
             )
         prev, goal, questions, focus, focus_mode, wanted = snapshot
         vision_prompt = build_tick_vision_prompt(prev, goal, questions, focus=focus,

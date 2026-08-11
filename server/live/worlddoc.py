@@ -374,22 +374,62 @@ def open_expectations(doc: dict) -> list[dict]:
 # model-facing door.
 
 
-def add_wanted(doc: dict, items: list[str], because: str = "") -> str:
+def _norm_wanted_items(items) -> list[dict]:
+    """Accept ["onions"] or [{"item": ..., "looks_like": ...}], or a mix."""
+    out = []
+    for raw in items or []:
+        if isinstance(raw, dict):
+            name = str(raw.get("item") or raw.get("name") or "").strip()
+            looks = str(raw.get("looks_like") or raw.get("description") or "").strip()
+        else:
+            name, looks = str(raw).strip(), ""
+        if name:
+            out.append({"item": name, "looks_like": looks})
+    return out
+
+
+def add_wanted(doc: dict, items, because: str = "") -> str:
     """Open a search for one or more objects. Takes a list, so "find the
-    chicken and the onions" is one call rather than two."""
-    names = [str(i).strip() for i in (items or []) if str(i).strip()]
-    if not names:
+    chicken and the onions" is one call rather than two.
+
+    Each item may carry `looks_like` — what the thing physically looks like,
+    in the words a stranger would need to pick it out of a shelf. That field
+    is the fix for the failure this whole subsystem was built around: asked
+    for "black-eyed beans" by category, the camera reported "several bags of
+    lentils" and a find was claimed anyway. A camera cannot resolve a category
+    it has no way to verify, but it can absolutely check "small cream-white
+    beans, each with a black spot". Name the appearance, not the noun.
+    """
+    entries = _norm_wanted_items(items)
+    if not entries:
         return "add_wanted needs at least one item to look for."
 
     existing = {w["item"].lower() for w in doc["wanted"] if w["status"] == "open"}
-    added, dupes = [], []
-    for name in names:
+    added, dupes, vague = [], [], []
+    for entry in entries:
+        name, looks = entry["item"], entry["looks_like"]
         if name.lower() in existing:
             dupes.append(name)
             continue
+        if not looks:
+            vague.append(name)
         doc["wanted"].append({
             "id": uuid.uuid4().hex[:8],
             "item": name,
+            # What it physically looks like. Put to the camera verbatim.
+            "looks_like": looks,
+            # Things the user has confirmed are NOT it. Without this a
+            # correction cannot stick: the captions that produced the wrong
+            # identification are still in `recent` and will suggest it again
+            # on the very next tick, so retracting a find without recording
+            # what was ruled out just replays the same mistake. Same lesson as
+            # retract_environment_fact taking a correction rather than a
+            # deletion.
+            "ruled_out": [],
+            # Verbatim caption text that justified a model-declared find, kept
+            # so an exported session shows exactly what was read as evidence.
+            "evidence": None,
+            "found_by": None,          # "camera" | "model"
             "asked_ts": _now(),
             "asked_text": (because or "").strip(),
             "status": "open",
@@ -412,16 +452,28 @@ def add_wanted(doc: dict, items: list[str], because: str = "") -> str:
         added.append(name)
 
     # Cap on OPEN items only — a found item costs the camera nothing.
+    dropped = []
     open_now = [w for w in doc["wanted"] if w["status"] == "open"]
     if len(open_now) > config.MAX_WANTED:
         for stale in open_now[: len(open_now) - config.MAX_WANTED]:
             stale["status"] = "dropped"
+            dropped.append(stale["item"])
 
     if not added:
         return f"Already looking for: {', '.join(dupes)}. The camera is asked every frame."
     msg = f"Now looking for on every frame: {', '.join(added)}."
     if dupes:
         msg += f" (Already watching for {', '.join(dupes)}.)"
+    if dropped:
+        # Never a silent drop. A search that stops reaching the camera without
+        # anyone being told is the same failure as a pre-filter whose "no"
+        # looks like silence.
+        msg += (f" WARNING: over the {config.MAX_WANTED}-item limit, so these are no "
+                f"longer being looked for: {', '.join(dropped)}. Tell the user if they "
+                f"still matter.")
+    if vague:
+        msg += (f" Add a `looks_like` description for {', '.join(vague)} — the camera "
+                f"cannot confirm a category by name, only an appearance.")
     return msg + " You will be told the moment any of them is seen — do not promise to look, you already are."
 
 
@@ -451,6 +503,22 @@ def open_wanted(doc: dict) -> list[dict]:
 def wanted_names(doc: dict) -> list[str]:
     """The item names put to the camera this frame, in one question."""
     return [w["item"] for w in open_wanted(doc)][: config.MAX_WANTED]
+
+
+def wanted_briefs(doc: dict) -> list[dict]:
+    """What the camera is told about each open search: the name to answer
+    under, what it physically looks like, and anything already ruled out.
+
+    Empties itself — once every item is found or dropped this returns [] and
+    the search block disappears from the vision prompt, so the camera goes
+    back to its default job with no explicit revert needed.
+    """
+    return [
+        {"item": w["item"],
+         "looks_like": (w.get("looks_like") or "").strip(),
+         "ruled_out": [r for r in (w.get("ruled_out") or []) if r]}
+        for w in open_wanted(doc)
+    ][: config.MAX_WANTED]
 
 
 _VERDICTS = ("FOUND", "NOT VISIBLE", "UNCLEAR")
@@ -501,12 +569,24 @@ def fold_wanted(doc: dict, caption: str) -> list[dict]:
         verdict = match.group(1).upper().replace("_", " ")
         detail = (match.group(2) or "").strip()
         if verdict == "FOUND":
+            # A location the user has already said is wrong does not become
+            # right because the camera saw it again. Without this the retract
+            # loop never terminates: user corrects, the same bag is still on
+            # the same shelf, next frame reports it, and it is re-announced.
+            ruled = _matches_ruled_out(detail, item.get("ruled_out") or [])
+            if ruled:
+                item["misses"] = int(item.get("misses") or 0) + 1
+                logger.info("Find list: ignored a FOUND for %r — already ruled out (%s)",
+                            item["item"], ruled)
+                continue
             # Claims the item, exactly as triggers.check claims a fired
             # expectation: this caption sits in `recent` for another 24 frames
             # and must not be able to re-fire the announcement.
             item["status"] = "found"
             item["found_ts"] = _now()
             item["where"] = detail or "seen in frame, no location given"
+            item["evidence"] = match.group(0).strip()
+            item["found_by"] = "camera"
             newly_found.append(item)
         elif verdict == "NOT VISIBLE":
             item["misses"] = int(item.get("misses") or 0) + 1
@@ -514,6 +594,161 @@ def fold_wanted(doc: dict, caption: str) -> list[dict]:
             item["unclears"] = int(item.get("unclears") or 0) + 1
 
     return newly_found
+
+
+def _squash(s: str) -> str:
+    """Whitespace/case-insensitive form for evidence matching, so a model that
+    re-wraps or re-cases a quote is not punished for it."""
+    return " ".join((s or "").lower().split())
+
+
+_RULED_STOPWORDS = {
+    "the", "are", "not", "and", "for", "was", "has", "had", "but", "its",
+    "all", "any", "can", "one", "two", "out", "now", "see", "saw", "you",
+    "that", "this", "those", "these", "there", "with", "from", "have", "they",
+    "them", "then", "than", "what", "which", "when", "where", "into", "onto",
+    "some", "same", "also", "just", "like", "seen", "look", "looks", "your",
+    "user", "users", "thing", "things", "visible", "frame", "camera", "right",
+    "left", "side", "here", "over", "under", "near", "beside", "next", "about",
+    "again", "still", "another",
+}
+
+# Three characters, not four — the words that actually distinguish one
+# container of pulses from another are short ('dal', 'jar', 'tin', 'red'),
+# and dropping them let a paraphrase of a ruled-out object slip back through.
+_RULED_TOKEN = re.compile(r"[a-z]{3,}")
+
+
+def _matches_ruled_out(text: str, ruled_out: list[str]) -> Optional[str]:
+    """Is `text` describing something already confirmed NOT to be the target?
+
+    Substring first, then distinctive-word overlap — because the same wrong
+    object gets re-described in slightly different words on the next frame,
+    and a literal match would let the retract/re-find loop run anyway. Two
+    shared distinctive words is the threshold.
+
+    Tuned to err toward "keep looking": a false match leaves the item open and
+    the misses climbing, which eventually asks the user. A missed match
+    re-announces something they already told us was wrong, which is the
+    failure this exists to stop.
+    """
+    hay = _squash(text)
+    if not hay:
+        return None
+    for entry in ruled_out or []:
+        needle = _squash(entry)
+        if not needle:
+            continue
+        if needle in hay:
+            return entry
+        words = {w for w in _RULED_TOKEN.findall(needle)
+                 if w not in _RULED_STOPWORDS}
+        if len(words) >= 2 and len(words & set(_RULED_TOKEN.findall(hay))) >= 2:
+            return entry
+    return None
+
+
+def mark_found(doc: dict, ref: str, evidence: str, where: str = "") -> str:
+    """The reasoning model declaring a find from the caption's prose.
+
+    The counterpart to fold_wanted, which reads an explicit labelled answer.
+    This path exists because a format cannot express everything — a camera
+    that answered in prose, a caption whose labelled block drifted, or a
+    judgement no label covers ("the ingredients list has milk in it").
+
+    `evidence` must be text that ACTUALLY APPEARS in the latest caption, and
+    that is checked here rather than trusted. It does not make a wrong
+    identification impossible — quoting "several bags of lentils" to justify
+    "beans" is still open to a determined model — but it forces the claim to
+    be anchored in something the camera really wrote rather than in the
+    model's memory of the scene, and it leaves the justification on the record
+    where an exported session will show it.
+    """
+    item = find_wanted(doc, ref)
+    if not item:
+        return f"Not looking for anything matching '{ref}'. Call add_wanted first."
+    if item["status"] == "found":
+        return f"{item['item']} is already marked found — {item['where']}."
+    if item["status"] != "open":
+        return f"The search for {item['item']} was closed ({item['status']})."
+
+    caption = last_caption(doc) or ""
+    quote = (evidence or "").strip()
+    if not quote:
+        return ("mark_found needs `evidence`: the exact words from this frame's "
+                "observation that show the item is visible.")
+    if _squash(quote) not in _squash(caption):
+        return (
+            f"That evidence does not appear in this frame's observation, so the find is "
+            f"NOT recorded. Quote the camera's own words verbatim. What it actually "
+            f"wrote was: \"{caption[:300]}\""
+        )
+    wrong = _matches_ruled_out(f"{quote} {where}", item.get("ruled_out") or [])
+    if wrong:
+        return (
+            f"NOT recorded — that is the thing the user already told you is not the "
+            f"{item['item']}: \"{wrong}\". Keep looking for something else."
+        )
+
+    item["status"] = "found"
+    item["found_ts"] = _now()
+    item["where"] = (where or "").strip() or quote
+    item["evidence"] = quote
+    item["found_by"] = "model"
+    return (f"{item['item']} marked found — {item['where']}. The user is being told "
+            f"automatically; do not also announce it yourself.")
+
+
+def unmark_found(doc: dict, ref: str, correction: str = "") -> str:
+    """Undo a find the user says is wrong, and remember what it was not.
+
+    A retraction that only clears the flag cannot hold. The captions that
+    produced the wrong identification are still sitting in `recent` and will
+    suggest it again on the very next tick, so the item would be re-found,
+    re-announced, and re-corrected in a loop. Recording what was ruled out is
+    what breaks that cycle — it rides in the vision prompt from here on, so
+    the camera is explicitly told which thing is NOT the target.
+
+    Same reasoning as retract_environment_fact taking a correction rather than
+    a deletion: a hole in the record does not stop a wrong inference, a stated
+    negative does.
+    """
+    item = find_wanted(doc, ref)
+    if not item:
+        return f"Nothing on the find list matching '{ref}'."
+    was = item.get("where") or "(no location recorded)"
+    prev_evidence = (item.get("evidence") or "").strip()
+    note = (correction or "").strip()
+
+    item["status"] = "open"
+    item["found_ts"] = None
+    item["where"] = None
+    item["evidence"] = None
+    item["found_by"] = None
+    item["announced"] = False
+    item["stuck_raised"] = False
+
+    # Record the WRONG EVIDENCE, not just the user's wording. The correction
+    # ("those are toor dal") and the text that produced the mistake ("several
+    # bags of lentils") share no words, so storing only the former leaves the
+    # re-find check with nothing to match on — and the same caption is still
+    # sitting in `recent`, ready to justify the same find on the next tick.
+    # Storing all three is what actually closes the loop.
+    ruled = item.setdefault("ruled_out", [])
+    for entry in (was if was != "(no location recorded)" else "", prev_evidence, note):
+        if entry and entry not in ruled:
+            ruled.append(entry)
+
+    # The wrong location was promoted into durable memory when it was found,
+    # so it has to come back out or every later prompt keeps asserting it.
+    # Matched on the exact string add_environment_fact was given, not just the
+    # item name, so an unrelated true fact mentioning the same word survives.
+    retract_environment_fact(
+        doc, f"{item['item']}: {was}",
+        f"The {item['item']} is NOT {was}" + (f" — {note}" if note else ""))
+
+    return (f"Retracted — {item['item']} is NOT {was}. Still looking, and the camera is "
+            f"now told to rule that out.")
 
 
 def unannounced_finds(doc: dict) -> list[dict]:
@@ -773,22 +1008,44 @@ def render(doc: dict, recent_limit: Optional[int] = None) -> str:
         for w in wanted:
             if w["status"] == "found":
                 told = "already told the user" if w.get("announced") else "NOT YET TOLD"
+                by = w.get("found_by") or "camera"
                 lines.append(f"- {w['item']} — FOUND {fmt_ts(w['found_ts'])}: "
-                             f"{w['where']}  ({told})")
+                             f"{w['where']}  ({told}; identified by {by})")
+                if w.get("evidence"):
+                    lines.append(f"    on this evidence: \"{w['evidence']}\"")
             else:
+                # Elapsed time, always. This used to print "just started
+                # looking" whenever misses was 0 — which after ten minutes of a
+                # camera that never answered about the item was simply false,
+                # and false in the one direction that matters: the reasoning
+                # model judges whether a search is going nowhere from this
+                # line, so a stale search read as a fresh one is never raised
+                # with the user. There is no arithmetic trigger for "the camera
+                # is not answering"; the model is trusted to notice, which
+                # means the document owes it the truth.
+                waited = int(now - (w.get("asked_ts") or now))
+                ago = f"{waited // 60}m{waited % 60:02d}s" if waited >= 60 else f"{waited}s"
                 seen = []
                 if w.get("misses"):
                     seen.append(f"not visible in {w['misses']} frames")
                 if w.get("unclears"):
                     seen.append(f"unclear in {w['unclears']}")
-                detail = "; ".join(seen) or "just started looking"
-                lines.append(f"- {w['item']} — still looking "
-                             f"(asked {fmt_ts(w['asked_ts'])}, {detail})")
+                if not seen:
+                    seen.append("THE CAMERA HAS NOT ANSWERED ABOUT THIS AT ALL — "
+                                "check the observation yourself and use mark_found, "
+                                "or tell the user something is wrong")
+                lines.append(f"- {w['item']} — still looking after {ago} "
+                             f"({'; '.join(seen)})")
+                if w.get("looks_like"):
+                    lines.append(f"    looks like: {w['looks_like']}")
+            for wrong in w.get("ruled_out") or []:
+                lines.append(f"    RULED OUT — confirmed NOT the {w['item']}: {wrong}")
         lines.append(
-            "You do not need to do anything to search for these — the camera is "
-            "already asked about every one of them on every frame, and you will be "
-            "told the moment one is seen. Never say you will 'keep an eye out' as if "
-            "it were a future action."
+            "The camera is asked about every open item on every frame and a labelled "
+            "FOUND answer is recorded for you automatically — but check the observation "
+            "yourself too, since it often mentions something in prose instead, and call "
+            "mark_found with its exact words when it does. Never say you will 'keep an "
+            "eye out' as if it were a future action; you are already looking."
         )
 
     if doc["narrative"]:

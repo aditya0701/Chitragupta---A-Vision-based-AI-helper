@@ -180,6 +180,94 @@ async def main():
     check("the words are in the prompt", "finding the chicken and onion" in p)
     check("labelled as a request", "[What they asked you" in p)
 
+    print("\n11. the camera is briefed on APPEARANCE, not category")
+    d = worlddoc._empty_doc()
+    worlddoc.add_wanted(d, [{"item": "black-eyed beans",
+                             "looks_like": "small cream-white beans, each with a black spot"}])
+    from server.live.vision import build_tick_vision_prompt as bp
+    vp = bp(None, None, questions=[], focus="cooking", wanted=worlddoc.wanted_briefs(d))
+    check("description reaches the camera", "each with a black spot" in vp)
+    check("framed as the agent's eyes", "you are my eyes" in vp)
+    check("category-is-not-identity rule present", "never on the category name" in vp)
+    check("bare name warns the model",
+          "looks_like" in worlddoc.add_wanted(d, ["toor dal"]))
+
+    print("\n12. mark_found needs real evidence from the real caption")
+    d = worlddoc._empty_doc()
+    worlddoc.add_wanted(d, [{"item": "black-eyed beans", "looks_like": "black spot"}])
+    worlddoc.add_recent(d, "Pantry shelf: several bags of lentils on the middle shelf.")
+    r = worlddoc.mark_found(d, "black-eyed beans", "I can see the black-eyed beans")
+    check("invented evidence is refused", "does not appear" in r, r)
+    check("still not found", worlddoc.find_wanted(d, "black-eyed beans")["status"] == "open")
+    r = worlddoc.mark_found(d, "black-eyed beans", "several bags of lentils", "middle shelf")
+    check("quoted evidence is accepted", "marked found" in r, r)
+    check("evidence recorded for audit",
+          worlddoc.find_wanted(d, "black-eyed beans")["evidence"] == "several bags of lentils")
+    check("attributed to the model",
+          worlddoc.find_wanted(d, "black-eyed beans")["found_by"] == "model")
+    d5 = worlddoc._empty_doc()
+    worlddoc.add_wanted(d5, ["onions"])
+    worlddoc.add_recent(d5, "Counter:  a Wooden   Bowl of onions\nsits by the sink.")
+    check("whitespace and case differences tolerated",
+          "marked found" in worlddoc.mark_found(d5, "onions", "a wooden bowl of onions"))
+
+    print("\n13. a correction sticks — no retract/re-find loop")
+    r = worlddoc.unmark_found(d, "black-eyed beans", "those are toor dal, not the beans")
+    check("reopened", worlddoc.find_wanted(d, "black-eyed beans")["status"] == "open")
+    check("told the user's words back", "NOT" in r)
+    check("ruled out is remembered",
+          "toor dal" in " ".join(worlddoc.find_wanted(d, "black-eyed beans")["ruled_out"]))
+    vp = bp(None, None, questions=[], focus="", wanted=worlddoc.wanted_briefs(d))
+    check("camera is told to rule it out", "NOT this" in vp and "toor dal" in vp)
+    r = worlddoc.mark_found(d, "black-eyed beans", "several bags of lentils")
+    check("cannot re-find the ruled-out thing", "already told you is not" in r, r)
+    check("camera re-reporting the same wrong bag is ignored",
+          worlddoc.fold_wanted(
+              d, "black-eyed beans: FOUND - several bags of lentils, middle shelf") == [])
+    check("a paraphrase of it is ignored too",
+          worlddoc.fold_wanted(
+              d, "black-eyed beans: FOUND - those toor dal bags again") == [])
+    check("still open after the ignored finds",
+          worlddoc.find_wanted(d, "black-eyed beans")["status"] == "open")
+    check("misses counted so a stuck search still surfaces",
+          worlddoc.find_wanted(d, "black-eyed beans")["misses"] >= 2)
+    check("a genuinely different find still lands",
+          len(worlddoc.fold_wanted(
+              d, "black-eyed beans: FOUND - clear bag in the bottom drawer, "
+                 "cream beans with black spots")) == 1)
+
+    print("\n14. over the cap is never a silent drop")
+    d = worlddoc._empty_doc()
+    r = worlddoc.add_wanted(d, [f"item{i}" for i in range(config.MAX_WANTED + 2)])
+    check("the drop is reported", "no longer being looked for" in r, r)
+
+    print("\n15. the search block disappears when everything is found")
+    d = worlddoc._empty_doc()
+    worlddoc.add_wanted(d, ["onions"])
+    worlddoc.fold_wanted(d, "onions: FOUND - wire basket")
+    check("nothing left to ask", worlddoc.wanted_briefs(d) == [])
+    vp = bp(None, None, questions=[], focus="cooking", wanted=worlddoc.wanted_briefs(d))
+    check("no search block in the prompt", "STANDING SEARCH" not in vp)
+
+    print("\n16. the doc tells the truth about how long a search has run")
+    d = worlddoc._empty_doc()
+    worlddoc.add_wanted(d, ["tomatoes"])
+    worlddoc.find_wanted(d, "tomatoes")["asked_ts"] = time.time() - 640
+    out = worlddoc.render(d)
+    check("elapsed time shown, not 'just started'",
+          "10m40s" in out and "just started" not in out, out)
+    check("a silent camera is called out",
+          "HAS NOT ANSWERED" in out)
+    worlddoc.fold_wanted(d, "tomatoes: NOT VISIBLE - only onions on this shelf")
+    check("and stops being called out once it answers",
+          "HAS NOT ANSWERED" not in worlddoc.render(d))
+
+    print("\n17. read mode refuses to assert absence off a partial read")
+    rp = bp(None, None, questions=[], focus="reading the packet", focus_mode="read")
+    check("absence guard present", "NEVER say" in rp and "legible end to end" in rp)
+    check("names the stakes", "about to eat this" in rp)
+    check("form wording still excluded", "POSTURE AND GRIP" not in rp)
+
     print()
     if FAIL:
         print(f"FAILURES ({len(FAIL)}): " + "; ".join(FAIL))

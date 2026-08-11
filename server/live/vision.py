@@ -63,6 +63,21 @@ def build_tick_vision_prompt(
             "honest 'the second digit is not legible' is far more useful than a "
             "plausible invention, which nobody downstream can detect.",
             "",
+            # Asserted absence. v1 learned this on a roll-call over small
+            # ambiguous items — a confident false negative reads exactly like
+            # a verified one and nothing downstream can tell them apart. It
+            # matters most for the case this mode is most used for: someone
+            # asking whether a food contains something they cannot eat.
+            "If you were asked whether particular words or ingredients appear, NEVER say "
+            "they are absent unless you actually read the whole relevant text and it was "
+            "legible end to end. Not finding something is only a real answer when you "
+            "could have found it. If any part of the list was cut off at the edge, "
+            "blurred, folded, angled away, too small or covered by a hand, say exactly "
+            "which part you could not read and that your answer is therefore incomplete. "
+            "Someone may be about to eat this. 'I read all of it and those words are not "
+            "there' and 'I read what I could see' are different answers and must never "
+            "be written the same way.",
+            "",
             "After the text, add one short line about anything in the frame that looks "
             "unsafe or about to go wrong. Then stop.",
             "",
@@ -141,15 +156,36 @@ def build_tick_vision_prompt(
         # index is positional over a list rebuilt every tick, and the vision
         # call runs unlocked while the document can move. See
         # worlddoc.fold_wanted for the full reasoning.
-        n_w = len(wanted)
+        # Accepts plain names or {item, looks_like, ruled_out} briefs.
+        briefs = [w if isinstance(w, dict) else {"item": w} for w in wanted]
+        n_w = len(briefs)
         parts += [
-            f"A STANDING SEARCH. The user has asked to be told the moment these "
-            f"{n_w} thing(s) come into view. Answer for EVERY one of them, before "
-            f"anything else in your reply:",
+            "A STANDING SEARCH. I am an assistant helping this person with a hands-on "
+            "task and I cannot see anything at all — you are my eyes. They have asked "
+            f"me to find the {n_w} thing(s) below, and I can only answer them using "
+            "what you report. Answer for EVERY one, before anything else in your reply:",
             "",
         ]
-        parts += [f"  - {w}" for w in wanted]
+        for b in briefs:
+            parts.append(f"  - {b['item']}")
+            if b.get("looks_like"):
+                parts.append(f"      looks like: {b['looks_like']}")
+            for wrong in b.get("ruled_out") or []:
+                parts.append(f"      NOT this — already checked and rejected: {wrong}")
         parts += [
+            "",
+            # The black-eyed beans, stated as a rule rather than an anecdote.
+            # The camera reported "several bags of lentils" and that generic
+            # category description was read downstream as a positive
+            # identification. A category cannot be seen; an appearance can.
+            "Judge every one of these on the APPEARANCE described, never on the "
+            "category name. You cannot see what something IS — you can only see what "
+            "it looks like. If the description says 'small cream beans each with a "
+            "black spot' and you can see beans but cannot make out the spots, that is "
+            "UNCLEAR, not FOUND. A bag of something that could be the right kind of "
+            "thing is UNCLEAR. Same shape, same shelf, same colour family is not an "
+            "identification. Say what you can actually resolve — the markings, the "
+            "label text, the size, the shape — and let me decide.",
             "",
             f"Answer format — exactly {n_w} line(s), one per item, item name first:",
             "  <item>: FOUND — <exactly where it is in the frame, plus any label text you can read>",
