@@ -25,6 +25,7 @@ function check(label, cond, detail = '') {
 
 const calls = [];       // every fetch that actually left the client
 const resolvers = [];   // hold each response open until we choose
+const rejecters = [];   // ...or fail it, for the timeout / dropped-connection path
 let painted = '';       // what the doc panel currently shows
 
 function makeEl(id) {
@@ -66,10 +67,21 @@ const sandbox = {
   localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
   speechSynthesis: null,
   Blob: function () {}, FormData: function () {},
+  // Every browser that can do getUserMedia has this, so the stub belongs here
+  // rather than being defended against in live.js. Without it fetchWithTimeout
+  // throws before the request leaves, and every tick assertion below fails for
+  // a reason that has nothing to do with what they test.
+  AbortController: function () {
+    this.signal = { aborted: false };
+    this.abort = () => { this.signal.aborted = true; };
+  },
   __pixels: scenePixels,
   fetch: (url) => {
     calls.push(String(url));
-    return new Promise((res) => resolvers.push((data) => res({ json: () => Promise.resolve(data) })));
+    return new Promise((res, rej) => {
+      resolvers.push((data) => res({ json: () => Promise.resolve(data) }));
+      rejecters.push(rej);   // so a harness can fail a request, not just answer it
+    });
   },
 };
 sandbox.window = sandbox;
@@ -174,6 +186,57 @@ const flush = () => new Promise((r) => setImmediate(r));
   await flush();
   check('an identical repeat is not re-announced', msgs.length === seen,
         JSON.stringify(msgs.slice(seen)));
+
+  console.log('\n[6] a tick that never comes back is announced, not just status-lined');
+  // The other way a tick ends without writing anything. An aborted deadline, a
+  // dropped connection and a dyno that restarted mid-request (its 502 is HTML,
+  // so resp.json() throws) all land in the same catch. On 2026-09-06 this path
+  // ran for minutes while the transcript stayed empty and the status line held
+  // "tick → vision + reasoning…", which reads exactly like a tick still working.
+  msgs.length = 0;
+  vm.runInContext('tickBusy = false; pendingFrame = null; lastSentFrame = null; lastTickError = null;',
+                  sandbox);
+  calls.length = 0; resolvers.length = 0; rejecters.length = 0;
+  vm.runInContext('onTick();', sandbox);
+  await flush();
+  rejecters[0](Object.assign(new Error('signal is aborted without reason'),
+                             { name: 'AbortError' }));
+  await flush();
+  check('the timeout is reported to the user',
+        msgs.some((m) => m.includes('did not complete')), JSON.stringify(msgs));
+  // The raw AbortError message names no cause and no duration. The user needs
+  // to know it gave up, after how long, and that the loop is still alive.
+  check('it says how long it waited, not "signal is aborted"',
+        msgs.some((m) => m.includes('45s') && !m.includes('without reason')),
+        JSON.stringify(msgs));
+  check('the status line does not claim a silent tick',
+        !/silent/i.test(get('tickStatus')), get('tickStatus'));
+
+  console.log('\n[7] a wiped world document is announced, not read as a stale render');
+  // worlddoc.clear() unlinks the file, so the server restarts at rev 0 — and on
+  // Render's free plan (no persistent disk) a restart does the same thing with
+  // nobody asking. The out-of-order gate would read that as a late response and
+  // freeze the panel on a document that no longer exists, for as many ticks as
+  // the server needs to climb back. Confirmed live: rev 14 -> 6 mid-session.
+  msgs.length = 0;
+  painted = '';
+  vm.runInContext('lastDocRev = 14;', sandbox);
+  vm.runInContext('updateDoc("FRESH EMPTY DOC", 1);', sandbox);
+  check('the fresh document is painted', painted === 'FRESH EMPTY DOC', painted);
+  check('the user is told the session was lost',
+        msgs.some((m) => m.includes('reset')), JSON.stringify(msgs));
+  check('the client re-syncs to the new revision', get('lastDocRev') === 1,
+        String(get('lastDocRev')));
+
+  // The slack is what keeps [3] working: overlapping turns arrive a few revs
+  // out of order and must still be dropped, not mistaken for a wipe.
+  msgs.length = 0;
+  painted = 'CURRENT DOC';
+  vm.runInContext('lastDocRev = 14;', sandbox);
+  vm.runInContext('updateDoc("SLIGHTLY OLDER DOC", 11);', sandbox);
+  check('a small backwards step is still just a stale render',
+        painted === 'CURRENT DOC' && msgs.length === 0,
+        painted + ' ' + JSON.stringify(msgs));
 
   console.log('\n' + (FAIL.length ? 'FAILURES: ' + FAIL.join(', ') : 'ALL CONCURRENCY CHECKS PASSED'));
   process.exit(FAIL.length ? 1 : 0);

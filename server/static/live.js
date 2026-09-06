@@ -9,6 +9,45 @@ const FRAME_DIM = { coarse: 640, fine: 1024 };
 const JPEG_QUALITY = 0.85;
 const POLL_INTERVAL_MS = 20000;
 
+// Nothing bounded a request before, and `fetch` on its own waits forever.
+//
+// That is worse here than it looks, because tickBusy gates more than ticks: a
+// request that never returns holds it true, which stops the tick loop AND makes
+// pollTriggers return early — and that heartbeat is the only thing keeping the
+// Render dyno awake. A dyno that sleeps loses the world document, since the
+// free plan has no persistent disk. So one hung frame could silently erase the
+// session. Observed 2026-09-06: a DeepInfra 500 sent the SDK into a retry that
+// took 4m25s, and a later restart wiped the document outright.
+//
+// The server now bounds its own vision call too. These are the backstop for
+// everything it cannot bound — a dyno restarting mid-request, a phone losing
+// signal mid-upload — and they exist so the loop always recovers by itself.
+const TICK_TIMEOUT_MS = 45000;   // vision + two reasoning calls, generously
+const CHAT_TIMEOUT_MS = 90000;   // a user turn may legitimately run a web_search
+const POLL_TIMEOUT_MS = 15000;   // must finish inside POLL_INTERVAL_MS
+
+// `fetch` with a deadline. An expired deadline aborts, which surfaces as an
+// AbortError in the caller's existing catch — deliberately the same path a
+// network failure takes, because to the user they are the same event.
+async function fetchWithTimeout(url, options, ms) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    return await fetch(url, { ...options, signal: ctl.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Turns the abort into something a person can act on. "signal is aborted
+// without reason" tells them nothing; that this took longer than 45s and the
+// loop is carrying on tells them what happened and that it is not stuck.
+function describeFetchError(e, ms) {
+  return e && e.name === 'AbortError'
+    ? `no response in ${Math.round(ms / 1000)}s — gave up on this one`
+    : e.message;
+}
+
 let stream = null;
 let ticking = false;
 let tickTimer = null;
@@ -33,6 +72,10 @@ let queuedPrompt = null;     // user message sent while another user turn was in
 // Highest doc revision already painted. Concurrency means responses can arrive
 // out of order; without this a slow tick's stale render overwrites a newer one.
 let lastDocRev = 0;
+// How far a rev may legitimately go backwards before it means "reset", not
+// "arrived late". A tick and a chat turn overlapping is worth a few revs; a
+// wiped document drops to 0 and climbs from there.
+const DOC_RESET_SLACK = 5;
 let lastSentFrame = null;    // grayscale sample of the last frame actually sent (diff gate)
 let lastCaptionAt = 0;       // when a caption last came back — how stale reuse would be
 let lastTickError = null;    // last /v2/tick error text, so a repeat isn't re-announced
@@ -181,8 +224,30 @@ function updateDoc(rendered, rev) {
   if (rendered == null) return;
   // Drop a render older than one already painted. A tick that started before a
   // chat turn can finish after it, and its doc predates the chat's writes.
+  //
+  // But a rev that has gone BACKWARDS past everything is not a late response —
+  // the document was destroyed and started over. `worlddoc.clear()` unlinks the
+  // file, so the next load() begins again at rev 0, and on Render's free plan
+  // (no persistent disk) an instance restart does exactly the same thing
+  // without anyone asking. Treating that as a stale render is the worst
+  // possible reading: the panel freezes on a document that no longer exists,
+  // for as many ticks as it takes the server to climb back — and the user is
+  // told nothing. Confirmed live 2026-09-06, rev 14 -> 6 mid-session.
+  //
+  // The threshold matters. Concurrent turns legitimately arrive a few revs out
+  // of order, so only a large drop means a reset; a small one is the ordinary
+  // race this gate was built for.
   if (rev != null) {
-    if (rev < lastDocRev) return;
+    if (rev < lastDocRev - DOC_RESET_SLACK) {
+      addMsg('system', '⚠️ The world document was reset — either by the Reset '
+        + 'button or by the server restarting (its storage does not survive a '
+        + 'restart). Everything it had observed so far is gone; it starts over '
+        + 'from this frame.');
+      logEvent('doc-reset', `rev ${lastDocRev} → ${rev}`);
+      lastDocRev = 0;
+    } else if (rev < lastDocRev) {
+      return;
+    }
     lastDocRev = rev;
   }
   const panel = $('doc-panel');
@@ -439,16 +504,26 @@ async function onTick() {
   scheduleTick();
 }
 
+// Announce a tick problem once per episode, keyed so the same fault repeating
+// at the tick interval does not bury the transcript. A DIFFERENT fault always
+// speaks, and a healthy tick clears the key so a later recurrence is reported
+// again rather than being swallowed as "already mentioned".
+function noteTickTrouble(key, text) {
+  if (key === lastTickError) return;
+  lastTickError = key;
+  addMsg('system', `⚠️ ${text}`);
+}
+
 async function sendTick(frame, sample) {
   tickBusy = true;
   flashCapture(frameDetail === 'fine' ? 'fine' : 'coarse');
   setStatus(`tick → vision + reasoning… (${FRAME_DIM[frameDetail] || FRAME_DIM.coarse}px)`);
   try {
-    const resp = await fetch('/v2/tick', {
+    const resp = await fetchWithTimeout('/v2/tick', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ image_base64: frame }),
-    });
+    }, TICK_TIMEOUT_MS);
     const data = await resp.json();
     // /v2/tick answers 200 with an `error` field rather than an HTTP status,
     // so the catch below never sees this. Without an explicit check a tick
@@ -462,15 +537,27 @@ async function sendTick(frame, sample) {
     // status line keeps showing it, so it stays visible after the message
     // scrolls away.
     if (data.error) {
-      if (data.error !== lastTickError) {
-        lastTickError = data.error;
-        addMsg('system', `⚠️ Tick failed: ${data.error}`);
-      }
+      noteTickTrouble(data.error, `Tick failed: ${data.error}`);
       setStatus('tick failing — see the message above');
       return;
     }
-    lastTickError = null;
-    if (data.skipped) { setStatus('tick throttled by server'); return; }
+    lastTickError = null;   // healthy tick — a later recurrence speaks again
+    // Announced, not just status-lined. This branch and the catch below were
+    // the only two ways a tick could end without writing anything and without
+    // saying so — which is the "never let a 'no' look like silence" rule
+    // (docs/v1/DECISIONS.md 6.2) reappearing in the reporting layer rather
+    // than the filtering one. A whole debugging session went into working out
+    // that the tick loop was alive and simply not being heard.
+    //
+    // Deduped on a key rather than the text, same as the error path above: at
+    // a 4s interval an undeduped line would write fifteen copies a minute.
+    if (data.skipped) {
+      noteTickTrouble('throttled',
+        'Server is throttling ticks — frames are arriving closer together than '
+        + 'its minimum interval. Usually means more than one tab is ticking.');
+      setStatus('tick throttled by server');
+      return;
+    }
     // The server dropped this tick's reasoning because a user turn was
     // waiting. Keep the caption, say nothing — it is not a silent tick.
     if (data.yielded) {
@@ -497,7 +584,14 @@ async function sendTick(frame, sample) {
     const lens = frameDetail === 'fine' ? ' · 🔍 looking closely' : '';
     setStatus((data.urgent ? '⚠️ warned' : data.text ? 'spoke' : 'silent tick') + lens);
   } catch (e) {
-    setStatus(`tick failed: ${e.message}`);
+    // Reached by an aborted deadline, a dropped connection, and a dyno that
+    // restarted mid-request (its 502 is HTML, so resp.json() throws here).
+    // All three used to end up in the status line only.
+    const why = describeFetchError(e, TICK_TIMEOUT_MS);
+    noteTickTrouble(`fetch:${why}`,
+      `Tick did not complete: ${why}. The loop is still running — the next `
+      + `frame will try again.`);
+    setStatus(`tick failed: ${why}`);
   } finally {
     tickBusy = false;
     flushPendingFrame();
@@ -595,11 +689,11 @@ async function deliverMessage(prompt) {
       flashCapture('skip');
       logEvent('capture', 'user turn — scene unchanged, reusing the last caption');
     }
-    const resp = await fetch('/v2/chat', {
+    const resp = await fetchWithTimeout('/v2/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    });
+    }, CHAT_TIMEOUT_MS);
     const data = await resp.json();
     if (data.frame_detail && data.frame_detail !== frameDetail) {
       frameDetail = data.frame_detail; updateTierBadge(); logEvent('tier', frameDetail);
@@ -611,7 +705,7 @@ async function deliverMessage(prompt) {
     updateDoc(data.doc, data.doc_rev);
     setChatStatus('');   // hand the line back to the tick loop
   } catch (e) {
-    addMsg('system', `Chat failed: ${e.message}`);
+    addMsg('system', `Chat failed: ${describeFetchError(e, CHAT_TIMEOUT_MS)}`);
     setChatStatus('');
   } finally {
     chatBusy = false;
@@ -627,7 +721,10 @@ async function pollTriggers() {
   // spends a reasoning call to re-derive what that turn is already handling.
   if (tickBusy || chatBusy) return;
   try {
-    const resp = await fetch('/v2/poll');
+    // Bounded too, and for a reason beyond tidiness: an unbounded poll can
+    // outlive its own interval and stack up heartbeats against a dyno that is
+    // already struggling.
+    const resp = await fetchWithTimeout('/v2/poll', {}, POLL_TIMEOUT_MS);
     const data = await resp.json();
     if (data.message) {
       (data.triggers || []).forEach((t) => addMsg('trigger', `⚡ ${t}`));
@@ -769,6 +866,11 @@ $('save-btn').addEventListener('click', exportSession);
 $('reset-btn').addEventListener('click', async () => {
   if (!confirm('Clear the world document and conversation?')) return;
   await fetch('/v2/reset', { method: 'POST' });
+  // clear() unlinks the file, so the server restarts at rev 0. Without this the
+  // panel would ignore every render until the server climbed back past the
+  // pre-reset rev — dozens of ticks of a frozen document that looks broken.
+  lastDocRev = 0;
+  lastTickError = null;
   $('transcript').innerHTML = '';
   refreshDoc();
   addMsg('system', 'World document cleared.');
