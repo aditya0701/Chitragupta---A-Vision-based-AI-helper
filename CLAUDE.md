@@ -120,7 +120,13 @@ not. §2.
 
 ## The world document
 
-`server/data/live/worlddoc.json` — gitignored, survives restarts by design.
+`server/data/live/worlddoc.json` — gitignored, survives restarts **locally**.
+It does **not** survive them on Render: `render.yaml` declares `plan: free` with
+no `disk:`, so the filesystem is ephemeral and every instance restart silently
+starts the document over at `rev: 0`. Observed live 2026-09-06 — `rev` fell
+14 → 6 mid-session with `Shutting down` / `Uvicorn running` in the logs between.
+The client now detects the backwards jump and says so rather than freezing the
+panel on a document that no longer exists. A persistent disk needs a paid plan.
 Rendered into every prompt by `worlddoc.render()`, in this order:
 
 ```
@@ -350,6 +356,7 @@ that; a durable "the bag on the pantry shelf is NOT toor dal" does.
 | `CAPTION_REUSE_MS` | 15000 — a chat turn reuses the last caption if the scene hasn't moved |
 | `FLAT_FRAME_STDDEV` | 2.0 — below this the frame is blank, not merely unchanged |
 | `POLL_INTERVAL_MS` | 20000 |
+| `TICK_TIMEOUT_MS` · `CHAT_TIMEOUT_MS` · `POLL_TIMEOUT_MS` | 45000 / 90000 / 15000 — every request is bounded, because `fetch` waits forever and a wedged `tickBusy` also silences the poll heartbeat |
 
 **The diff gate** (32×32 grayscale, mean absolute delta) is the main cost
 control: if the scene hasn't meaningfully changed, no request leaves the
@@ -401,7 +408,16 @@ Each of these cost a real debugging session.
   `DeepInfra vision usage:` — in this split the vision call is the *only* image
   cost, so its `prompt_tokens` **is** the per-frame bill.
 - **Render sleeps after ~15 min** with no *inbound* traffic. `/v2/poll` on a
-  20s interval keeps it warm during use.
+  20s interval keeps it warm during use — but `pollTriggers` returns early while
+  `tickBusy` is set, so an unbounded tick used to silence the very heartbeat
+  keeping the dyno alive, and a sleeping dyno loses the world document. That
+  cascade is why the client bounds every request.
+- **The vision client is bounded at `LIVE_VISION_TIMEOUT_S` (30) with
+  `LIVE_VISION_MAX_RETRIES` (1).** The OpenAI SDK defaults to 600s × 2 retries,
+  so one frame could hold for half an hour. Observed 2026-09-06: DeepInfra
+  answered a frame with a 500, the SDK logged `Retrying request in 0.432861
+  seconds`, and the retry returned **4m25s** later — a successful tick, so
+  nothing was logged as an error, describing a frame four minutes stale.
 - **`DEFAULT_TIMEZONE`** must be an IANA name (`Europe/Berlin`, never `CEST`).
   Needs `tzdata` (pinned), or `zoneinfo` falls back to UTC on hosts with no
   system tz database.

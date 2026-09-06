@@ -32,6 +32,7 @@ Requires:
 """
 
 import logging
+import os
 
 from openai import AsyncOpenAI
 
@@ -41,6 +42,12 @@ from ..config import settings
 logger = logging.getLogger("chitragupt")
 
 DEEPINFRA_BASE_URL = "https://api.deepinfra.com/v1/openai"
+
+# Env-overridable so a slow link can be accommodated without a code change,
+# but the defaults are the ones that matter: a caption is only worth having
+# while the frame it describes is still roughly the present.
+VISION_TIMEOUT_S = float(os.getenv("LIVE_VISION_TIMEOUT_S", "30"))
+VISION_MAX_RETRIES = int(os.getenv("LIVE_VISION_MAX_RETRIES", "1"))
 
 
 class DeepInfraHybridBackend(DeepSeekBackend):
@@ -81,8 +88,25 @@ class DeepInfraHybridBackend(DeepSeekBackend):
                 "Set a real key in server/.env for local runs, or in the Render "
                 "dashboard under Environment for the deployed instance."
             )
+        # Bound the wait explicitly. The SDK defaults to timeout=600s with
+        # max_retries=2 — a single frame may therefore hold for half an hour,
+        # and nothing upstream is prepared to wait that long.
+        #
+        # Observed 2026-09-06 on the deployment: DeepInfra answered one frame
+        # with a 500, the SDK logged "Retrying request in 0.432861 seconds",
+        # and the retry did not return for 4m25s. The tick eventually succeeded,
+        # so nothing was logged as an error anywhere — it simply arrived four
+        # and a half minutes after the frame it described, by which time the
+        # user had moved on and the browser's tickBusy had been stuck the whole
+        # time (which also silences the poll heartbeat that keeps Render awake).
+        #
+        # A vision call that has not answered in 30s is not going to say
+        # anything useful about a frame that old. Failing fast turns it into a
+        # visible tick error and the NEXT frame is captioned instead, which is
+        # the outcome that actually serves someone whose hands are busy.
         self.vision_client = AsyncOpenAI(
-            api_key=settings.DEEPINFRA_API_KEY, base_url=DEEPINFRA_BASE_URL
+            api_key=settings.DEEPINFRA_API_KEY, base_url=DEEPINFRA_BASE_URL,
+            timeout=VISION_TIMEOUT_S, max_retries=VISION_MAX_RETRIES,
         )
         self.vision_model = settings.DEEPINFRA_VISION_MODEL
 
